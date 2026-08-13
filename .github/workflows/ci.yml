@@ -1,0 +1,131 @@
+name: CI/CD
+
+# Fork-owned pipeline for github.com/HomeProjectsLab/blocky.
+# - push main   : verify -> upload binary artifacts + push :latest / :sha images
+# - pull_request: verify -> build binaries + image (no push)
+# - tag v*      : verify -> draft release with binary assets + push :semver / :latest images
+# - dispatch    : same as a branch push (no release)
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY_IMAGE: ghcr.io/homeprojectslab/blocky
+
+jobs:
+  # Fast gate: lint + unit tests (e2e excluded via the Makefile label filter, so
+  # no docker/network needed here). Build and push wait on this.
+  verify:
+    name: verify (${{ matrix.task }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [lint, test]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make ${{ matrix.task }}
+        env:
+          GO_SKIP_GENERATE: 1
+
+  # Cross-compiled binaries. Always uploaded as workflow artifacts; on a v* tag
+  # goreleaser also publishes them as (draft) GitHub Release assets. ldflags
+  # inject the real version + build time so `blocky version` is never "undefined".
+  binaries:
+    name: binaries
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # goreleaser creates the GitHub Release on tags
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: latest
+          args: ${{ startsWith(github.ref, 'refs/tags/') && 'release --clean' || 'release --snapshot --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blocky-binaries
+          path: |
+            dist/*.tar.gz
+            dist/*_checksums.txt
+
+  # Multi-arch image. The Dockerfile pins the build stage to $BUILDPLATFORM and
+  # cross-compiles (CGO_ENABLED=0) to each target, and the final stage is scratch
+  # with nothing executed at build time, so no QEMU emulation is needed.
+  docker:
+    name: docker
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build vars
+        id: vars
+        shell: bash
+        run: |
+          echo "version=$(git describe --always --tags)" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date --iso-8601=seconds)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          # source label -> "linked to repo" in the GitHub packages UI
+          labels: |
+            org.opencontainers.image.source=https://github.com/HomeProjectsLab/blocky
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # Skipped on pull_request: no push, and forked PRs get no packages:write.
+      - name: Login to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            BUILD_TIME=${{ steps.vars.outputs.build_time }}
+            DOC_PATH=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

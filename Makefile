@@ -4,7 +4,7 @@
 VERSION?=$(shell git describe --always --tags)
 BUILD_TIME?=$(shell date --iso-8601=seconds)
 DOC_PATH?="main"
-DOCKER_IMAGE_NAME=spx01/blocky
+DOCKER_IMAGE_NAME=ghcr.io/homeprojectslab/blocky
 
 BINARY_NAME:=blocky
 BIN_OUT_DIR?=bin
