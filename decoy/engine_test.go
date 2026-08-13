@@ -158,6 +158,9 @@ var _ = Describe("Engine", func() {
 
 			cfg.MissChaffPct = 0 // keep this test 1:1 (fan-out toggles have their own tests)
 			cfg.ClusterPct = 0
+			cfg.CohortPct = 0     // no async recorded-cohort fan-out (has its own test)
+			cfg.ChatterPct = 0    // no device-chatter branch (has its own test)
+			cfg.FailChaffPct = 0  // no fail-chaff branch (has its own test)
 			cfg.DualStackPct = 0  // no A+AAAA pairing fan-out either
 			cfg.ShadowTTL = false // same domain repeated 20x would otherwise self-suppress
 
@@ -178,7 +181,8 @@ var _ = Describe("Engine", func() {
 				Expect(req.Decoy).Should(BeTrue())
 				Expect(req.Req.Question).ShouldNot(BeEmpty())
 				Expect(req.Req.Question[0].Qtype).Should(
-					BeElementOf(dns.TypeA, dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB))
+					BeElementOf(dns.TypeA, dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB,
+						dns.TypeTXT, dns.TypeMX, dns.TypeNS, dns.TypeSRV))
 			}
 		})
 	})
@@ -257,6 +261,7 @@ var _ = Describe("Engine", func() {
 	Describe("reactive rate", func() {
 		It("emits faster under live load than when quiet, and varies", func() {
 			eng := NewEngine(cfg, newSourceDB(nil), nil)
+			eng.cfg.PersonaCover = false // exercise the reactive fallback path
 			eng.cfg.ReactiveVolume = true
 			eng.cfg.CompanionPct = 0 // isolate rate from companion side effects
 			eng.cfg.DiurnalShaping = false
@@ -288,6 +293,7 @@ var _ = Describe("Engine", func() {
 
 		It("falls back to the diurnal/base path at cold start", func() {
 			eng := NewEngine(cfg, newSourceDB(nil), nil)
+			eng.cfg.PersonaCover = false // exercise the reactive fallback path
 			eng.cfg.ReactiveVolume = true
 			eng.cfg.QueriesPerMinute = 4
 			eng.cfg.DiurnalShaping = false

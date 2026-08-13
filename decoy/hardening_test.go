@@ -183,6 +183,7 @@ var _ = Describe("Egress hardening", func() {
 			cfg.QueriesPerMinute = 4
 			cfg.DiurnalShaping = false
 			cfg.ReactiveVolume = false
+			cfg.PersonaCover = false // this test exercises the base-rate path, not the persona curve
 			eng := NewEngine(cfg, nil, nil)
 
 			at := func(h int) time.Time { return time.Date(2026, 1, 1, h, 0, 0, 0, time.UTC) }

@@ -190,6 +190,8 @@ var _ = Describe("Obfuscation techniques", func() {
 			Expect(e).Should(Succeed())
 
 			cfg.MissChaffPct = 0
+			cfg.ChatterPct = 0   // no lone device-chatter emission
+			cfg.FailChaffPct = 0 // no lone fail-chaff emission
 			cfg.ClusterPct = 100
 
 			for trial := 0; trial < 25; trial++ {

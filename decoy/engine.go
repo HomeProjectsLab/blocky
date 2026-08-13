@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"strings"
@@ -47,6 +49,26 @@ const (
 	// ttlFallbackSecs is the suppression window applied when a decoy's response
 	// carries no answer TTL (NXDOMAIN / empty) — a short negative-cache stand-in.
 	ttlFallbackSecs = 30
+	// heartbeatInterval is the fixed-ish cadence (#3) of connectivity/NTP chatter
+	// fired by heartbeatLoop; jittered ± heartbeatJitterMs so it isn't a clean tick.
+	heartbeatInterval = 55 * time.Second
+	heartbeatJitterMs = 20000
+)
+
+// Per-client persona attribution (#6) + adaptive back-off (#7) tuning.
+const (
+	// personaPoolSize bounds the rotating pool of sampled real-client personas.
+	// A household has few clients, so the pool fills fast and then stops sampling.
+	personaPoolSize = 8
+	// Adaptive back-off: over the last backoffWindow decoy resolve outcomes, if the
+	// error rate exceeds backoffErrThreshold the rate multiplier is cut by
+	// backoffDecay (floored at backoffMin); otherwise it recovers by backoffRecover.
+	backoffWindow       = 20
+	backoffMinSamples   = 10
+	backoffErrThreshold = 0.30
+	backoffDecay        = 0.80
+	backoffRecover      = 0.05
+	backoffMin          = 0.15
 )
 
 // decoy source selectors (T3 three-way weighted mix in nextQuery).
@@ -100,16 +122,72 @@ var clusterCompanions = []string{
 	"cdn.cookielaw.org", "widget.intercom.io", "js.stripe.com", "www.gstatic.com",
 }
 
+// deviceChatter (#3) is the non-web DNS a real device emits in the background:
+// captive-portal / connectivity checks, NTP pools, and OS/app telemetry-ish
+// endpoints. A share of emissions (ChatterPct) draws from here so the box's
+// egress isn't 100% browsing. Blocked telemetry names are dropped at the
+// resolveOne chokepoint like any other decoy — no leak.
+//
+//nolint:gochecknoglobals
+var deviceChatter = []string{
+	// connectivity / captive-portal checks
+	"captive.apple.com", "connectivitycheck.gstatic.com", "clients3.google.com",
+	"www.msftconnecttest.com", "www.msftncsi.com", "detectportal.firefox.com",
+	"network-test.debian.org", "nmcheck.gnome.org",
+	// NTP
+	"pool.ntp.org", "time.apple.com", "time.windows.com", "time.google.com",
+	"time.cloudflare.com", "time.android.com",
+	// OS / app telemetry-ish
+	"push.apple.com", "settings-win.data.microsoft.com", "incoming.telemetry.mozilla.org",
+	"app-measurement.com", "firebaseinstallations.googleapis.com", "mtalk.google.com",
+}
+
+// heartbeatHosts are the subset of device chatter a real host repeats on a
+// fixed-ish TIMER (connectivity + NTP), fired by heartbeatLoop rather than the
+// Poisson emit path — periodicity itself is part of their realism.
+//
+//nolint:gochecknoglobals
+var heartbeatHosts = []string{
+	"captive.apple.com", "connectivitycheck.gstatic.com", "www.msftconnecttest.com",
+	"detectportal.firefox.com", "pool.ntp.org", "time.google.com",
+}
+
+// deadTLDs are real, resolvable TLDs under which a RANDOM second-level label is
+// almost certainly unregistered — a plausible-looking NXDOMAIN (#4 fail chaff),
+// unlike .invalid which no real client ever queries.
+//
+//nolint:gochecknoglobals
+var deadTLDs = []string{"com", "net", "org", "info", "xyz", "io", "co"}
+
 // ResolveFunc runs a request through the server's resolver chain (same path
 // real queries take, so decoys follow the active group strategy/recursion).
 type ResolveFunc func(ctx context.Context, req *model.Request) (*model.Response, error)
+
+// Source is the read side of the decoy engine's query-log store. The production
+// implementation is *querylog.DecoySource; tests inject a mock. Defined here (at
+// the consumer) only so the structural-emission mechanics have deterministic
+// unit coverage without a live sqlite fixture.
+type Source interface {
+	SeedIfEmpty(io.Reader) (int, error)
+	HourlyRealCounts() ([24]int64, error)
+	SampleList() (string, error)
+	SampleCorpus() (string, error)
+	SampleRecentReal(limit int) ([]querylog.RealQuery, error)
+	SampleFingerprintForName(name string) (querylog.FpSample, error)
+	IsBlockedDomain(domain string) (bool, error)
+	SampleCohort() ([]querylog.CohortMember, error)
+	NextInSession(primaryDomain string) (string, error)
+	SessionSeed() (string, error)
+	RevisitInterval(domain string) (time.Duration, bool)
+	SampleClient() (querylog.ClientPersona, error)
+}
 
 // Engine emits background noise queries at a randomized rate, mixing replayed
 // real queries with entries from the static list. Every emitted request is
 // marked Bypass (skip cache) and Decoy (excluded from dashboards).
 type Engine struct {
 	cfg     config.DecoyConfig
-	source  *querylog.DecoySource
+	source  Source
 	resolve ResolveFunc
 	hub     *querylog.Hub // live real-query tap; nil (non-sqlite) → historical fallback
 	logger  *logrus.Entry
@@ -118,6 +196,13 @@ type Engine struct {
 
 	realMu    sync.Mutex  // guards realTimes (tap goroutine writes, emit loop reads)
 	realTimes []time.Time // timestamps of recent real queries within realWindow
+
+	sessMu        sync.Mutex // guards session-walk state (#1)
+	sessionDomain string     // current session's eTLD+1 anchor ("" = start fresh)
+	sessionSteps  int        // hops taken in the current session (capped by sessionCap)
+
+	dueMu  sync.Mutex           // guards dueMap (#5 revisit cadence)
+	dueMap map[string]time.Time // domain -> next-due emission time (bounded by revisitMapCap)
 
 	ttlMu       sync.Mutex           // guards ttlSuppress (T5 shadow-TTL)
 	ttlSuppress map[string]time.Time // (name/qtype) -> earliest re-egress time
@@ -129,9 +214,16 @@ type Engine struct {
 	edgeDay  string     // yyyy-mm-dd the current edge offsets were drawn for
 	startOff int        // today's start-edge jitter, minutes
 	endOff   int        // today's end-edge jitter, minutes
+
+	personaMu sync.Mutex               // guards personas (#6 per-client attribution)
+	personas  []querylog.ClientPersona // small rotating pool of sampled real clients
+
+	backoffMu sync.Mutex // guards adaptive-backoff state (#7)
+	outcomes  []bool     // ring of recent decoy resolve outcomes (true = failed)
+	backoff   float64    // current decoy-rate multiplier in [backoffMin, 1]
 }
 
-func NewEngine(cfg config.DecoyConfig, source *querylog.DecoySource, resolve ResolveFunc) *Engine {
+func NewEngine(cfg config.DecoyConfig, source Source, resolve ResolveFunc) *Engine {
 	return &Engine{
 		cfg:         cfg,
 		source:      source,
@@ -141,6 +233,8 @@ func NewEngine(cfg config.DecoyConfig, source *querylog.DecoySource, resolve Res
 		now:         time.Now,
 		ttlSuppress: map[string]time.Time{},
 		cookies:     map[string]string{},
+		dueMap:      map[string]time.Time{},
+		backoff:     1,
 	}
 }
 
@@ -189,6 +283,10 @@ func (e *Engine) Run(ctx context.Context) {
 		go e.tapLoop(ctx, ch)
 	}
 
+	if e.cfg.ChatterPct > 0 {
+		go e.heartbeatLoop(ctx) // #3: connectivity/NTP heartbeats on a fixed-ish timer
+	}
+
 	timer := time.NewTimer(e.nextInterval())
 	defer timer.Stop()
 
@@ -211,8 +309,8 @@ func (e *Engine) Run(ctx context.Context) {
 // nextInterval draws an exponential inter-arrival time (Poisson process) for the
 // current effective rate.
 func (e *Engine) nextInterval() time.Duration {
-	qpm := e.effectiveQPM()
-	if qpm < 0.01 { //nolint:mnd // floor so meanSeconds never explodes
+	qpm := e.effectiveQPM() * e.backoffFactor() // #7: throttle under upstream strain
+	if qpm < 0.01 {                             //nolint:mnd // floor so meanSeconds never explodes
 		qpm = 0.01
 	}
 
@@ -221,20 +319,33 @@ func (e *Engine) nextInterval() time.Duration {
 	return time.Duration(e.rnd.ExpFloat64() * meanSeconds * float64(time.Second))
 }
 
-// effectiveQPM is the decoy rate for the next interval. With ReactiveVolume on
-// and enough live signal it tracks the recent real QPS ± a random masking term
-// (see reactiveQPM); otherwise it uses the configured base scaled by the 7-day
-// historical diurnal shape (the cold-start / quiet fallback, today's behaviour).
+// effectiveQPM is the decoy rate for the next interval.
 //
-// ponytail: reactive volume inherently leaks the real activity LEVEL to an
-// on-path observer — the decoy rate rises and falls with real QPS. That is the
-// deliberate trade: we hide WHICH queries are real, not THAT the box is busy.
-// Known design bound; hiding the level too would need constant-rate cover
-// traffic (a fixed bandwidth cost we chose not to pay on a home box).
+// With PersonaCover on (#8, the default) it is COMPENSATING cover: the decoy
+// rate fills the gap between a household diurnal TARGET curve and the live real
+// rate — decoy_rate = max(0, targetCurve(t) − recentRealQPM) — so TOTAL egress
+// tracks the persona curve regardless of real activity. This hides the activity
+// LEVEL, not just which queries are real, without ever delaying a real query.
+// Residual: real usage above the peak ceiling still spikes total egress (see the
+// personaCover field comment) — the curve hides level only up to the peak.
+//
+// With PersonaCover off it falls back to the reactive/diurnal path: ReactiveVolume
+// tracks recent real QPS ± a masking term, else the base scaled by the historical
+// diurnal shape. That path leaks the activity level (the decoy rate rises with
+// real QPS) — the reason PersonaCover supersedes it by default.
 func (e *Engine) effectiveQPM() float64 {
 	// T10: outside active hours we don't stop — we drop to a low always-on floor.
 	if !e.withinActiveHours(e.now()) {
 		return e.cfg.OffHoursFloorQPM
+	}
+
+	if e.cfg.PersonaCover {
+		cover := e.targetCurve(e.now()) - e.recentRealQPM()
+		if cover < 0 {
+			cover = 0 // real usage already meets/exceeds the target — no cover needed
+		}
+
+		return cover
 	}
 
 	base := e.cfg.QueriesPerMinute
@@ -249,6 +360,34 @@ func (e *Engine) effectiveQPM() float64 {
 	}
 
 	return base * e.diurnalFactor()
+}
+
+// personaShape is a generic household activity shape (relative, 0..1) indexed by
+// LOCAL hour-of-day: quiet pre-dawn, a morning rise, a sustained daytime plateau,
+// and an evening peak. targetCurve scales it between the configured trough/peak.
+// A fixed table (not learned) is the whole point of #8: the persona is a STABLE
+// generic household, so the box's own diurnal signature can't be read off it.
+//
+//nolint:gochecknoglobals
+var personaShape = [24]float64{
+	0.15, 0.10, 0.07, 0.05, 0.05, 0.10, 0.25, 0.50, 0.80, 0.85, 0.75, 0.70, // 00-11
+	0.72, 0.70, 0.68, 0.70, 0.75, 0.85, 0.95, 1.00, 0.95, 0.80, 0.50, 0.25, // 12-23
+}
+
+// targetCurve is the persona's target TOTAL egress (queries/min) for t's local
+// hour, interpolated between TargetQPMTrough and TargetQPMPeak by personaShape.
+func (e *Engine) targetCurve(t time.Time) float64 {
+	trough, peak := e.cfg.TargetQPMTrough, e.cfg.TargetQPMPeak
+	if peak < trough {
+		peak = trough
+	}
+
+	return trough + personaShape[t.Hour()]*(peak-trough)
+}
+
+// recentRealQPM is the live real-query rate (queries/min) over realWindow.
+func (e *Engine) recentRealQPM() float64 {
+	return float64(e.recentRealCount()) / realWindow.Seconds() * 60.0
 }
 
 // reactiveQPM returns (live real-query count in the window, target decoy QPM).
@@ -421,24 +560,32 @@ func (e *Engine) activeEdges(t time.Time) (int, int) {
 
 // decoyQuery is one synthetic lookup to emit. qclass 0 means default IN.
 type decoyQuery struct {
-	name   string
-	qtype  uint16
-	qclass uint16
-	replay bool // sourced from the real-query replay pool
+	name         string
+	qtype        uint16
+	qclass       uint16
+	replay       bool // sourced from the real-query replay pool
+	allowBlocked bool // recorded-cohort member: egress even if the box would block it (shadow-completion parity)
+	delayMs      int  // recorded page-load offset from the cohort's first member (cohort emission only)
 }
 
-// emit builds the decoy queries for one emission and resolves each through the
-// chain. Normally one query; techniques 5/6 may replace or fan it out.
-func (e *Engine) emit(ctx context.Context) {
-	q := e.nextQuery()
-	if q.name == "" {
-		return
-	}
+// sessionCap bounds a synthetic session's length: after this many topical hops
+// we force a fresh reseed, so a decoy "session" never walks an implausibly long
+// chain an observer could distinguish from real human browsing.
+const sessionCap = 8
 
+// emit builds the decoy queries for one emission and resolves each through the
+// chain. The emission mix, in order:
+//   - T9 miss chaff (lone NXDOMAIN-ish lookup)     — MissChaffPct
+//   - 7G recorded cohort (real page-load texture)  — CohortPct  (structural)
+//   - session-coherent synthetic single/cluster    — remainder  (structural)
+//
+// The structural share walks plausible SESSIONS (#1) and honours REVISIT cadence
+// (#5); persona cover (#8) shapes the RATE at which emit is called, not its
+// content. Cohorts are the recorded texture; sessions are the sequence.
+func (e *Engine) emit(ctx context.Context) {
 	// technique 5 / T9: NXDOMAIN/miss chaff — a word-like random label under a
-	// PUBLIC/list-or-corpus parent, never under the real domain we just replayed
-	// (that would advertise the real parent to its authoritative NS). A miss is a
-	// lone lookup, so it skips the dual-stack/cluster fan-out below.
+	// PUBLIC/list-or-corpus parent. A miss is a lone lookup, so it skips the
+	// structural cohort/cluster paths below.
 	if e.rndPct(e.cfg.MissChaffPct) {
 		parent := e.missChaffParent()
 		if parent == "" {
@@ -450,6 +597,35 @@ func (e *Engine) emit(ctx context.Context) {
 		return
 	}
 
+	// #3: a share of emissions is device background chatter (connectivity/NTP/
+	// telemetry/PTR) rather than browsing — a lone non-web lookup.
+	if e.rndPct(e.cfg.ChatterPct) {
+		e.resolveOne(ctx, e.chatterQuery())
+
+		return
+	}
+
+	// #4 failure realism: a share deliberately queries a likely-NXDOMAIN name so
+	// decoys don't always resolve (real traffic carries a background miss rate).
+	if e.rndPct(e.cfg.FailChaffPct) {
+		e.resolveOne(ctx, decoyQuery{name: e.deadName(), qtype: dns.TypeA})
+
+		return
+	}
+
+	// 7G: a share of emissions replays a whole RECORDED page-load cohort with its
+	// real per-member timing (incl. blocked members). SUPERSEDES the synthetic
+	// clusterOf as the primary cohort source; clusterOf is the cold-start fallback
+	// below when no real cohort is available.
+	if e.rndPct(e.cfg.CohortPct) && e.emitCohort(ctx) {
+		return
+	}
+
+	q := e.nextStructuralQuery()
+	if q.name == "" {
+		return
+	}
+
 	if q.replay && e.cfg.ReplayMutate && e.rnd.Intn(2) == 0 { //nolint:mnd // 0.5 mutation probability
 		q = e.mutate(q) // technique 2: never a byte-identical echo
 	}
@@ -458,7 +634,7 @@ func (e *Engine) emit(ctx context.Context) {
 
 	switch {
 	case e.rndPct(e.cfg.ClusterPct):
-		queries = e.clusterOf(q) // technique 6: small related burst
+		queries = e.clusterOf(q) // technique 6: small related burst (synthetic cohort)
 	default:
 		queries = e.maybeDualStack(q) // T12: browser-style A+AAAA pair
 	}
@@ -466,6 +642,202 @@ func (e *Engine) emit(ctx context.Context) {
 	for _, cq := range queries {
 		e.resolveOne(ctx, cq)
 	}
+}
+
+// emitCohort replays a recorded real page-load cohort as chaff: its members in
+// recorded order, each fired at its own recorded page-load offset (emitBurstTimed),
+// primary first. Blocked members are included and egressed (allowBlocked) — real
+// cohorts are wire-complete via shadow-completion, so decoy cohorts must match.
+// Returns false at cold start (no recorded cohort yet) so emit falls back to the
+// synthetic path. Anchors the session walk to the cohort's real primary.
+func (e *Engine) emitCohort(ctx context.Context) bool {
+	if e.source == nil {
+		return false
+	}
+
+	cohort, err := e.source.SampleCohort()
+	if err != nil {
+		e.logger.WithError(err).Debug("cohort sample failed")
+
+		return false
+	}
+
+	if len(cohort) == 0 {
+		return false // cold start
+	}
+
+	e.anchorSession(cohort[0].Domain) // the real primary re-anchors the session sequence
+
+	qs := make([]decoyQuery, 0, len(cohort))
+	for _, m := range cohort {
+		qs = append(qs, decoyQuery{name: m.Domain, qtype: m.Qtype, allowBlocked: m.Blocked, delayMs: m.DelayMs})
+	}
+
+	go e.emitBurstTimed(ctx, qs)
+
+	return true
+}
+
+// emitBurstTimed resolves a recorded cohort spread across its ORIGINAL page-load
+// timeline: each member waits until its recorded delayMs offset from the first.
+// Members are already in ascending-delay order (primary first, delayMs 0).
+func (e *Engine) emitBurstTimed(ctx context.Context, qs []decoyQuery) {
+	prev := 0
+	for _, q := range qs {
+		wait := q.delayMs - prev
+		if wait < 0 {
+			wait = 0 // out-of-order/clock-skew guard
+		}
+
+		prev = q.delayMs
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(wait) * time.Millisecond):
+		}
+
+		e.resolveOne(ctx, q)
+	}
+}
+
+// nextStructuralQuery picks the domain for one synthetic (non-cohort) emission.
+// With SessionCoherence it walks a plausible session chain; otherwise (or when
+// the walk has no successor) it falls back to a revisit-biased source pick.
+func (e *Engine) nextStructuralQuery() decoyQuery {
+	if e.cfg.SessionCoherence && e.source != nil {
+		if dom := e.walkSession(); dom != "" {
+			return decoyQuery{name: dom, qtype: e.realQtype()}
+		}
+	}
+
+	return e.reviseOrNext()
+}
+
+// walkSession advances the current session (#1): with probability StepPct it
+// steps to a topically-plausible successor of the current anchor via
+// NextInSession; on no successor, a reached session cap, or a StepPct miss it
+// reseeds a fresh session via SessionSeed. Returns "" only when even reseeding
+// has no data (cold start) so the caller falls back to a plain source pick.
+func (e *Engine) walkSession() string {
+	e.sessMu.Lock()
+	cur, steps := e.sessionDomain, e.sessionSteps
+	e.sessMu.Unlock()
+
+	if cur != "" && steps < sessionCap && e.rndPct(e.cfg.StepPct) {
+		if next, err := e.source.NextInSession(cur); err == nil && next != "" {
+			e.setSession(next, steps+1)
+
+			return next
+		}
+	}
+
+	seed, err := e.source.SessionSeed()
+	if err != nil || seed == "" {
+		return "" // cold start — caller falls back
+	}
+
+	e.setSession(seed, 1)
+
+	return seed
+}
+
+// anchorSession re-points the session walk at a real domain's eTLD+1 (used when a
+// recorded cohort is emitted, so the next synthetic hop follows from it). No-op
+// when session coherence is off or the name has no registrable domain.
+func (e *Engine) anchorSession(name string) {
+	if !e.cfg.SessionCoherence {
+		return
+	}
+
+	reg, err := publicsuffix.EffectiveTLDPlusOne(strings.TrimSuffix(name, "."))
+	if err != nil || reg == "" {
+		return
+	}
+
+	e.setSession(reg, 1)
+}
+
+func (e *Engine) setSession(domain string, steps int) {
+	e.sessMu.Lock()
+	e.sessionDomain = domain
+	e.sessionSteps = steps
+	e.sessMu.Unlock()
+}
+
+// revisitMapCap bounds the per-domain next-due map (#5) so it can't grow with the
+// corpus. A few hundred tracked domains is plenty to give the frequently-revisited
+// ones a human cadence; the rest flow through the normal random source picks.
+const revisitMapCap = 256
+
+// reviseOrNext returns the next synthetic domain, biased toward REVISIT cadence
+// (#5): if a tracked domain is due per its learned interval, emit it now;
+// otherwise take a normal weighted source pick and schedule its next due time.
+func (e *Engine) reviseOrNext() decoyQuery {
+	if e.cfg.RevisitCadence {
+		if d := e.dueDomain(); d != "" {
+			return decoyQuery{name: d, qtype: e.realQtype()}
+		}
+	}
+
+	q := e.nextQuery()
+	if e.cfg.RevisitCadence && q.name != "" {
+		e.scheduleRevisit(q.name)
+	}
+
+	return q
+}
+
+// dueDomain returns a tracked domain whose learned revisit interval has elapsed
+// (rescheduling it), or "" if none is due. Cheap linear scan of a bounded map.
+func (e *Engine) dueDomain() string {
+	now := e.now()
+
+	e.dueMu.Lock()
+	defer e.dueMu.Unlock()
+
+	for d, due := range e.dueMap {
+		if !now.Before(due) {
+			e.scheduleRevisitLocked(d, now)
+
+			return d
+		}
+	}
+
+	return ""
+}
+
+func (e *Engine) scheduleRevisit(domain string) {
+	e.dueMu.Lock()
+	defer e.dueMu.Unlock()
+
+	e.scheduleRevisitLocked(domain, e.now())
+}
+
+// scheduleRevisitLocked sets domain's next-due time from its learned revisit
+// interval (± jitter). A domain with no learned cadence is not tracked (dropped),
+// so it just keeps flowing through random picks. Evicts an arbitrary entry when
+// the map is at cap.
+func (e *Engine) scheduleRevisitLocked(domain string, now time.Time) {
+	iv, ok := e.source.RevisitInterval(domain)
+	if !ok {
+		delete(e.dueMap, domain)
+
+		return
+	}
+
+	jitter := 1 + (e.rnd.Float64()-0.5)*0.5 //nolint:mnd // ±25% cadence jitter
+	due := now.Add(time.Duration(float64(iv) * jitter))
+
+	if _, tracked := e.dueMap[domain]; !tracked && len(e.dueMap) >= revisitMapCap {
+		for k := range e.dueMap { // evict one arbitrary entry to stay bounded
+			delete(e.dueMap, k)
+
+			break
+		}
+	}
+
+	e.dueMap[domain] = due
 }
 
 // missChaffParent draws the parent domain for a miss-chaff query. It prefers the
@@ -518,7 +890,12 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 	// chaff. Source sampling already filters, but companions, dual-stack siblings
 	// and miss-chaff parents don't go through that filter — guard the single
 	// egress chokepoint. Exact-match only (same ceiling as IsBlockedDomain).
-	if e.isBlockedDecoy(q.name) {
+	//
+	// Exception: recorded-cohort members (allowBlocked) DO egress even when
+	// blocked — real page-load cohorts are made wire-complete by shadow-completion
+	// in the resolver, so a decoy cohort that dropped its blocked members would be
+	// distinguishable from a real one. 7G deliberately mirrors the real cohort.
+	if !q.allowBlocked && e.isBlockedDecoy(q.name) {
 		return
 	}
 
@@ -534,22 +911,58 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 		msg.Question[0].Qclass = q.qclass
 	}
 
+	// #4 transport diversity: a share of decoys present as TCP. See the tcpPct
+	// limitation on Protocol — this stamps the request (client-facing log/rate
+	// shape); the actual blocky→upstream transport is upstream-config-global.
+	proto := model.RequestProtocolUDP
+	if e.rndPct(e.cfg.TCPPct) {
+		proto = model.RequestProtocolTCP
+	}
+
+	// #6 per-client persona attribution: stamp a sampled real client's IP (and, with
+	// FingerprintMatch, that client's OPT shape) so chaff is attributed to plausible
+	// real clients and each client's wire profile stays consistent. Falls back to
+	// the synthetic split-upstream identity + name-keyed fingerprint when disabled
+	// or at cold start.
+	persona, attributed := e.pickPersona()
+
+	ip := e.clientIP()
+	if attributed {
+		if p := net.ParseIP(persona.IP); p != nil {
+			ip = p
+		} else {
+			attributed = false
+		}
+	}
+
 	req := &model.Request{
-		ClientIP:  e.clientIP(),
+		ClientIP:  ip,
 		Req:       msg,
-		Protocol:  model.RequestProtocolUDP,
+		Protocol:  proto,
 		RequestTS: e.now(),
 		Bypass:    true,
 		Decoy:     true,
 	}
 
-	e.applyFingerprint(req)
+	if attributed && e.cfg.FingerprintMatch {
+		e.stampFingerprint(req, persona.Fp)
+	} else {
+		e.applyFingerprint(req)
+	}
 
 	resp, err := e.resolve(ctx, req)
 	if err != nil {
 		e.logger.WithError(err).Debug("decoy query failed")
+
+		// #4: real stubs retry on timeout — occasionally re-issue the failed decoy.
+		// ponytail: single immediate retry, no separate backoff; the request object
+		// is reused (a retry is byte-identical to the original by design).
+		if e.rnd.Intn(2) == 0 { //nolint:mnd // ~50% retry on failure
+			resp, err = e.resolve(ctx, req)
+		}
 	}
 
+	e.noteOutcome(err != nil) // #7 feed the adaptive-backoff window
 	e.noteTTL(key, resp)
 
 	decoyQueriesTotal.Inc()
@@ -703,6 +1116,144 @@ func (e *Engine) clientIP() net.IP {
 	return net.ParseIP(splitClientIPs[e.rnd.Intn(len(splitClientIPs))])
 }
 
+// chatterQuery (#3) returns one device-background lookup: mostly a name from the
+// embedded deviceChatter set, ~20% a PTR reverse lookup of a random RFC1918
+// address (real hosts reverse-resolve LAN peers and their own gateway).
+func (e *Engine) chatterQuery() decoyQuery {
+	if e.rnd.Intn(5) == 0 { //nolint:mnd // ~20% PTR reverse lookup
+		return decoyQuery{name: e.randPTRName(), qtype: dns.TypePTR}
+	}
+
+	return decoyQuery{name: deviceChatter[e.rnd.Intn(len(deviceChatter))], qtype: e.realQtype()}
+}
+
+// randPTRName builds an in-addr.arpa PTR name for a random 192.168.x.y host (the
+// common home range) — a plausible LAN reverse lookup.
+func (e *Engine) randPTRName() string {
+	return fmt.Sprintf("%d.%d.168.192.in-addr.arpa.", e.rnd.Intn(256), e.rnd.Intn(256)) //nolint:mnd // octet range
+}
+
+// deadName (#4) returns a likely-NXDOMAIN name: a word-like random label under a
+// real TLD, almost certainly unregistered.
+func (e *Engine) deadName() string {
+	return e.randLabel() + "." + deadTLDs[e.rnd.Intn(len(deadTLDs))]
+}
+
+// heartbeatLoop (#3) fires a connectivity/NTP lookup on a fixed-ish timer
+// (heartbeatInterval ± jitter) rather than the Poisson emit path — the periodicity
+// is part of these checks' realism. Runs until ctx is cancelled.
+func (e *Engine) heartbeatLoop(ctx context.Context) {
+	for {
+		d := heartbeatInterval + time.Duration(e.rnd.Intn(2*heartbeatJitterMs)-heartbeatJitterMs)*time.Millisecond
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(d):
+		}
+
+		e.resolveOne(ctx, decoyQuery{name: heartbeatHosts[e.rnd.Intn(len(heartbeatHosts))], qtype: dns.TypeA})
+	}
+}
+
+// pickPersona (#6) returns a sampled real-client persona to attribute a decoy to,
+// and ok=false when attribution is off / no real clients exist yet. Lazily fills a
+// small bounded pool from the source (one sample per call until full, then stops),
+// then draws from it, so a given real client recurs with a stable IP/cookie/fp.
+//
+// ponytail: up to personaPoolSize DB samples over the engine's life, then none —
+// no eviction (a household has few clients). Reset the pool if long-lived churn
+// ever matters.
+func (e *Engine) pickPersona() (querylog.ClientPersona, bool) {
+	if !e.cfg.PersonaAttribution || e.source == nil {
+		return querylog.ClientPersona{}, false
+	}
+
+	e.personaMu.Lock()
+	defer e.personaMu.Unlock()
+
+	if len(e.personas) < personaPoolSize {
+		if p, err := e.source.SampleClient(); err == nil && p.IP != "" && !hasPersona(e.personas, p.IP) {
+			e.personas = append(e.personas, p)
+		}
+	}
+
+	if len(e.personas) == 0 {
+		return querylog.ClientPersona{}, false
+	}
+
+	return e.personas[e.rnd.Intn(len(e.personas))], true
+}
+
+func hasPersona(ps []querylog.ClientPersona, ip string) bool {
+	for _, p := range ps {
+		if p.IP == ip {
+			return true
+		}
+	}
+
+	return false
+}
+
+// noteOutcome (#7) records a decoy resolve outcome in the rolling backoff window
+// and adjusts the rate multiplier: when the recent error rate exceeds the
+// threshold the multiplier is cut multiplicatively (floored at backoffMin);
+// otherwise it recovers slowly toward 1. No-op when adaptive backoff is off.
+//
+// ponytail: best-effort throttle only. Decoys share the resolver chain, so we
+// can't steer a specific decoy away from a failing upstream (same limitation as
+// clientIP); reducing the aggregate rate is what's reachable, and it keeps the
+// noise engine from piling onto a strained/rate-limiting upstream.
+func (e *Engine) noteOutcome(failed bool) {
+	if !e.cfg.AdaptiveBackoff {
+		return
+	}
+
+	e.backoffMu.Lock()
+	defer e.backoffMu.Unlock()
+
+	e.outcomes = append(e.outcomes, failed)
+	if len(e.outcomes) > backoffWindow {
+		e.outcomes = e.outcomes[len(e.outcomes)-backoffWindow:]
+	}
+
+	if len(e.outcomes) < backoffMinSamples {
+		return
+	}
+
+	errs := 0
+	for _, f := range e.outcomes {
+		if f {
+			errs++
+		}
+	}
+
+	if float64(errs)/float64(len(e.outcomes)) > backoffErrThreshold {
+		e.backoff *= backoffDecay
+		if e.backoff < backoffMin {
+			e.backoff = backoffMin
+		}
+	} else {
+		e.backoff += backoffRecover
+		if e.backoff > 1 {
+			e.backoff = 1
+		}
+	}
+}
+
+// backoffFactor is the current decoy-rate multiplier (1 when adaptive backoff is
+// off), applied to the effective QPM in nextInterval.
+func (e *Engine) backoffFactor() float64 {
+	if !e.cfg.AdaptiveBackoff {
+		return 1
+	}
+
+	e.backoffMu.Lock()
+	defer e.backoffMu.Unlock()
+
+	return e.backoff
+}
+
 // applyFingerprint (technique 3) rebuilds the wire shape of a sampled real query
 // onto the decoy: qclass, 0x20 case, and a full OPT record (buffer size, DO, and
 // the EDNS option codes IN THE SAMPLED ORDER — option order is the discriminating
@@ -719,6 +1270,17 @@ func (e *Engine) applyFingerprint(req *model.Request) {
 	fp, err := e.source.SampleFingerprintForName(req.Req.Question[0].Name)
 	if err != nil {
 		return // query error — leave the plain decoy
+	}
+
+	e.stampFingerprint(req, fp)
+}
+
+// stampFingerprint rebuilds fp's wire shape onto req: qclass, 0x20 case, and a
+// full OPT record (buffer size, DO, EDNS option codes in the sampled order). Used
+// by both the name-keyed path (applyFingerprint) and the per-client persona path.
+func (e *Engine) stampFingerprint(req *model.Request, fp querylog.FpSample) {
+	if len(req.Req.Question) == 0 {
+		return
 	}
 
 	if fp.QClass != 0 && fp.QClass != dns.ClassINET {
@@ -1071,20 +1633,30 @@ func (e *Engine) randomize0x20(name string) string {
 	return string(b)
 }
 
-// realQtype (T12) picks a qtype from a realistic browser/OS mix instead of the old
-// A/AAAA-only coin: A and AAAA dominate, HTTPS(65) is now common, SVCB(64) rare.
-// A fixed distribution — cheaper than a per-query DB sample and close enough to the
-// real shape; the actual A/AAAA pairing is added separately in maybeDualStack.
+// realQtype (T12/#4) picks a qtype from a realistic browser/OS mix: A and AAAA
+// dominate, HTTPS(65) common, SVCB(64) rare, plus an occasional non-address type
+// (TXT/MX/NS/SRV) that real clients emit (mail, discovery, DNSSEC tooling). A fixed
+// distribution — cheaper than a per-query DB sample and close enough to the real
+// shape; the A/AAAA pairing is added separately in maybeDualStack. PTR is emitted
+// only by the chatter path, where it carries an in-addr.arpa name.
 func (e *Engine) realQtype() uint16 {
 	switch r := e.rnd.Intn(100); { //nolint:mnd // fixed realistic qtype mix
-	case r < 45:
+	case r < 42:
 		return dns.TypeA
-	case r < 85:
+	case r < 78:
 		return dns.TypeAAAA
-	case r < 98:
+	case r < 90:
 		return dns.TypeHTTPS
-	default:
+	case r < 93:
 		return dns.TypeSVCB
+	case r < 96:
+		return dns.TypeTXT
+	case r < 98:
+		return dns.TypeMX
+	case r < 99:
+		return dns.TypeNS
+	default:
+		return dns.TypeSRV
 	}
 }
 

@@ -57,8 +57,36 @@ type DecoyConfig struct {
 	ClusterPct       uint `yaml:"clusterPct" default:"20"`         // % of timer emissions that fire a small related burst (secondary to CompanionPct)
 
 	// Reactive obfuscation: track live real traffic instead of the 7-day historical shape.
-	ReactiveVolume bool `yaml:"reactiveVolume" default:"true"` // rate tracks live recent real QPS (± jitter); historical diurnal is the cold-start fallback
+	ReactiveVolume bool `yaml:"reactiveVolume" default:"true"` // rate tracks live recent real QPS (± jitter); historical diurnal is the cold-start fallback (only used when personaCover is off)
 	CompanionPct   uint `yaml:"companionPct" default:"40"`     // % of real queries that trigger a browse-style companion cluster derived from that domain
+
+	// Structural emission (7G/#1/#5): shape the SEQUENCE and TEXTURE of decoy
+	// emissions after real browsing instead of IID picks.
+	CohortPct        uint `yaml:"cohortPct" default:"55"`          // % of structural emissions that replay a whole RECORDED page-load cohort (real timing/texture, incl. blocked members) instead of a synthetic single/cluster; falls back to the synthetic path at cold start
+	SessionCoherence bool `yaml:"sessionCoherence" default:"true"` // walk plausible session chains (NextInSession/SessionSeed) instead of IID domain picks
+	StepPct          uint `yaml:"stepPct" default:"70"`            // within a session, % chance to advance to a topically-plausible successor vs. reseeding a fresh session
+	RevisitCadence   bool `yaml:"revisitCadence" default:"true"`   // re-emit corpus/replay domains on their learned revisit interval (jittered) instead of flat random
+
+	// Compensating persona cover (#8): TOTAL egress tracks a household diurnal
+	// target curve, so decoy_rate(t) = max(0, targetCurve(t) − recentRealQPM).
+	// This hides the activity LEVEL (not just which queries are real) without
+	// delaying real queries — the box always looks like a generic household on
+	// the wire. When off, the engine falls back to the reactive/diurnal path.
+	//
+	// Residual: real usage ABOVE the peak ceiling still spikes total egress — the
+	// curve hides level only up to targetQpmPeak, by design (a truly constant
+	// max-rate cover would cost fixed bandwidth we don't pay on a home box).
+	PersonaCover    bool    `yaml:"personaCover" default:"true"`
+	TargetQPMPeak   float64 `yaml:"targetQpmPeak" default:"40"`  // busy-hour target total egress (queries/min)
+	TargetQPMTrough float64 `yaml:"targetQpmTrough" default:"6"` // pre-dawn quiet target total egress (queries/min)
+
+	// Per-query realism + operational (device chatter, transport/qtype/failure
+	// diversity, per-client personas, adaptive back-off).
+	ChatterPct         uint `yaml:"chatterPct" default:"15"`           // % of emissions that are device background chatter (connectivity/NTP/telemetry + RFC1918 PTR) instead of browsing
+	TCPPct             uint `yaml:"tcpPct" default:"10"`               // % of decoys stamped as TCP transport (req.Protocol); see engine limitation — blocky→upstream transport is upstream-config-global, not per-query
+	FailChaffPct       uint `yaml:"failChaffPct" default:"8"`          // % of emissions that deliberately query a likely-NXDOMAIN name so decoys don't always succeed
+	PersonaAttribution bool `yaml:"personaAttribution" default:"true"` // attribute decoys to sampled real clients (stamp their ClientIP + fingerprint) so each client's on-wire profile stays consistent under noise
+	AdaptiveBackoff    bool `yaml:"adaptiveBackoff" default:"true"`    // reduce the decoy rate when the recent decoy resolve error rate spikes (upstream strain / rate-limiting) and recover slowly
 
 	// Wire-egress hardening.
 	ShadowTTL                bool    `yaml:"shadowTTL" default:"true"`              // suppress re-emitting a decoy (name,qtype) within its own observed answer TTL
@@ -139,6 +167,35 @@ func (c *DecoyConfig) validate() error {
 
 	if c.CompanionPct > 100 {
 		return fmt.Errorf("privacy.decoy: companionPct (%d) must be in [0, 100]", c.CompanionPct)
+	}
+
+	if c.CohortPct > 100 {
+		return fmt.Errorf("privacy.decoy: cohortPct (%d) must be in [0, 100]", c.CohortPct)
+	}
+
+	if c.StepPct > 100 {
+		return fmt.Errorf("privacy.decoy: stepPct (%d) must be in [0, 100]", c.StepPct)
+	}
+
+	if c.ChatterPct > 100 {
+		return fmt.Errorf("privacy.decoy: chatterPct (%d) must be in [0, 100]", c.ChatterPct)
+	}
+
+	if c.TCPPct > 100 {
+		return fmt.Errorf("privacy.decoy: tcpPct (%d) must be in [0, 100]", c.TCPPct)
+	}
+
+	if c.FailChaffPct > 100 {
+		return fmt.Errorf("privacy.decoy: failChaffPct (%d) must be in [0, 100]", c.FailChaffPct)
+	}
+
+	if c.TargetQPMTrough < 0 {
+		return fmt.Errorf("privacy.decoy: targetQpmTrough (%.2f) must be >= 0", c.TargetQPMTrough)
+	}
+
+	if c.TargetQPMPeak < c.TargetQPMTrough {
+		return fmt.Errorf("privacy.decoy: targetQpmPeak (%.2f) must be >= targetQpmTrough (%.2f)",
+			c.TargetQPMPeak, c.TargetQPMTrough)
 	}
 
 	return nil

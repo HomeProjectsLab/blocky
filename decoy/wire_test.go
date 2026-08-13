@@ -54,6 +54,7 @@ var _ = Describe("Decoy fingerprint on the wire", func() {
 		cfg.FingerprintMatch = true
 		cfg.MissChaffPct = 0     // keep it a single, un-chaffed decoy
 		cfg.ClusterPct = 0       // no fan-out
+		cfg.CohortPct = 0        // no async recorded-cohort replay — assert on the single synchronous decoy
 		cfg.ReplayMutate = false // don't perturb the replayed query
 		cfg.ReplayWeight = 1
 		cfg.CorpusWeight = 0

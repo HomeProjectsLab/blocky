@@ -30,6 +30,18 @@ var _ = Describe("Privacy config", func() {
 			Expect(p.Decoy.DualStackPct).Should(Equal(uint(55)))
 			Expect(p.Decoy.OffHoursFloorQPM).Should(Equal(0.5))
 			Expect(p.Decoy.ActiveHoursEdgeJitterMin).Should(Equal(30))
+			Expect(p.Decoy.CohortPct).Should(Equal(uint(55)))
+			Expect(p.Decoy.SessionCoherence).Should(BeTrue())
+			Expect(p.Decoy.StepPct).Should(Equal(uint(70)))
+			Expect(p.Decoy.RevisitCadence).Should(BeTrue())
+			Expect(p.Decoy.PersonaCover).Should(BeTrue())
+			Expect(p.Decoy.TargetQPMPeak).Should(Equal(float64(40)))
+			Expect(p.Decoy.TargetQPMTrough).Should(Equal(float64(6)))
+			Expect(p.Decoy.ChatterPct).Should(Equal(uint(15)))
+			Expect(p.Decoy.TCPPct).Should(Equal(uint(10)))
+			Expect(p.Decoy.FailChaffPct).Should(Equal(uint(8)))
+			Expect(p.Decoy.PersonaAttribution).Should(BeTrue())
+			Expect(p.Decoy.AdaptiveBackoff).Should(BeTrue())
 			Expect(p.TTLJitter.Enable).Should(BeFalse())
 			Expect(p.TTLJitter.PercentPct).Should(Equal(uint(10)))
 			Expect(p.EDNSPadding.Enable).Should(BeFalse())
@@ -102,6 +114,43 @@ var _ = Describe("Privacy config", func() {
 			p.Decoy.Enable = true
 			p.Decoy.ClusterPct = 101
 			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("clusterPct")))
+		})
+
+		It("rejects cohortPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.CohortPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("cohortPct")))
+		})
+
+		It("rejects stepPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.StepPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("stepPct")))
+		})
+
+		It("rejects chatterPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.ChatterPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("chatterPct")))
+		})
+
+		It("rejects tcpPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.TCPPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("tcpPct")))
+		})
+
+		It("rejects failChaffPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.FailChaffPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("failChaffPct")))
+		})
+
+		It("rejects targetQpmPeak below targetQpmTrough", func() {
+			p.Decoy.Enable = true
+			p.Decoy.TargetQPMTrough = 40
+			p.Decoy.TargetQPMPeak = 10
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("targetQpmPeak")))
 		})
 
 		It("rejects ttlJitter percent above 90", func() {

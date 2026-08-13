@@ -414,6 +414,37 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 	return row.toFpSample(), nil
 }
 
+// ClientPersona is a sampled real client's on-wire identity: its source IP and a
+// representative EDNS/fingerprint shape it presented. The decoy engine stamps
+// these onto decoys (personaAttribution) so chaff is attributed to plausible real
+// clients and each client's wire profile stays consistent under noise. A real
+// stub's OPT shape is stable across its queries, so one sampled row is enough.
+type ClientPersona struct {
+	IP string
+	Fp FpSample
+}
+
+// SampleClient returns a random recent real client (its IP + the fingerprint of
+// one of its rows). Empty IP at cold start (no real rows yet). One indexed random
+// row read — same cost profile as SampleRealFingerprint.
+func (s *DecoySource) SampleClient() (ClientPersona, error) {
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var row struct {
+		ClientIP string `gorm:"column:client_ip"`
+		fpRow
+	}
+
+	err := s.db.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+		WHERE decoy = 0 AND client_ip <> '' AND request_ts >= ?
+		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
+	if err != nil {
+		return ClientPersona{}, err
+	}
+
+	return ClientPersona{IP: row.ClientIP, Fp: row.fpRow.toFpSample()}, nil
+}
+
 // effectiveTLDP returns name's registrable domain (eTLD+1), or "" if it has none.
 func effectiveTLDP(name string) string {
 	e, err := publicsuffix.EffectiveTLDPlusOne(strings.TrimSuffix(name, "."))

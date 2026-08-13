@@ -1812,6 +1812,66 @@
               "description": "% of real queries that trigger a browse-style companion cluster derived from that domain",
               "default": 40
             },
+            "cohortPct": {
+              "type": "integer",
+              "description": "Structural emission (7G/#1/#5): shape the SEQUENCE and TEXTURE of decoy\nemissions after real browsing instead of IID picks.",
+              "default": 55
+            },
+            "sessionCoherence": {
+              "type": "boolean",
+              "description": "walk plausible session chains (NextInSession/SessionSeed) instead of IID domain picks",
+              "default": true
+            },
+            "stepPct": {
+              "type": "integer",
+              "description": "within a session, % chance to advance to a topically-plausible successor vs. reseeding a fresh session",
+              "default": 70
+            },
+            "revisitCadence": {
+              "type": "boolean",
+              "description": "re-emit corpus/replay domains on their learned revisit interval (jittered) instead of flat random",
+              "default": true
+            },
+            "personaCover": {
+              "type": "boolean",
+              "description": "Compensating persona cover (#8): TOTAL egress tracks a household diurnal\ntarget curve, so decoy_rate(t) = max(0, targetCurve(t) − recentRealQPM).\nThis hides the activity LEVEL (not just which queries are real) without\ndelaying real queries — the box always looks like a generic household on\nthe wire. When off, the engine falls back to the reactive/diurnal path.\n\nResidual: real usage ABOVE the peak ceiling still spikes total egress — the\ncurve hides level only up to targetQpmPeak, by design (a truly constant\nmax-rate cover would cost fixed bandwidth we don't pay on a home box).",
+              "default": true
+            },
+            "targetQpmPeak": {
+              "type": "number",
+              "description": "busy-hour target total egress (queries/min)",
+              "default": 40
+            },
+            "targetQpmTrough": {
+              "type": "number",
+              "description": "pre-dawn quiet target total egress (queries/min)",
+              "default": 6
+            },
+            "chatterPct": {
+              "type": "integer",
+              "description": "Per-query realism + operational (device chatter, transport/qtype/failure\ndiversity, per-client personas, adaptive back-off).",
+              "default": 15
+            },
+            "tcpPct": {
+              "type": "integer",
+              "description": "% of decoys stamped as TCP transport (req.Protocol); see engine limitation — blocky→upstream transport is upstream-config-global, not per-query",
+              "default": 10
+            },
+            "failChaffPct": {
+              "type": "integer",
+              "description": "% of emissions that deliberately query a likely-NXDOMAIN name so decoys don't always succeed",
+              "default": 8
+            },
+            "personaAttribution": {
+              "type": "boolean",
+              "description": "attribute decoys to sampled real clients (stamp their ClientIP + fingerprint) so each client's on-wire profile stays consistent under noise",
+              "default": true
+            },
+            "adaptiveBackoff": {
+              "type": "boolean",
+              "description": "reduce the decoy rate when the recent decoy resolve error rate spikes (upstream strain / rate-limiting) and recover slowly",
+              "default": true
+            },
             "shadowTTL": {
               "type": "boolean",
               "description": "Wire-egress hardening.",
