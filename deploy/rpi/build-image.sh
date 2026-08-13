@@ -95,6 +95,18 @@ else
 fi
 
 # --- 3. per-partition offset loop devices (container-safe, no udev) -----------
+# In a container there is no udev, so a loop device freshly allocated by the
+# kernel has no /dev node and losetup fails with ENOENT. Pre-create the nodes
+# ourselves when we're root (harmless if they already exist).
+ensure_loop_nodes() {
+	[ "$(id -u)" = 0 ] || return 0
+	local i
+	for i in $(seq 0 63); do
+		[ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true
+	done
+}
+ensure_loop_nodes
+
 echo ">> mapping partitions…"
 SEC=512
 # sfdisk -d dumps "... : start=  N, size=  M, type=.." — take the first two parts.
