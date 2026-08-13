@@ -13,8 +13,9 @@ import (
 
 // registerConfigUIEndpoints mounts the raw-config management API under /api/ui.
 // store may be nil (e.g. tests or YAML import mode): all endpoints then respond 503.
-func registerConfigUIEndpoints(router *chi.Mux, store *configstore.Store) {
-	u := &uiAPI{store: store}
+// swapper may be nil: upstream entry updates then always report needsApply.
+func registerConfigUIEndpoints(router *chi.Mux, store *configstore.Store, swapper upstreamSwapper) {
+	u := &uiAPI{store: store, swapper: swapper}
 
 	router.Route("/api/ui/config", func(r chi.Router) {
 		r.Get("/raw", u.getRaw)
@@ -23,10 +24,18 @@ func registerConfigUIEndpoints(router *chi.Mux, store *configstore.Store) {
 		r.Post("/apply", u.apply)
 		r.Get("/status", u.status)
 	})
+
+	router.Route("/api/ui/upstreams", func(r chi.Router) {
+		r.Get("/", u.getUpstreams)
+		r.Put("/groups/{name}", u.putUpstreamGroup)
+		r.Delete("/groups/{name}", u.deleteUpstreamGroup)
+		r.Put("/groups/{name}/entries", u.putUpstreamEntries)
+	})
 }
 
 type uiAPI struct {
-	store *configstore.Store
+	store   *configstore.Store
+	swapper upstreamSwapper
 }
 
 func writeJSON(rw http.ResponseWriter, status int, body any) {

@@ -297,7 +297,10 @@ func createGroupResolvers(
 			continue // err was already logged
 		}
 
-		resolvers = append(resolvers, newUpstreamResolverStatus(resolver))
+		status := newUpstreamResolverStatus(resolver)
+		status.weight = upstream.EffectiveWeight()
+
+		resolvers = append(resolvers, status)
 	}
 
 	if len(resolvers) == 0 {

@@ -29,6 +29,19 @@ type Upstream struct {
 	// DNS stamp metadata (optional) - only populated when parsing DNS stamps
 	CertificateFingerprints []CertificateFingerprint // SHA256 fingerprints for TLS certificate pinning
 	IPs                     []net.IP                 // IPs from the DNS stamp (addr + bootstrap IPs) for bootstrapping
+
+	// Weight for weighted selection strategies; 0 means 1 (the string form
+	// can't carry a weight, so it is set programmatically, e.g. from DB rows).
+	Weight uint `yaml:"weight"`
+}
+
+// EffectiveWeight returns the weight to use for selection: 0 means 1.
+func (u *Upstream) EffectiveWeight() uint {
+	if u.Weight == 0 {
+		return 1
+	}
+
+	return u.Weight
 }
 
 // IsDefault returns true if u is the default value

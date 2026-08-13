@@ -515,6 +515,11 @@ func (r UpstreamResolver) Upstream() config.Upstream {
 	return r.cfg.Upstream
 }
 
+// Close releases the upstream client's connections. Implements io.Closer.
+func (r *UpstreamResolver) Close() error {
+	return r.upstreamClient.Close()
+}
+
 func (r *UpstreamResolver) log(ctx context.Context) (context.Context, *logrus.Entry) {
 	return r.logWithFields(ctx, logrus.Fields{
 		logFieldUpstream: r.cfg.String(),

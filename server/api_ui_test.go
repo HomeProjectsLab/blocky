@@ -47,7 +47,7 @@ var _ = Describe("Config UI API", func() {
 		DeferCleanup(store.Close)
 
 		router = chi.NewRouter()
-		registerConfigUIEndpoints(router, store)
+		registerConfigUIEndpoints(router, store, nil)
 	})
 
 	Describe("GET /api/ui/config/raw", func() {
@@ -145,7 +145,7 @@ var _ = Describe("Config UI API", func() {
 	Describe("nil store", func() {
 		It("responds 503 on every endpoint", func() {
 			router = chi.NewRouter()
-			registerConfigUIEndpoints(router, nil)
+			registerConfigUIEndpoints(router, nil, nil)
 
 			for _, tc := range []struct{ method, path string }{
 				{http.MethodGet, "/api/ui/config/raw"},

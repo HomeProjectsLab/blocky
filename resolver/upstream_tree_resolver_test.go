@@ -2,6 +2,8 @@ package resolver
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 
 	"github.com/0xERR0R/blocky/config"
 	. "github.com/0xERR0R/blocky/helpertest"
@@ -61,10 +63,14 @@ var _ = Describe("UpstreamTreeResolver", Label("upstreamTreeResolver"), func() {
 				sutConfig.Strategy = config.UpstreamStrategyParallelBest
 			})
 
-			It("returns the resolver directly", func() {
+			It("keeps the tree with a single parallel_best branch", func() {
 				Expect(err).ToNot(HaveOccurred())
 
-				_, ok := sut.(*ParallelBestResolver)
+				tree, ok := sut.(*UpstreamTreeResolver)
+				Expect(ok).Should(BeTrue())
+				Expect(tree.branches).Should(HaveLen(1))
+
+				_, ok = tree.branches[upstreamDefaultCfgName].(*ParallelBestResolver)
 				Expect(ok).Should(BeTrue())
 			})
 		})
@@ -74,10 +80,45 @@ var _ = Describe("UpstreamTreeResolver", Label("upstreamTreeResolver"), func() {
 				sutConfig.Strategy = config.UpstreamStrategyStrict
 			})
 
-			It("returns the resolver directly", func() {
+			It("keeps the tree with a single strict branch", func() {
 				Expect(err).ToNot(HaveOccurred())
 
-				_, ok := sut.(*StrictResolver)
+				tree, ok := sut.(*UpstreamTreeResolver)
+				Expect(ok).Should(BeTrue())
+				Expect(tree.branches).Should(HaveLen(1))
+
+				_, ok = tree.branches[upstreamDefaultCfgName].(*StrictResolver)
+				Expect(ok).Should(BeTrue())
+			})
+		})
+
+		When("strategy is recursive", func() {
+			BeforeEach(func() {
+				sutConfig.Strategy = config.UpstreamStrategyRecursive
+			})
+
+			It("returns a not-implemented error", func() {
+				Expect(err).To(HaveOccurred())
+				Expect(err).To(MatchError(ContainSubstring("recursive strategy lands in Phase 4")))
+				Expect(sut).To(BeNil())
+			})
+		})
+
+		When("a group overrides the strategy", func() {
+			BeforeEach(func() {
+				sutConfig.Strategy = config.UpstreamStrategyStrict
+				sutConfig.GroupConfig = map[string]config.UpstreamGroupConfig{
+					upstreamDefaultCfgName: {Strategy: config.UpstreamStrategyRoundRobin},
+				}
+			})
+
+			It("uses the group's strategy for the branch", func() {
+				Expect(err).ToNot(HaveOccurred())
+
+				tree, ok := sut.(*UpstreamTreeResolver)
+				Expect(ok).Should(BeTrue())
+
+				_, ok = tree.branches[upstreamDefaultCfgName].(*RoundRobinResolver)
 				Expect(ok).Should(BeTrue())
 			})
 		})
@@ -283,6 +324,88 @@ var _ = Describe("UpstreamTreeResolver", Label("upstreamTreeResolver"), func() {
 
 				Expect(hook.Messages).Should(ContainElement(ContainSubstring("client matches multiple groups")))
 			})
+		})
+	})
+
+	Describe("ReplaceUpstreams", func() {
+		var mockA, mockB *MockUDPUpstreamServer
+
+		BeforeEach(func() {
+			mockA = NewMockUDPUpstreamServer().WithAnswerRR("example.com 123 IN A 127.0.0.11")
+			mockB = NewMockUDPUpstreamServer().WithAnswerRR("example.com 123 IN A 127.0.0.22")
+
+			sutConfig = config.Upstreams{
+				Init:    config.Init{Strategy: config.InitStrategyBlocking},
+				Timeout: config.Duration(timeout),
+				Groups: config.UpstreamGroups{
+					upstreamDefaultCfgName: {mockA.Start()},
+				},
+			}
+		})
+
+		It("swaps the group's upstreams under concurrent queries", func() {
+			Expect(err).ToNot(HaveOccurred())
+			tree := sut.(*UpstreamTreeResolver)
+
+			By("queries hit the old upstream", func() {
+				Expect(sut.Resolve(ctx, newRequestWithClient("example.com.", A, "192.168.1.1"))).
+					Should(BeDNSRecord("example.com.", A, "127.0.0.11"))
+			})
+
+			var (
+				wg          sync.WaitGroup
+				resolveErrs atomic.Int32
+			)
+
+			stop := make(chan struct{})
+
+			By("swapping while queries are in flight", func() {
+				for range 4 {
+					wg.Add(1)
+
+					go func() {
+						defer wg.Done()
+						defer GinkgoRecover()
+
+						for {
+							select {
+							case <-stop:
+								return
+							default:
+							}
+
+							_, err := tree.Resolve(ctx, newRequestWithClient("example.com.", A, "192.168.1.1"))
+							if err != nil {
+								resolveErrs.Add(1)
+							}
+						}
+					}()
+				}
+
+				Expect(tree.ReplaceUpstreams(ctx, upstreamDefaultCfgName, []config.Upstream{mockB.Start()})).
+					Should(Succeed())
+
+				close(stop)
+				wg.Wait()
+
+				Expect(resolveErrs.Load()).Should(BeZero())
+			})
+
+			By("subsequent queries hit the new upstream", func() {
+				mockB.ResetCallCount()
+
+				Expect(sut.Resolve(ctx, newRequestWithClient("example.com.", A, "192.168.1.1"))).
+					Should(BeDNSRecord("example.com.", A, "127.0.0.22"))
+				Expect(mockB.GetCallCount()).Should(BeNumerically(">", 0))
+			})
+		})
+
+		It("errors for an unknown group", func() {
+			Expect(err).ToNot(HaveOccurred())
+			tree := sut.(*UpstreamTreeResolver)
+
+			swapErr := tree.ReplaceUpstreams(ctx, "no-such-group", []config.Upstream{{Host: "127.0.0.1"}})
+			Expect(swapErr).To(MatchError(ContainSubstring("unknown upstream group")))
 		})
 	})
 })

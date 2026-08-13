@@ -848,16 +848,40 @@ const (
 	// UpstreamStrategyRandom is a UpstreamStrategy of type Random.
 	// Picks one random weighted resolver per query; another is tried on failure.
 	UpstreamStrategyRandom
+	// UpstreamStrategyRoundRobin is a UpstreamStrategy of type Round_robin.
+	// Rotates through upstreams in order, one per query.
+	UpstreamStrategyRoundRobin
+	// UpstreamStrategyWeightedRoundRobin is a UpstreamStrategy of type Weighted_round_robin.
+	// Rotates through upstreams proportionally to their weight.
+	UpstreamStrategyWeightedRoundRobin
+	// UpstreamStrategyWeightedRandom is a UpstreamStrategy of type Weighted_random.
+	// Picks one upstream at random with probability proportional to its weight.
+	UpstreamStrategyWeightedRandom
+	// UpstreamStrategyTimeHop is a UpstreamStrategy of type Time_hop.
+	// Sticks to one random upstream for a random interval, then hops to another.
+	UpstreamStrategyTimeHop
+	// UpstreamStrategyDomainShard is a UpstreamStrategy of type Domain_shard.
+	// Hashes the query's eTLD+1 so the same domain always uses the same upstream.
+	UpstreamStrategyDomainShard
+	// UpstreamStrategyRecursive is a UpstreamStrategy of type Recursive.
+	// Resolves recursively from the root servers instead of forwarding.
+	UpstreamStrategyRecursive
 )
 
 var ErrInvalidUpstreamStrategy = fmt.Errorf("not a valid UpstreamStrategy, try [%s]", strings.Join(_UpstreamStrategyNames, ", "))
 
-const _UpstreamStrategyName = "parallel_beststrictrandom"
+const _UpstreamStrategyName = "parallel_beststrictrandomround_robinweighted_round_robinweighted_randomtime_hopdomain_shardrecursive"
 
 var _UpstreamStrategyNames = []string{
 	_UpstreamStrategyName[0:13],
 	_UpstreamStrategyName[13:19],
 	_UpstreamStrategyName[19:25],
+	_UpstreamStrategyName[25:36],
+	_UpstreamStrategyName[36:56],
+	_UpstreamStrategyName[56:71],
+	_UpstreamStrategyName[71:79],
+	_UpstreamStrategyName[79:91],
+	_UpstreamStrategyName[91:100],
 }
 
 // UpstreamStrategyNames returns a list of possible string values of UpstreamStrategy.
@@ -873,13 +897,25 @@ func UpstreamStrategyValues() []UpstreamStrategy {
 		UpstreamStrategyParallelBest,
 		UpstreamStrategyStrict,
 		UpstreamStrategyRandom,
+		UpstreamStrategyRoundRobin,
+		UpstreamStrategyWeightedRoundRobin,
+		UpstreamStrategyWeightedRandom,
+		UpstreamStrategyTimeHop,
+		UpstreamStrategyDomainShard,
+		UpstreamStrategyRecursive,
 	}
 }
 
 var _UpstreamStrategyMap = map[UpstreamStrategy]string{
-	UpstreamStrategyParallelBest: _UpstreamStrategyName[0:13],
-	UpstreamStrategyStrict:       _UpstreamStrategyName[13:19],
-	UpstreamStrategyRandom:       _UpstreamStrategyName[19:25],
+	UpstreamStrategyParallelBest:       _UpstreamStrategyName[0:13],
+	UpstreamStrategyStrict:             _UpstreamStrategyName[13:19],
+	UpstreamStrategyRandom:             _UpstreamStrategyName[19:25],
+	UpstreamStrategyRoundRobin:         _UpstreamStrategyName[25:36],
+	UpstreamStrategyWeightedRoundRobin: _UpstreamStrategyName[36:56],
+	UpstreamStrategyWeightedRandom:     _UpstreamStrategyName[56:71],
+	UpstreamStrategyTimeHop:            _UpstreamStrategyName[71:79],
+	UpstreamStrategyDomainShard:        _UpstreamStrategyName[79:91],
+	UpstreamStrategyRecursive:          _UpstreamStrategyName[91:100],
 }
 
 // String implements the Stringer interface.
@@ -898,9 +934,15 @@ func (x UpstreamStrategy) IsValid() bool {
 }
 
 var _UpstreamStrategyValue = map[string]UpstreamStrategy{
-	_UpstreamStrategyName[0:13]:  UpstreamStrategyParallelBest,
-	_UpstreamStrategyName[13:19]: UpstreamStrategyStrict,
-	_UpstreamStrategyName[19:25]: UpstreamStrategyRandom,
+	_UpstreamStrategyName[0:13]:   UpstreamStrategyParallelBest,
+	_UpstreamStrategyName[13:19]:  UpstreamStrategyStrict,
+	_UpstreamStrategyName[19:25]:  UpstreamStrategyRandom,
+	_UpstreamStrategyName[25:36]:  UpstreamStrategyRoundRobin,
+	_UpstreamStrategyName[36:56]:  UpstreamStrategyWeightedRoundRobin,
+	_UpstreamStrategyName[56:71]:  UpstreamStrategyWeightedRandom,
+	_UpstreamStrategyName[71:79]:  UpstreamStrategyTimeHop,
+	_UpstreamStrategyName[79:91]:  UpstreamStrategyDomainShard,
+	_UpstreamStrategyName[91:100]: UpstreamStrategyRecursive,
 }
 
 // ParseUpstreamStrategy attempts to convert a string to a UpstreamStrategy.
@@ -939,9 +981,15 @@ func (x *UpstreamStrategy) AppendText(b []byte) ([]byte, error) {
 // `// comment` in the ENUM(...) declaration. Generated; do not edit.
 func (UpstreamStrategy) EnumDescriptions() map[string]string {
 	return map[string]string{
-		"parallel_best": "Picks 2 random weighted resolvers per query and returns the fastest answer (default).",
-		"strict":        "Queries upstreams in strict order; the next is tried only if the previous fails.",
-		"random":        "Picks one random weighted resolver per query; another is tried on failure.",
+		"parallel_best":        "Picks 2 random weighted resolvers per query and returns the fastest answer (default).",
+		"strict":               "Queries upstreams in strict order; the next is tried only if the previous fails.",
+		"random":               "Picks one random weighted resolver per query; another is tried on failure.",
+		"round_robin":          "Rotates through upstreams in order, one per query.",
+		"weighted_round_robin": "Rotates through upstreams proportionally to their weight.",
+		"weighted_random":      "Picks one upstream at random with probability proportional to its weight.",
+		"time_hop":             "Sticks to one random upstream for a random interval, then hops to another.",
+		"domain_shard":         "Hashes the query's eTLD+1 so the same domain always uses the same upstream.",
+		"recursive":            "Resolves recursively from the root servers instead of forwarding.",
 	}
 }
 

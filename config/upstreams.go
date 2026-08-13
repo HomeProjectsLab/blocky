@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+
 	"github.com/0xERR0R/blocky/log"
 	"github.com/sirupsen/logrus"
 )
@@ -29,6 +31,50 @@ type Upstreams struct {
 	UserAgent string `yaml:"userAgent"`
 	// QUIC-specific connection settings used when DoQ upstreams are configured.
 	QUIC QUICConfig `yaml:"quic"`
+	// Per-group settings overriding the global strategy.
+	GroupConfig map[string]UpstreamGroupConfig `yaml:"groupConfig"`
+}
+
+// UpstreamGroupConfig holds per-group settings overriding the global ones.
+type UpstreamGroupConfig struct {
+	// Strategy for this group; zero/absent falls back to the global Upstreams.Strategy.
+	Strategy UpstreamStrategy `yaml:"strategy" default:"parallel_best"`
+	// Minimum duration to stick to one upstream when strategy is time_hop.
+	HopMin Duration `yaml:"hopMin" default:"5m"`
+	// Maximum duration to stick to one upstream when strategy is time_hop.
+	HopMax Duration `yaml:"hopMax" default:"30m"`
+}
+
+// EffectiveStrategy returns the strategy for the given group: the group's
+// override if set, otherwise the global strategy.
+//
+// Note: the zero value of UpstreamStrategy is parallel_best, so a group can't
+// override a non-parallel_best global strategy back to parallel_best.
+func (c *Upstreams) EffectiveStrategy(group string) UpstreamStrategy {
+	if gc, ok := c.GroupConfig[group]; ok && gc.Strategy != UpstreamStrategyParallelBest {
+		return gc.Strategy
+	}
+
+	return c.Strategy
+}
+
+// GroupSettings returns the group's settings resolved with defaults:
+// strategy falls back to the global one, hopMin/hopMax to their defaults.
+func (c *Upstreams) GroupSettings(group string) UpstreamGroupConfig {
+	gc := c.GroupConfig[group]
+	gc.Strategy = c.EffectiveStrategy(group)
+
+	defaults := mustDefault[UpstreamGroupConfig]()
+
+	if !gc.HopMin.IsAboveZero() {
+		gc.HopMin = defaults.HopMin
+	}
+
+	if !gc.HopMax.IsAboveZero() {
+		gc.HopMax = defaults.HopMax
+	}
+
+	return gc
 }
 
 type UpstreamGroups map[string][]Upstream
@@ -45,7 +91,7 @@ func (c *Upstreams) hasQuicUpstream() bool {
 	return false
 }
 
-func (c *Upstreams) validate(logger *logrus.Entry) {
+func (c *Upstreams) validate(logger *logrus.Entry) error {
 	defaults := mustDefault[Upstreams]()
 
 	if !c.Timeout.IsAboveZero() {
@@ -68,6 +114,32 @@ func (c *Upstreams) validate(logger *logrus.Entry) {
 			logger.Warn("upstreams.quic.keepAlivePeriod >= maxIdleTimeout, keep-alive won't prevent idle timeout")
 		}
 	}
+
+	return c.validateGroupConfig()
+}
+
+func (c *Upstreams) validateGroupConfig() error {
+	for group := range c.GroupConfig {
+		if c.EffectiveStrategy(group) != UpstreamStrategyTimeHop {
+			continue
+		}
+
+		raw := c.GroupConfig[group]
+
+		// explicit non-positive values are an error; zero/absent gets the default
+		if (raw.HopMin != 0 && !raw.HopMin.IsAboveZero()) || (raw.HopMax != 0 && !raw.HopMax.IsAboveZero()) {
+			return fmt.Errorf("upstreams.groupConfig.%s: hopMin and hopMax must be > 0 for strategy time_hop", group)
+		}
+
+		gc := c.GroupSettings(group)
+
+		if gc.HopMin.ToDuration() > gc.HopMax.ToDuration() {
+			return fmt.Errorf("upstreams.groupConfig.%s: hopMin (%s) must be <= hopMax (%s)",
+				group, gc.HopMin, gc.HopMax)
+		}
+	}
+
+	return nil
 }
 
 // IsEnabled implements `config.Configurable`.

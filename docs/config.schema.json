@@ -58,9 +58,15 @@
           "enum": [
             "parallel_best",
             "strict",
-            "random"
+            "random",
+            "round_robin",
+            "weighted_round_robin",
+            "weighted_random",
+            "time_hop",
+            "domain_shard",
+            "recursive"
           ],
-          "description": "Strategy for selecting which upstream(s) to use per query (parallel_best, random, strict).\n\n- `parallel_best`: Picks 2 random weighted resolvers per query and returns the fastest answer (default).\n- `strict`: Queries upstreams in strict order; the next is tried only if the previous fails.\n- `random`: Picks one random weighted resolver per query; another is tried on failure.",
+          "description": "Strategy for selecting which upstream(s) to use per query (parallel_best, random, strict).\n\n- `parallel_best`: Picks 2 random weighted resolvers per query and returns the fastest answer (default).\n- `strict`: Queries upstreams in strict order; the next is tried only if the previous fails.\n- `random`: Picks one random weighted resolver per query; another is tried on failure.\n- `round_robin`: Rotates through upstreams in order, one per query.\n- `weighted_round_robin`: Rotates through upstreams proportionally to their weight.\n- `weighted_random`: Picks one upstream at random with probability proportional to its weight.\n- `time_hop`: Sticks to one random upstream for a random interval, then hops to another.\n- `domain_shard`: Hashes the query's eTLD+1 so the same domain always uses the same upstream.\n- `recursive`: Resolves recursively from the root servers instead of forwarding.",
           "default": "parallel_best"
         },
         "userAgent": {
@@ -105,6 +111,62 @@
           "additionalProperties": false,
           "type": "object",
           "description": "QUIC-specific connection settings used when DoQ upstreams are configured."
+        },
+        "groupConfig": {
+          "additionalProperties": {
+            "properties": {
+              "strategy": {
+                "type": "string",
+                "enum": [
+                  "parallel_best",
+                  "strict",
+                  "random",
+                  "round_robin",
+                  "weighted_round_robin",
+                  "weighted_random",
+                  "time_hop",
+                  "domain_shard",
+                  "recursive"
+                ],
+                "description": "Strategy for this group; zero/absent falls back to the global Upstreams.Strategy."
+              },
+              "hopMin": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "description": "Minimum duration to stick to one upstream when strategy is time_hop.",
+                "examples": [
+                  "30s",
+                  "1h"
+                ]
+              },
+              "hopMax": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "description": "Maximum duration to stick to one upstream when strategy is time_hop.",
+                "examples": [
+                  "30s",
+                  "1h"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "description": "UpstreamGroupConfig holds per-group settings overriding the global ones."
+          },
+          "type": "object",
+          "description": "Per-group settings overriding the global strategy."
         }
       },
       "additionalProperties": false,

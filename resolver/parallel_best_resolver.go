@@ -17,10 +17,15 @@ import (
 )
 
 const (
-	upstreamDefaultCfgName    = config.UpstreamDefaultCfgName
-	parallelResolverType      = "parallel_best"
-	randomResolverType        = "random"
-	parallelBestResolverCount = 2
+	upstreamDefaultCfgName     = config.UpstreamDefaultCfgName
+	parallelResolverType       = "parallel_best"
+	randomResolverType         = "random"
+	weightedRandomResolverType = "weighted_random"
+	parallelBestResolverCount  = 2
+
+	// errorWindowInSec is the recent-error window used by the health heuristics:
+	// an upstream that errored within it is considered unhealthy.
+	errorWindowInSec = 60
 )
 
 // ParallelBestResolver delegates the DNS message to 2 upstream resolvers and returns the fastest answer
@@ -36,7 +41,24 @@ type ParallelBestResolver struct {
 
 type upstreamResolverStatus struct {
 	resolver      Resolver
+	weight        uint // static selection weight; 0 means 1
 	lastErrorTime atomic.Value
+}
+
+// staticWeight returns the configured selection weight, defaulting to 1.
+func (r *upstreamResolverStatus) staticWeight() uint {
+	if r.weight == 0 {
+		return 1
+	}
+
+	return r.weight
+}
+
+// isHealthy reports whether the upstream had no error within the recent error window.
+func (r *upstreamResolverStatus) isHealthy() bool {
+	t, ok := r.lastErrorTime.Load().(time.Time)
+
+	return !ok || time.Since(t) >= errorWindowInSec*time.Second
 }
 
 func newUpstreamResolverStatus(resolver Resolver) *upstreamResolverStatus {
@@ -102,12 +124,19 @@ func NewParallelBestResolver(
 }
 
 func newParallelBestResolver(cfg config.UpstreamGroup, resolvers []Resolver) *ParallelBestResolver {
-	typeName := "parallel_best"
+	typeName := parallelResolverType
 	resolverCount := parallelBestResolverCount
 	retryWithDifferentResolver := false
 
-	if cfg.Strategy == config.UpstreamStrategyRandom {
-		typeName = "random"
+	switch cfg.Strategy {
+	case config.UpstreamStrategyRandom:
+		typeName = randomResolverType
+		resolverCount = 1
+		retryWithDifferentResolver = true
+	case config.UpstreamStrategyWeightedRandom:
+		// same picking mechanics as random, but the statuses' static weights
+		// (from config.Upstream.Weight) skew the selection
+		typeName = weightedRandomResolverType
 		resolverCount = 1
 		retryWithDifferentResolver = true
 	}
@@ -127,6 +156,10 @@ func newParallelBestResolver(cfg config.UpstreamGroup, resolvers []Resolver) *Pa
 
 func (r *ParallelBestResolver) setResolvers(resolvers []*upstreamResolverStatus) {
 	r.resolvers.Store(&resolvers)
+}
+
+func (r *ParallelBestResolver) loadResolvers() []*upstreamResolverStatus {
+	return *r.resolvers.Load()
 }
 
 func (r *ParallelBestResolver) Name() string {
@@ -241,13 +274,12 @@ func pickRandom(resolvers []*upstreamResolverStatus, resolverCount int) []*upstr
 
 // weightedRandom returns a single resolver from in (skipping excludedResolvers), weighted by
 // each resolver's recent error history: a resolver that errored recently is less likely to be
-// picked, recovering to full weight an hour after its last error.
+// picked, recovering to full weight an hour after its last error. The status' static weight
+// (from config.Upstream.Weight, default 1) multiplies into the decay-based weight.
 //
 // It uses single-pass weighted reservoir sampling (k=1), so it allocates nothing and avoids
 // rebuilding a weightedrand.Chooser (choices slice + sort + totals) on every request.
 func weightedRandom(in, excludedResolvers []*upstreamResolverStatus) *upstreamResolverStatus {
-	const errorWindowInSec = 60
-
 	var (
 		selected *upstreamResolverStatus
 		total    uint
@@ -268,7 +300,7 @@ outer:
 			weight = math.Max(1, weight-(errorWindowInSec-time.Since(t).Minutes()))
 		}
 
-		w := uint(weight)
+		w := uint(weight) * res.staticWeight()
 		total += w
 
 		// reservoir step: keep res with probability w/total, which leaves every resolver

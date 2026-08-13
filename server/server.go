@@ -55,7 +55,19 @@ type Server struct {
 	http3Server      *http3Server     // nil when disabled
 	http3PacketConns []net.PacketConn // one per address in ports.https
 	closers          []io.Closer
-	store            *configstore.Store // nil = config endpoints respond 503
+	store            *configstore.Store             // nil = config endpoints respond 503
+	upstreamTree     *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
+}
+
+// SwapUpstreams replaces one group's upstreams in the running resolver tree
+// without rebuilding the server. Errors when no tree is present in the chain
+// (e.g. single-group config, where the tree collapses to its only branch).
+func (s *Server) SwapUpstreams(ctx context.Context, group string, upstreams []config.Upstream) error {
+	if s.upstreamTree == nil {
+		return errors.New("no upstream tree in the running resolver chain")
+	}
+
+	return s.upstreamTree.ReplaceUpstreams(ctx, group, upstreams)
 }
 
 func logger() *logrus.Entry {
@@ -179,6 +191,14 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		store:            store,
 	}
 
+	// retain the upstream tree for live upstream swaps (it is the chain's
+	// non-chained tail, so GetFromChainWithType can't reach it)
+	resolver.ForEach(queryResolver, func(res resolver.Resolver) {
+		if tree, ok := res.(*resolver.UpstreamTreeResolver); ok {
+			server.upstreamTree = tree
+		}
+	})
+
 	if redisResult.bridge != nil {
 		server.closers = append(server.closers, redisResult.bridge)
 	}
@@ -196,7 +216,7 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		return nil, fmt.Errorf("failed to create OpenAPI interface implementation: %w", err)
 	}
 
-	httpRouter := createHTTPRouter(cfg, openAPIImpl, store)
+	httpRouter := createHTTPRouter(cfg, openAPIImpl, store, server)
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(http3PacketConns) > 0 {

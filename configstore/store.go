@@ -93,7 +93,7 @@ func Open(dir string) (*Store, error) {
 	// single local file: serialize through one connection (see querylog writer)
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&configBlob{}); err != nil {
+	if err := db.AutoMigrate(&configBlob{}, &UpstreamGroup{}, &UpstreamEntry{}); err != nil {
 		return nil, fmt.Errorf("can't migrate config database schema: %w", err)
 	}
 
@@ -160,13 +160,37 @@ func (s *Store) blob() (*configBlob, error) {
 
 // LoadConfig reads the stored YAML and parses it through the full
 // validation pipeline (defaults, strict unmarshal, migration, validation).
+// If any upstream_group rows exist, they replace the blob's upstream groups
+// entirely (see UpstreamGroup) and the merged config is re-validated.
 func (s *Store) LoadConfig() (*config.Config, error) {
 	b, err := s.blob()
 	if err != nil {
 		return nil, err
 	}
 
-	return config.LoadFromYAML([]byte(b.YAML))
+	cfg, err := config.LoadFromYAML([]byte(b.YAML))
+	if err != nil {
+		return nil, err
+	}
+
+	groups, entries, err := s.ListUpstreamGroups()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(groups) == 0 {
+		return cfg, nil
+	}
+
+	if err := overlayUpstreams(cfg, groups, entries); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
 }
 
 // RawYAML returns the stored YAML blob as-is.

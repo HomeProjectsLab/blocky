@@ -156,6 +156,12 @@ type ProxyProtocolType string
 // parallel_best // Picks 2 random weighted resolvers per query and returns the fastest answer (default).
 // strict // Queries upstreams in strict order; the next is tried only if the previous fails.
 // random // Picks one random weighted resolver per query; another is tried on failure.
+// round_robin // Rotates through upstreams in order, one per query.
+// weighted_round_robin // Rotates through upstreams proportionally to their weight.
+// weighted_random // Picks one upstream at random with probability proportional to its weight.
+// time_hop // Sticks to one random upstream for a random interval, then hops to another.
+// domain_shard // Hashes the query's eTLD+1 so the same domain always uses the same upstream.
+// recursive // Resolves recursively from the root servers instead of forwarding.
 // )
 type UpstreamStrategy uint8
 
@@ -1003,9 +1009,19 @@ func (cfg *Config) migrate(logger *logrus.Entry) bool {
 	return usesDepredOpts
 }
 
+// Validate re-runs the semantic validation step of the load pipeline on an
+// already-parsed config. Used after programmatic mutation, e.g. the config
+// store's DB-backed upstream overlay.
+func (cfg *Config) Validate() error {
+	return cfg.validate(logrus.NewEntry(log.Log()))
+}
+
 func (cfg *Config) validate(logger *logrus.Entry) error {
 	cfg.MinTLSServeVer.validate(logger)
-	cfg.Upstreams.validate(logger)
+
+	if err := cfg.Upstreams.validate(logger); err != nil {
+		return err
+	}
 
 	// Blocking validation
 	if err := cfg.Blocking.validate(); err != nil {

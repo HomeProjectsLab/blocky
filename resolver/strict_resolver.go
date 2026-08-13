@@ -54,6 +54,10 @@ func (r *StrictResolver) setResolvers(resolvers []*upstreamResolverStatus) {
 	r.resolvers.Store(&resolvers)
 }
 
+func (r *StrictResolver) loadResolvers() []*upstreamResolverStatus {
+	return *r.resolvers.Load()
+}
+
 func (r *StrictResolver) Name() string {
 	return r.String()
 }

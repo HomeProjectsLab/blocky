@@ -352,6 +352,40 @@ var _ = Describe("ParallelBestResolver", Label("parallelBestResolver"), func() {
 		})
 	})
 
+	Describe("weighted_random resolver strategy", func() {
+		var mockUpstream1, mockUpstream2 *MockUDPUpstreamServer
+
+		BeforeEach(func() {
+			sutStrategy = config.UpstreamStrategyWeightedRandom
+
+			mockUpstream1 = NewMockUDPUpstreamServer().WithAnswerRR("example.com 123 IN A 123.124.122.122")
+			mockUpstream2 = NewMockUDPUpstreamServer().WithAnswerRR("example.com 123 IN A 123.124.122.123")
+
+			upstreams = []config.Upstream{mockUpstream1.Start(), mockUpstream2.Start()}
+			upstreams[1].Weight = 9
+		})
+
+		Describe("Name", func() {
+			It("should contain correct resolver", func() {
+				Expect(sut.Name()).Should(ContainSubstring(weightedRandomResolverType))
+			})
+		})
+
+		It("sends the majority of queries to the heavier upstream", func() {
+			mockUpstream1.ResetCallCount()
+			mockUpstream2.ResetCallCount()
+
+			for range 200 {
+				_, err := sut.Resolve(ctx, newRequest("example.com.", A))
+				Expect(err).ToNot(HaveOccurred())
+			}
+
+			// expectation with weights 1/9 is 20/180; keep bounds loose to avoid flakes
+			Expect(mockUpstream1.GetCallCount()).Should(BeNumerically("<=", 80))
+			Expect(mockUpstream2.GetCallCount()).Should(BeNumerically(">=", 120))
+		})
+	})
+
 	When("upstream is invalid", func() {
 		It("errors during construction", func() {
 			b := newTestBootstrap(ctx, &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure}})

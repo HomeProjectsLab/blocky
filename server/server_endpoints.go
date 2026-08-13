@@ -193,12 +193,14 @@ func (s *Server) Query(
 	return s.resolve(ctx, req)
 }
 
-func createHTTPRouter(cfg *config.Config, openAPIImpl api.StrictServerInterface, store *configstore.Store) *chi.Mux {
+func createHTTPRouter(
+	cfg *config.Config, openAPIImpl api.StrictServerInterface, store *configstore.Store, swapper upstreamSwapper,
+) *chi.Mux {
 	router := chi.NewRouter()
 
 	api.RegisterOpenAPIEndpoints(router, openAPIImpl)
 
-	registerConfigUIEndpoints(router, store)
+	registerConfigUIEndpoints(router, store, swapper)
 
 	configureDebugHandler(router)
 
