@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,7 @@ type Server struct {
 	closers          []io.Closer
 	store            *configstore.Store             // nil = config endpoints respond 503
 	upstreamTree     *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
+	logFlushers      []interface{ Flush() error }   // query-log resolvers flushed synchronously in Stop
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
@@ -196,6 +198,10 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 	resolver.ForEach(queryResolver, func(res resolver.Resolver) {
 		if tree, ok := res.(*resolver.UpstreamTreeResolver); ok {
 			server.upstreamTree = tree
+		}
+
+		if fl, ok := res.(interface{ Flush() error }); ok {
+			server.logFlushers = append(server.logFlushers, fl)
 		}
 	})
 
@@ -736,6 +742,14 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// listeners are down — flush query log buffers synchronously so process
+	// exit can't race the writers' async goroutines
+	for _, fl := range s.logFlushers {
+		if err := fl.Flush(); err != nil {
+			logger().Warn("failed to flush query log on shutdown: ", err)
+		}
+	}
+
 	return nil
 }
 
@@ -776,22 +790,78 @@ func newRequest(
 	return ctx, &req
 }
 
+// fingerprintFromMsg snapshots the message-level fingerprint attributes before
+// the resolver chain mutates the message in place (see clientQuery).
+func fingerprintFromMsg(msg *dns.Msg) model.Fingerprint {
+	fp := model.Fingerprint{
+		MsgID: msg.Id,
+		RD:    msg.RecursionDesired,
+		CD:    msg.CheckingDisabled,
+		AD:    msg.AuthenticatedData,
+	}
+
+	if len(msg.Question) > 0 {
+		q := msg.Question[0]
+		fp.QClass = q.Qclass
+		fp.Mixed0x20 = strings.ContainsFunc(q.Name, func(r rune) bool { return r >= 'A' && r <= 'Z' })
+	}
+
+	if opt := msg.IsEdns0(); opt != nil {
+		fp.HadEDNS0 = true
+		fp.EDNSVersion = opt.Version()
+		fp.EDNSUDPSize = opt.UDPSize()
+		fp.DO = opt.Do()
+
+		for _, o := range opt.Option {
+			code := o.Option()
+			fp.EDNSOptCodes = append(fp.EDNSOptCodes, code)
+
+			if code == dns.EDNS0COOKIE {
+				fp.HasCookie = true
+			}
+		}
+	}
+
+	return fp
+}
+
 func newRequestFromDNS(ctx context.Context, rw dns.ResponseWriter, msg *dns.Msg) (context.Context, *model.Request) {
 	var (
 		clientIP net.IP
 		protocol model.RequestProtocol
 	)
 
+	fp := fingerprintFromMsg(msg)
+
 	if rw != nil {
 		clientIP, protocol = resolveClientIPAndProtocol(rw.RemoteAddr())
+
+		switch a := rw.RemoteAddr().(type) {
+		case *net.UDPAddr:
+			fp.SrcPort = uint16(a.Port) //nolint:gosec // G115: ports are 0-65535
+			fp.Transport = model.TransportDo53UDP
+		case *net.TCPAddr:
+			fp.SrcPort = uint16(a.Port) //nolint:gosec // G115: ports are 0-65535
+			fp.Transport = model.TransportDo53TCP
+		}
 	}
 
 	var clientID string
 	if con, ok := rw.(dns.ConnectionStater); ok && con.ConnectionState() != nil {
-		clientID = extractClientIDFromHost(con.ConnectionState().ServerName)
+		cs := con.ConnectionState()
+		clientID = extractClientIDFromHost(cs.ServerName)
+
+		fp.Transport = model.TransportDoT
+		fp.TLSVersion = cs.Version
+		fp.TLSCipher = cs.CipherSuite
+		fp.SNI = cs.ServerName
+		fp.ALPN = cs.NegotiatedProtocol
 	}
 
-	return newRequest(ctx, clientIP, clientID, protocol, msg)
+	ctx, request := newRequest(ctx, clientIP, clientID, protocol, msg)
+	request.Fingerprint = fp
+
+	return ctx, request
 }
 
 func newRequestFromHTTP(ctx context.Context, req *http.Request, msg *dns.Msg) (context.Context, *model.Request) {
@@ -803,7 +873,32 @@ func newRequestFromHTTP(ctx context.Context, req *http.Request, msg *dns.Msg) (c
 		clientID = extractClientIDFromHost(req.Host)
 	}
 
-	return newRequest(ctx, clientIP, clientID, protocol, msg)
+	fp := fingerprintFromMsg(msg)
+	fp.UserAgent = req.Header.Get("User-Agent")
+
+	if req.ProtoMajor == 3 {
+		fp.Transport = model.TransportDoH3
+	} else {
+		fp.Transport = model.TransportDoH
+	}
+
+	if req.TLS != nil {
+		fp.TLSVersion = req.TLS.Version
+		fp.TLSCipher = req.TLS.CipherSuite
+		fp.SNI = req.TLS.ServerName
+		fp.ALPN = req.TLS.NegotiatedProtocol
+	}
+
+	if _, port, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		if p, err := strconv.ParseUint(port, 10, 16); err == nil {
+			fp.SrcPort = uint16(p)
+		}
+	}
+
+	ctx, request := newRequest(ctx, clientIP, clientID, protocol, msg)
+	request.Fingerprint = fp
+
+	return ctx, request
 }
 
 // OnRequest will be executed if a new DNS request is received

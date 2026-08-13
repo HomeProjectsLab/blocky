@@ -97,10 +97,15 @@ var _ = Describe("UpstreamTreeResolver", Label("upstreamTreeResolver"), func() {
 				sutConfig.Strategy = config.UpstreamStrategyRecursive
 			})
 
-			It("returns a not-implemented error", func() {
-				Expect(err).To(HaveOccurred())
-				Expect(err).To(MatchError(ContainSubstring("recursive strategy lands in Phase 4")))
-				Expect(sut).To(BeNil())
+			It("creates a recursive resolver branch", func() {
+				Expect(err).Should(Succeed())
+
+				tree, ok := sut.(*UpstreamTreeResolver)
+				Expect(ok).Should(BeTrue())
+				Expect(tree.branches).Should(HaveLen(1))
+
+				_, ok = tree.branches[upstreamDefaultCfgName].(*RecursiveResolver)
+				Expect(ok).Should(BeTrue())
 			})
 		})
 

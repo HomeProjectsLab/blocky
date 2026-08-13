@@ -26,7 +26,8 @@ const (
 )
 
 // seedYAMLTemplate is the starter config written on first launch. %s is the
-// absolute db directory. quad9 is a placeholder until the recursive engine lands.
+// absolute db directory. The default group resolves recursively from the root
+// servers; the quad9 upstreams are its fallback tier.
 const seedYAMLTemplate = `ports:
   http: 4000
 upstreams:
@@ -34,6 +35,9 @@ upstreams:
     default:
       - 9.9.9.9
       - 149.112.112.112
+  groupConfig:
+    default:
+      strategy: recursive
 queryLog:
   type: sqlite
   target: %s/querylog.db

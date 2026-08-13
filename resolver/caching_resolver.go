@@ -445,4 +445,12 @@ func (r *CachingResolver) FlushCaches(ctx context.Context) {
 
 	logger.Debug("flush caches")
 	r.resultCache.Clear()
+
+	// propagate down the chain (e.g. to the recursive resolver's zdns cache):
+	// the API flush endpoint only calls the first CacheControl found in the chain.
+	ForEach(r.GetNext(), func(res Resolver) {
+		if flusher, ok := res.(cacheFlusher); ok {
+			flusher.FlushCaches(ctx)
+		}
+	})
 }

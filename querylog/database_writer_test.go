@@ -5,11 +5,13 @@ package querylog
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/model"
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/glebarez/sqlite"
@@ -205,6 +207,101 @@ var _ = Describe("DatabaseWriter", func() {
 		})
 	})
 
+	Describe("Fingerprint columns", func() {
+		It("persists fingerprint fields and creates the planned indexes", func() {
+			writer, err := newDatabaseWriter(ctx, sqlite.Open("file::memory:"), 7, time.Minute, config.QueryLogTypeSqlite)
+			Expect(err).Should(Succeed())
+
+			sqlDB, err := writer.db.DB()
+			Expect(err).Should(Succeed())
+			DeferCleanup(sqlDB.Close)
+
+			writer.Write(&LogEntry{
+				Start:        time.Now(),
+				QuestionName: "example.com.",
+				Fingerprint: model.Fingerprint{
+					Transport:    model.TransportDoT,
+					SrcPort:      54321,
+					TLSVersion:   0x0304,
+					TLSCipher:    0x1301,
+					SNI:          "dns.example.com",
+					ALPN:         "dot",
+					UserAgent:    "test-client/1.0",
+					MsgID:        4711,
+					QClass:       1,
+					RD:           true,
+					HadEDNS0:     true,
+					EDNSUDPSize:  1232,
+					DO:           true,
+					EDNSOptCodes: []uint16{10, 8, 12},
+					HasCookie:    true,
+					Mixed0x20:    true,
+				},
+			})
+			Expect(writer.doDBWrite()).Should(Succeed())
+
+			var row logEntry
+			Expect(writer.db.First(&row).Error).Should(Succeed())
+
+			Expect(row.Transport).Should(Equal("dot"))
+			Expect(row.FpHash).Should(HaveLen(20))
+			Expect(row.DoHUserAgent).Should(Equal("test-client/1.0"))
+			Expect(row.SNI).Should(Equal("dns.example.com"))
+			Expect(row.EDNSUDPSize).Should(Equal(uint16(1232)))
+			Expect(row.EDNSOptCodes).Should(Equal("10,8,12"))
+			Expect(row.Decoy).Should(BeFalse())
+
+			var detail map[string]any
+			Expect(json.Unmarshal([]byte(row.FpDetail), &detail)).Should(Succeed())
+			Expect(detail).Should(HaveKeyWithValue("srcport", BeNumerically("==", 54321)))
+			Expect(detail).Should(HaveKeyWithValue("msgid", BeNumerically("==", 4711)))
+			Expect(detail).Should(HaveKeyWithValue("rd", BeTrue()))
+			Expect(detail).Should(HaveKeyWithValue("hasCookie", BeTrue()))
+			Expect(detail).Should(HaveKeyWithValue("mixed0x20", BeTrue()))
+
+			migrator := writer.db.Migrator()
+			Expect(migrator.HasIndex(&logEntry{}, "idx_client_name_request_ts")).Should(BeTrue())
+			Expect(migrator.HasIndex(&logEntry{}, "QuestionName")).Should(BeTrue())
+			Expect(migrator.HasIndex(&logEntry{}, "Transport")).Should(BeTrue())
+			Expect(migrator.HasIndex(&logEntry{}, "FpHash")).Should(BeTrue())
+			Expect(migrator.HasIndex(&logEntry{}, "Decoy")).Should(BeTrue())
+		})
+	})
+
+	Describe("Flush on shutdown", func() {
+		It("writes buffered entries when the context is cancelled", func() {
+			dbPath := filepath.Join(GinkgoT().TempDir(), "querylog.db")
+
+			// flush period of one minute: the ticker never fires during the test,
+			// so only the shutdown flush can persist the entries
+			writer, err := NewDatabaseWriter(ctx, config.QueryLogTypeSqlite, dbPath, 7, time.Minute)
+			Expect(err).Should(Succeed())
+
+			writer.Write(&LogEntry{Start: time.Now(), DurationMs: 20})
+			writer.Write(&LogEntry{Start: time.Now(), DurationMs: 21})
+
+			cancelFn()
+
+			// wait until the shutdown flush ran, then verify from a fresh connection on the file
+			Eventually(countLogEntries, "5s").WithArguments(writer.db).Should(BeNumerically("==", 2))
+
+			sqlDB, err := writer.db.DB()
+			Expect(err).Should(Succeed())
+			Expect(sqlDB.Close()).Should(Succeed())
+
+			reopened, err := gorm.Open(sqlite.Open(dbPath))
+			Expect(err).Should(Succeed())
+
+			reopenedDB, err := reopened.DB()
+			Expect(err).Should(Succeed())
+			DeferCleanup(reopenedDB.Close)
+
+			count, err := countLogEntries(reopened)
+			Expect(err).Should(Succeed())
+			Expect(count).Should(BeNumerically("==", 2))
+		})
+	})
+
 	Describe("Database query log fails", func() {
 		When("mysql connection parameters wrong", func() {
 			It("should be log with fatal", func() {
@@ -271,6 +368,11 @@ var _ = Describe("DatabaseWriter", func() {
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_response_type"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_client_name"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_request_ts"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_client_name_request_ts"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_question_name"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_transport"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_fp_hash"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_decoy"`).WillReturnResult(sqlmock.NewResult(0, 0))
 				})
 
 				By("create postgres specific manually defined primary key", func() {

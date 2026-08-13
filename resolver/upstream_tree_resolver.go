@@ -49,8 +49,20 @@ type UpstreamTreeResolver struct {
 
 func NewUpstreamTreeResolver(ctx context.Context, cfg config.Upstreams, bootstrap *Bootstrap) (Resolver, error) {
 	if len(cfg.Groups[upstreamDefaultCfgName]) == 0 {
-		return nil, fmt.Errorf("no external DNS resolvers configured as default upstream resolvers. "+
-			"Please configure at least one under '%s' configuration name", upstreamDefaultCfgName)
+		// a recursive default group resolves from the roots and needs no upstreams
+		if cfg.EffectiveStrategy(upstreamDefaultCfgName) != config.UpstreamStrategyRecursive {
+			return nil, fmt.Errorf("no external DNS resolvers configured as default upstream resolvers. "+
+				"Please configure at least one under '%s' configuration name", upstreamDefaultCfgName)
+		}
+
+		// make sure the default branch is built even if the group is absent
+		if _, ok := cfg.Groups[upstreamDefaultCfgName]; !ok {
+			if cfg.Groups == nil {
+				cfg.Groups = config.UpstreamGroups{}
+			}
+
+			cfg.Groups[upstreamDefaultCfgName] = nil
+		}
 	}
 
 	branches, err := createUpstreamBranches(ctx, cfg, bootstrap)
@@ -144,7 +156,7 @@ func createUpstreamBranches(
 		case config.UpstreamStrategyDomainShard:
 			upstream, err = NewDomainShardResolver(ctx, groupConfig, bootstrap)
 		case config.UpstreamStrategyRecursive:
-			err = errors.New("recursive strategy lands in Phase 4")
+			upstream, err = NewRecursiveResolver(ctx, groupConfig, bootstrap)
 		}
 
 		if err != nil {
@@ -161,6 +173,16 @@ func createUpstreamBranches(
 	}
 
 	return branches, nil
+}
+
+// FlushCaches propagates a cache flush to all branches that hold their own cache
+// (e.g. the recursive resolver's zdns cache).
+func (r *UpstreamTreeResolver) FlushCaches(ctx context.Context) {
+	for _, branch := range r.branches {
+		if flusher, ok := branch.(cacheFlusher); ok {
+			flusher.FlushCaches(ctx)
+		}
+	}
 }
 
 func (r *UpstreamTreeResolver) Name() string {

@@ -2,6 +2,7 @@ package querylog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -24,18 +25,44 @@ import (
 )
 
 type logEntry struct {
-	RequestTS     time.Time `gorm:"not null;index"`
+	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2"`
 	ClientIP      string
-	ClientName    string `gorm:"index"`
+	ClientName    string `gorm:"index;index:idx_client_name_request_ts,priority:1"`
 	DurationMs    int64
 	Reason        string
 	ResponseType  string `gorm:"index"`
 	QuestionType  string
-	QuestionName  string
+	QuestionName  string `gorm:"index"`
 	EffectiveTLDP string
 	Answer        string
 	ResponseCode  string
 	Hostname      string
+	Transport     string `gorm:"index"`
+	FpHash        string `gorm:"index"`
+	DoHUserAgent  string `gorm:"column:doh_user_agent"`
+	SNI           string `gorm:"column:sni"`
+	EDNSUDPSize   uint16 `gorm:"column:edns_udp_size"`
+	EDNSOptCodes  string `gorm:"column:edns_opt_codes"` // wire order, e.g. "10,8,12"
+	Decoy         bool   `gorm:"index"`
+	FpDetail      string // JSON with the per-query fingerprint noise
+}
+
+// fpDetail is the JSON layout of logEntry.FpDetail.
+type fpDetail struct {
+	SrcPort     uint16 `json:"srcport"`
+	TLSVersion  uint16 `json:"tlsversion"`
+	TLSCipher   uint16 `json:"tlscipher"`
+	ALPN        string `json:"alpn"`
+	MsgID       uint16 `json:"msgid"`
+	QClass      uint16 `json:"qclass"`
+	RD          bool   `json:"rd"`
+	CD          bool   `json:"cd"`
+	AD          bool   `json:"ad"`
+	DO          bool   `json:"do"`
+	HadEDNS0    bool   `json:"hadEdns0"`
+	EDNSVersion uint8  `json:"ednsVersion"`
+	HasCookie   bool   `json:"hasCookie"`
+	Mixed0x20   bool   `json:"mixed0x20"`
 }
 
 type DatabaseWriter struct {
@@ -182,14 +209,52 @@ func (d *DatabaseWriter) periodicFlush(ctx context.Context) {
 			util.LogOnError(ctx, "can't write entries to the database: ", err)
 
 		case <-ctx.Done():
+			// final flush so short-lived runs don't lose the buffered entries;
+			// ctx is cancelled, so log via a fresh context
+			err := d.doDBWrite()
+
+			util.LogOnError(context.Background(), "can't write entries to the database on shutdown: ", err)
+
 			return
 		}
 	}
 }
 
+// Flush synchronously persists all pending entries. Server.Stop calls this
+// through the resolver chain so process exit can't race the async flush
+// goroutine (ctx-cancel flush alone lost entries on fast shutdowns).
+func (d *DatabaseWriter) Flush() error {
+	return d.doDBWrite()
+}
+
 func (d *DatabaseWriter) Write(entry *LogEntry) {
 	domain := util.ExtractDomainOnly(entry.QuestionName)
 	eTLD, _ := publicsuffix.EffectiveTLDPlusOne(domain)
+
+	fp := &entry.Fingerprint
+
+	optCodes := make([]string, len(fp.EDNSOptCodes))
+	for i, c := range fp.EDNSOptCodes {
+		optCodes[i] = strconv.FormatUint(uint64(c), 10)
+	}
+
+	detail, err := json.Marshal(fpDetail{
+		SrcPort:     fp.SrcPort,
+		TLSVersion:  fp.TLSVersion,
+		TLSCipher:   fp.TLSCipher,
+		ALPN:        fp.ALPN,
+		MsgID:       fp.MsgID,
+		QClass:      fp.QClass,
+		RD:          fp.RD,
+		CD:          fp.CD,
+		AD:          fp.AD,
+		DO:          fp.DO,
+		HadEDNS0:    fp.HadEDNS0,
+		EDNSVersion: fp.EDNSVersion,
+		HasCookie:   fp.HasCookie,
+		Mixed0x20:   fp.Mixed0x20,
+	})
+	util.LogOnError(context.Background(), "can't marshal fingerprint detail: ", err)
 
 	e := &logEntry{
 		RequestTS:     entry.Start,
@@ -204,6 +269,14 @@ func (d *DatabaseWriter) Write(entry *LogEntry) {
 		Answer:        entry.Answer,
 		ResponseCode:  entry.ResponseCode,
 		Hostname:      entry.BlockyInstance,
+		Transport:     fp.Transport.String(),
+		FpHash:        fp.Hash(),
+		DoHUserAgent:  fp.UserAgent,
+		SNI:           fp.SNI,
+		EDNSUDPSize:   fp.EDNSUDPSize,
+		EDNSOptCodes:  strings.Join(optCodes, ","),
+		Decoy:         entry.Decoy,
+		FpDetail:      string(detail),
 	}
 
 	d.lock.Lock()

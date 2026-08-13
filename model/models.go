@@ -87,4 +87,5 @@ type Request struct {
 	ClientNames     []string
 	Req             *dns.Msg
 	RequestTS       time.Time
+	Fingerprint     Fingerprint
 }

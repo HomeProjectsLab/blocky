@@ -23,6 +23,8 @@ type LogEntry struct {
 	QueryTime      time.Time
 	ResponseTime   time.Time
 	SocketProtocol model.RequestProtocol
+	Fingerprint    model.Fingerprint
+	Decoy          bool
 }
 
 type Writer interface {

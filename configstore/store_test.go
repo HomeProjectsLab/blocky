@@ -43,6 +43,9 @@ var _ = Describe("Store", func() {
 			Expect(group[0].Host).Should(Equal("9.9.9.9"))
 			Expect(group[1].Host).Should(Equal("149.112.112.112"))
 
+			Expect(cfg.Upstreams.EffectiveStrategy("default")).
+				Should(Equal(config.UpstreamStrategyRecursive))
+
 			Expect(cfg.QueryLog.Type).Should(Equal(config.QueryLogTypeSqlite))
 			Expect(string(cfg.QueryLog.Target)).Should(Equal(filepath.Join(dir, "querylog.db")))
 		})

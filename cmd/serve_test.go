@@ -16,9 +16,18 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-const (
-	basePort = 5000
-)
+// freeTCPPort asks the kernel for a free port; avoids collisions when
+// multiple package test binaries run in parallel (fixed bases collided).
+func freeTCPPort() string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	Expect(err).Should(Succeed())
+	defer ln.Close()
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	Expect(err).Should(Succeed())
+
+	return port
+}
 
 func minimalYAML(dnsPort string, extraLines ...string) string {
 	lines := []string{
@@ -49,7 +58,7 @@ var _ = Describe("Serve command", func() {
 	)
 
 	BeforeEach(func() {
-		port = helpertest.GetStringPort(basePort)
+		port = freeTCPPort()
 		tmpDir = helpertest.NewTmpFolder("db")
 
 		var err error
@@ -91,7 +100,7 @@ var _ = Describe("Serve command", func() {
 
 			Eventually(dialable(port), "5s").Should(Succeed())
 
-			newPort := helpertest.GetStringPort(basePort + 100)
+			newPort := freeTCPPort()
 
 			By("apply new config with different DNS port", func() {
 				Expect(store.SetRawYAML(minimalYAML(newPort))).Should(Succeed())
@@ -122,7 +131,7 @@ var _ = Describe("Serve command", func() {
 
 			Eventually(dialable(port), "5s").Should(Succeed())
 
-			blockedPort := helpertest.GetStringPort(basePort + 200)
+			blockedPort := freeTCPPort()
 
 			By("occupy the HTTP port of the new config", func() {
 				ln, err := net.Listen("tcp", "127.0.0.1:"+blockedPort)

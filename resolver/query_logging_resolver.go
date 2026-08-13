@@ -271,6 +271,8 @@ func (r *QueryLoggingResolver) createLogEntry(request *model.Request, response *
 		ClientIP:       defaultClientIP,
 		ClientNames:    []string{"none"},
 		BlockyInstance: r.instanceID,
+		Fingerprint:    request.Fingerprint,
+		Decoy:          false, // decoy engine lands in a later phase; column exists so the schema is stable
 	}
 
 	for _, f := range r.cfg.Fields {
@@ -319,6 +321,24 @@ func (r *QueryLoggingResolver) createLogEntry(request *model.Request, response *
 	}
 
 	return &entry
+}
+
+// Flush drains buffered log entries into the writer and forces them to
+// storage. Called synchronously from Server.Stop after the DNS listeners are
+// down, so shutdown can't race the async writeLog/periodicFlush goroutines.
+func (r *QueryLoggingResolver) Flush() error {
+	for {
+		select {
+		case entry := <-r.logChan:
+			r.writer.Write(entry)
+		default:
+			if fl, ok := r.writer.(interface{ Flush() error }); ok {
+				return fl.Flush()
+			}
+
+			return nil
+		}
+	}
 }
 
 // write entry: if log directory is configured, write to log file

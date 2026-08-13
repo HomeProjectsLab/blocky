@@ -112,6 +112,12 @@ type NamedResolver interface {
 	Name() string
 }
 
+// cacheFlusher is implemented by resolvers that hold a flushable cache
+// (same shape as api.CacheControl).
+type cacheFlusher interface {
+	FlushCaches(ctx context.Context)
+}
+
 // Chain creates a chain of resolvers
 func Chain(resolvers ...Resolver) ChainedResolver {
 	for i, res := range resolvers {
