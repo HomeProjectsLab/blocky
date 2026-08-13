@@ -667,6 +667,26 @@ func LoadConfig(path string, mandatory bool) (rCfg *Config, rerr error) {
 	return loadConfig(logger, path, mandatory)
 }
 
+// LoadFromYAML creates a new Config from raw YAML bytes using the same
+// pipeline as LoadConfig: defaults, strict unmarshal with schema validation,
+// migration of deprecated options and validation.
+func LoadFromYAML(data []byte) (*Config, error) {
+	logger := logrus.NewEntry(log.Log())
+
+	cfg, err := WithDefaults[Config]()
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply default configuration: %w", err)
+	}
+
+	if err := loadFromBytes(logger, data, &cfg, nil); err != nil {
+		return nil, err
+	}
+
+	util.LogPrivacy.Store(cfg.Log.Privacy)
+
+	return &cfg, nil
+}
+
 func loadConfig(logger *logrus.Entry, path string, mandatory bool) (rCfg *Config, rerr error) {
 	cfg, err := WithDefaults[Config]()
 	if err != nil {
@@ -697,20 +717,30 @@ func loadConfig(logger *logrus.Entry, path string, mandatory bool) (rCfg *Config
 
 	cfg.CustomDNS.Zone.configPath = prettyPath
 
-	err = unmarshalConfig(logger, data, &cfg, sources)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config from %s: %w", prettyPath, err)
+	if err := loadFromBytes(logger, data, &cfg, sources); err != nil {
+		return nil, fmt.Errorf("failed to load config from %s: %w", prettyPath, err)
+	}
+
+	return &cfg, nil
+}
+
+// loadFromBytes runs the shared post-read pipeline on raw YAML bytes:
+// strict unmarshal with schema validation, migration, validation and
+// rewrite key normalization.
+func loadFromBytes(logger *logrus.Entry, data []byte, cfg *Config, sources []configFile) error {
+	if err := unmarshalConfig(logger, data, cfg, sources); err != nil {
+		return err
 	}
 
 	if err := cfg.Ports.validate(); err != nil {
-		logger.Fatal(err)
+		return err
 	}
 
 	// Normalize rewrite keys to lowercase after unmarshaling
 	cfg.CustomDNS.NormalizeRewrites()
 	cfg.Conditional.NormalizeRewrites()
 
-	return &cfg, nil
+	return nil
 }
 
 // readConfigSource reads the raw config bytes for path, which is either a
@@ -859,9 +889,7 @@ func unmarshalConfig(logger *logrus.Entry, data []byte, cfg *Config, sources []c
 		logger.Error("configuration uses deprecated options, see warning logs for details")
 	}
 
-	cfg.validate(logger)
-
-	return nil
+	return cfg.validate(logger)
 }
 
 // reconcileSchemaErrors validates the merged document and returns an indented
@@ -961,7 +989,7 @@ func (cfg *Config) migrate(logger *logrus.Entry) bool {
 	return usesDepredOpts
 }
 
-func (cfg *Config) validate(logger *logrus.Entry) {
+func (cfg *Config) validate(logger *logrus.Entry) error {
 	cfg.MinTLSServeVer.validate(logger)
 	cfg.Upstreams.validate(logger)
 
@@ -972,16 +1000,14 @@ func (cfg *Config) validate(logger *logrus.Entry) {
 
 	// DNS64 validation
 	if err := cfg.DNS64.validate(logger, &cfg.Filtering, &cfg.Caching); err != nil {
-		logger.Fatal(err)
+		return err
 	}
 
 	if err := cfg.RateLimit.validate(); err != nil {
-		logger.Fatal(err)
+		return err
 	}
 
-	if err := cfg.RebindingProtection.validate(); err != nil {
-		logger.Fatal(err)
-	}
+	return cfg.RebindingProtection.validate()
 }
 
 // ConvertPort converts string representation into a valid port (0 - 65535)

@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/0xERR0R/blocky/evt"
@@ -11,11 +12,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// RegisterEventListeners registers all metric handlers by the event bus
+//nolint:gochecknoglobals
+var registerEventListenersOnce sync.Once
+
+// RegisterEventListeners registers all metric handlers by the event bus.
+//
+// It is idempotent: the gauges and event-bus subscriptions are process-global
+// (the bus is a singleton), so a server rebuild must not subscribe a second
+// set of handlers updating a second set of unregistered gauges.
 func RegisterEventListeners() {
-	registerBlockingEventListeners()
-	registerCachingEventListeners()
-	registerApplicationEventListeners()
+	registerEventListenersOnce.Do(func() {
+		registerBlockingEventListeners()
+		registerCachingEventListeners()
+		registerApplicationEventListeners()
+	})
 }
 
 func registerApplicationEventListeners() {
