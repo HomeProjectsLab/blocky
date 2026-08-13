@@ -29,6 +29,10 @@ func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog
 	router.Get("/api/ui/queries", s.queries)
 	router.Get("/api/ui/stream", s.stream)
 	router.Get("/api/ui/system", s.system)
+	router.Get("/api/ui/clients", s.clients)
+	router.Get("/api/ui/clients/{name}", s.clientDetail)
+	router.Get("/api/ui/privacy", s.getPrivacy)
+	router.Put("/api/ui/privacy", s.putPrivacy)
 }
 
 type statsAPI struct {

@@ -8,6 +8,12 @@ const pageModules = {
     dashboard: "./dashboard.js",
     live: "./live.js",
     queries: "./queries.js",
+    upstreams: "./upstreams.js",
+    blocking: "./blocking.js",
+    clients: "./clients.js",
+    privacy: "./privacy.js",
+    settings: "./settings.js",
+    system: "./system.js",
 };
 
 if (pageModules[page]) {

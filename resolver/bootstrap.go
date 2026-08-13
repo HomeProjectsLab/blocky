@@ -100,7 +100,7 @@ func NewBootstrap(ctx context.Context, cfg *config.Config) (b *Bootstrap, err er
 	}
 
 	b.bootstraped = bootstraped
-	cachingResolver, _ := newCachingResolver(ctx, cachingCfg, config.DNSSEC{}, nil, false)
+	cachingResolver, _ := newCachingResolver(ctx, cachingCfg, config.DNSSEC{}, config.TTLJitterConfig{}, nil, false)
 
 	b.resolver = Chain(
 		NewFilteringResolver(cfg.Filtering),

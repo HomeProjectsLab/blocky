@@ -33,6 +33,9 @@ type Upstreams struct {
 	QUIC QUICConfig `yaml:"quic"`
 	// Per-group settings overriding the global strategy.
 	GroupConfig map[string]UpstreamGroupConfig `yaml:"groupConfig"`
+	// EDNSPadding pads outgoing queries on encrypted transports (DoT/DoH/DoQ) to a block
+	// boundary (RFC 7830). Runtime-derived from privacy.ednsPadding, not user-set here.
+	EDNSPadding bool `yaml:"-"`
 }
 
 // UpstreamGroupConfig holds per-group settings overriding the global ones.

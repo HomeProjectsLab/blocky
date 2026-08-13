@@ -1,6 +1,7 @@
 package querylog
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -395,4 +396,197 @@ func (r *Reader) TotalQueries() (int64, error) {
 	var count int64
 
 	return count, r.db.Model(&logEntry{}).Count(&count).Error
+}
+
+// ClientRow is one entry of the /api/ui/clients list response.
+type ClientRow struct {
+	Name     string `json:"name"`
+	Queries  int64  `json:"queries"`
+	Blocked  int64  `json:"blocked"`
+	LastSeen string `json:"lastSeen"`
+}
+
+// ClientList ranks clients by query count in the range (from the hourly aggregates).
+func (r *Reader) ClientList(from, to time.Time) ([]ClientRow, error) {
+	var rows []struct {
+		Name     string `gorm:"column:name"`
+		Queries  int64  `gorm:"column:queries"`
+		Blocked  int64  `gorm:"column:blocked"`
+		LastHour string `gorm:"column:last_hour"` // MAX() drops sqlite datetime affinity -> text
+	}
+
+	err := r.db.Raw(`SELECT client_name AS name, SUM(cnt) AS queries,
+		COALESCE(SUM(CASE WHEN response_type = 'BLOCKED' THEN cnt ELSE 0 END),0) AS blocked,
+		MAX(hour) AS last_hour
+		FROM agg_hourly WHERE hour >= ? AND hour < ? GROUP BY client_name ORDER BY queries DESC`,
+		from.UTC(), to.UTC()).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]ClientRow, 0, len(rows))
+	for i := range rows {
+		out = append(out, ClientRow{
+			Name: rows[i].Name, Queries: rows[i].Queries, Blocked: rows[i].Blocked,
+			LastSeen: normalizeSQLiteTime(rows[i].LastHour),
+		})
+	}
+
+	return out, nil
+}
+
+// normalizeSQLiteTime reparses a sqlite datetime text (whose column affinity was
+// lost by an aggregate like MAX()) into RFC3339; returns the input unchanged if
+// no known layout matches.
+func normalizeSQLiteTime(s string) string {
+	if s == "" {
+		return ""
+	}
+
+	for _, layout := range []string{
+		time.RFC3339Nano, time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+
+	return s
+}
+
+// FpCluster is one client-software fingerprint cluster with a representative
+// sample of its EDNS features (pulled from the most recent matching raw row).
+type FpCluster struct {
+	FpHash       string `json:"fpHash"`
+	Count        int64  `json:"count"`
+	Transport    string `json:"transport"`
+	DO           bool   `json:"do"`
+	HadEDNS0     bool   `json:"hadEdns0"`
+	HasCookie    bool   `json:"hasCookie"`
+	EDNSUDPSize  uint16 `json:"ednsUdpSize"`
+	EDNSOptCodes string `json:"ednsOptCodes"`
+	DoHUserAgent string `json:"dohUserAgent"`
+}
+
+// ClientDetail is the /api/ui/clients/{name} response: activity history plus the
+// fingerprint panel (transport mix, fp clusters, top domains).
+type ClientDetail struct {
+	Name         string      `json:"name"`
+	Queries      int64       `json:"queries"`
+	Blocked      int64       `json:"blocked"`
+	History      []Bucket    `json:"history"`
+	Transports   []TopItem   `json:"transports"`
+	Fingerprints []FpCluster `json:"fingerprints"`
+	TopDomains   []TopItem   `json:"topDomains"`
+}
+
+// ClientDetail assembles the drill-down for one client (keyed by the exact
+// aggregated client_name). History/transports/fingerprints come from the hourly
+// aggregates; top domains from the raw log (client-scoped, index-backed).
+func (r *Reader) ClientDetail(name string, from, to time.Time) (*ClientDetail, error) {
+	d := &ClientDetail{Name: name, History: []Bucket{}, Transports: []TopItem{}, Fingerprints: []FpCluster{}, TopDomains: []TopItem{}}
+
+	var totals struct {
+		Queries int64 `gorm:"column:queries"`
+		Blocked int64 `gorm:"column:blocked"`
+	}
+
+	err := r.db.Raw(`SELECT COALESCE(SUM(cnt),0) AS queries,
+		COALESCE(SUM(CASE WHEN response_type = 'BLOCKED' THEN cnt ELSE 0 END),0) AS blocked
+		FROM agg_hourly WHERE client_name = ? AND hour >= ? AND hour < ?`,
+		name, from.UTC(), to.UTC()).Scan(&totals).Error
+	if err != nil {
+		return nil, err
+	}
+
+	d.Queries, d.Blocked = totals.Queries, totals.Blocked
+
+	var histRows []struct {
+		Hour time.Time `gorm:"column:hour"`
+		Cnt  int64     `gorm:"column:cnt"`
+	}
+
+	err = r.db.Raw(`SELECT hour, SUM(cnt) AS cnt FROM agg_hourly
+		WHERE client_name = ? AND hour >= ? AND hour < ? GROUP BY hour ORDER BY hour`,
+		name, from.UTC(), to.UTC()).Scan(&histRows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	for _, h := range histRows {
+		d.History = append(d.History, Bucket{TS: h.Hour.Unix(), Counts: map[string]int64{"queries": h.Cnt}})
+	}
+
+	err = r.db.Raw(`SELECT transport AS name, SUM(cnt) AS c FROM agg_hourly
+		WHERE client_name = ? AND hour >= ? AND hour < ? GROUP BY transport ORDER BY c DESC`,
+		name, from.UTC(), to.UTC()).Scan(&d.Transports).Error
+	if err != nil {
+		return nil, err
+	}
+
+	err = r.db.Raw(`SELECT COALESCE(NULLIF(effective_tldp,''), question_name) AS name, COUNT(*) AS c
+		FROM log_entries WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0
+		GROUP BY name ORDER BY c DESC LIMIT 10`,
+		name, from, to).Scan(&d.TopDomains).Error
+	if err != nil {
+		return nil, err
+	}
+
+	if err := r.fingerprintClusters(d, name, from, to); err != nil {
+		return nil, err
+	}
+
+	return d, nil
+}
+
+func (r *Reader) fingerprintClusters(d *ClientDetail, name string, from, to time.Time) error {
+	var fpRows []TopItem
+
+	err := r.db.Raw(`SELECT fp_hash AS name, SUM(cnt) AS c FROM agg_hourly
+		WHERE client_name = ? AND hour >= ? AND hour < ? AND fp_hash <> '' GROUP BY fp_hash ORDER BY c DESC`,
+		name, from.UTC(), to.UTC()).Scan(&fpRows).Error
+	if err != nil {
+		return err
+	}
+
+	for _, fp := range fpRows {
+		cluster := FpCluster{FpHash: fp.Name, Count: fp.Count}
+
+		var sample struct {
+			Transport    string `gorm:"column:transport"`
+			EDNSUDPSize  uint16 `gorm:"column:edns_udp_size"`
+			EDNSOptCodes string `gorm:"column:edns_opt_codes"`
+			DoHUserAgent string `gorm:"column:doh_user_agent"`
+			FpDetail     string `gorm:"column:fp_detail"`
+		}
+
+		// most recent raw row for this cluster carries the EDNS feature sample
+		err := r.db.Raw(`SELECT transport, edns_udp_size, edns_opt_codes, doh_user_agent, fp_detail
+			FROM log_entries WHERE client_name = ? AND fp_hash = ? ORDER BY request_ts DESC LIMIT 1`,
+			name, fp.Name).Scan(&sample).Error
+		if err != nil {
+			return err
+		}
+
+		cluster.Transport = sample.Transport
+		cluster.EDNSUDPSize = sample.EDNSUDPSize
+		cluster.EDNSOptCodes = sample.EDNSOptCodes
+		cluster.DoHUserAgent = sample.DoHUserAgent
+
+		if sample.FpDetail != "" {
+			var det fpDetail
+			if json.Unmarshal([]byte(sample.FpDetail), &det) == nil {
+				cluster.DO = det.DO
+				cluster.HadEDNS0 = det.HadEDNS0
+				cluster.HasCookie = det.HasCookie
+			}
+		}
+
+		d.Fingerprints = append(d.Fingerprints, cluster)
+	}
+
+	return nil
 }

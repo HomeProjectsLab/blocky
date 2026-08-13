@@ -26,6 +26,7 @@ var _ = Describe("CachingResolver", func() {
 		sut        *CachingResolver
 		sutConfig  config.Caching
 		sutDNSSEC  config.DNSSEC
+		sutJitter  config.TTLJitterConfig
 		m          *mockResolver
 		mockAnswer *dns.Msg
 		ctx        context.Context
@@ -42,6 +43,7 @@ var _ = Describe("CachingResolver", func() {
 	BeforeEach(func() {
 		sutConfig = config.Caching{}
 		sutDNSSEC = config.DNSSEC{}
+		sutJitter = config.TTLJitterConfig{}
 		if err := defaults.Set(&sutConfig); err != nil {
 			panic(err)
 		}
@@ -52,7 +54,7 @@ var _ = Describe("CachingResolver", func() {
 		ctx, cancelFn = context.WithCancel(context.Background())
 		DeferCleanup(cancelFn)
 
-		sut, _ = NewCachingResolver(ctx, sutConfig, sutDNSSEC, nil)
+		sut, _ = NewCachingResolver(ctx, sutConfig, sutDNSSEC, sutJitter, nil)
 		m = &mockResolver{}
 		cacheMock = cache.NewMockExpiringCache[[]byte](GinkgoT())
 		m.On("Resolve", mock.Anything).Return(&Response{Res: mockAnswer}, nil)
@@ -83,6 +85,50 @@ var _ = Describe("CachingResolver", func() {
 			sut.LogConfig(logger)
 
 			Expect(hook.Calls).ShouldNot(BeEmpty())
+		})
+	})
+
+	Describe("TTL jitter", func() {
+		makeAnswer := func(ttl uint32) []dns.RR {
+			rr, err := dns.NewRR(fmt.Sprintf("example.com. %d IN A 1.2.3.4", ttl))
+			Expect(err).Should(Succeed())
+
+			return []dns.RR{rr}
+		}
+
+		When("disabled (default)", func() {
+			It("leaves record TTLs unchanged", func() {
+				answer := makeAnswer(600)
+				sut.adjustTTLs(answer)
+				Expect(answer[0].Header().Ttl).Should(Equal(uint32(600)))
+			})
+		})
+
+		When("enabled", func() {
+			BeforeEach(func() {
+				sutJitter = config.TTLJitterConfig{Enable: true, PercentPct: 10}
+			})
+
+			It("keeps every jittered TTL within the +/-p band and varies them across records", func() {
+				const base = 600
+				seen := map[uint32]struct{}{}
+
+				for range 300 {
+					answer := makeAnswer(base)
+					sut.adjustTTLs(answer)
+
+					got := answer[0].Header().Ttl
+					Expect(got).Should(BeNumerically(">=", 540)) // 600 * 0.9
+					Expect(got).Should(BeNumerically("<=", 660)) // 600 * 1.1
+					seen[got] = struct{}{}
+				}
+
+				Expect(len(seen)).Should(BeNumerically(">", 1), "jitter must actually vary the TTL")
+			})
+
+			It("clamps a jittered TTL to at least 1s", func() {
+				Expect(sut.jitterTTL(0)).Should(Equal(uint32(1)))
+			})
 		})
 	})
 
@@ -956,7 +1002,7 @@ var _ = Describe("CachingResolver", func() {
 			sutConfig = config.Caching{Exclude: exclude}
 			mockAnswer, _ = util.NewMsgWithAnswer(domain, 1000, A, "10.0.0.1")
 			request = newRequest(domain, A)
-			sut, _ = NewCachingResolver(ctx, sutConfig, config.DNSSEC{}, nil)
+			sut, _ = NewCachingResolver(ctx, sutConfig, config.DNSSEC{}, config.TTLJitterConfig{}, nil)
 			m.On("Resolve", mock.Anything, mock.Anything).Return(&Response{Res: mockAnswer}, nil)
 			cacheMock.On("Get", mock.Anything).Maybe().Return((*[]byte)(nil), 10*time.Second)
 			cacheMock.On("Put", mock.Anything, mock.Anything, mock.Anything).Maybe().Return()
@@ -966,7 +1012,7 @@ var _ = Describe("CachingResolver", func() {
 
 		When("Exclude settings are wrong", func() {
 			It("should fail", func() {
-				_, err := NewCachingResolver(ctx, config.Caching{Exclude: []string{"/[]/"}}, config.DNSSEC{}, nil)
+				_, err := NewCachingResolver(ctx, config.Caching{Exclude: []string{"/[]/"}}, config.DNSSEC{}, config.TTLJitterConfig{}, nil)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("cache exclusion configuration '/[]/' fail because"))
 			})
@@ -974,7 +1020,7 @@ var _ = Describe("CachingResolver", func() {
 
 		When("Exclude settings are wrong because of missing slashes", func() {
 			It("should fail", func() {
-				_, err := NewCachingResolver(ctx, config.Caching{Exclude: []string{"lan"}}, config.DNSSEC{}, nil)
+				_, err := NewCachingResolver(ctx, config.Caching{Exclude: []string{"lan"}}, config.DNSSEC{}, config.TTLJitterConfig{}, nil)
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring("cache exclusion configuration 'lan' fail because of missing slashes"))
 			})
@@ -1170,6 +1216,34 @@ var _ = Describe("CachingResolver", func() {
 				Expect(opt.Hdr.Ttl).Should(Equal(optHeaderBefore))
 				Expect(opt.Do()).Should(BeTrue())
 			})
+		})
+	})
+
+	Describe("request.Bypass", func() {
+		BeforeEach(func() {
+			mockAnswer, _ = util.NewMsgWithAnswer("example.com.", 300, A, "123.122.121.120")
+		})
+
+		It("neither serves from cache nor populates it", func() {
+			bypass := newRequest("example.com.", A)
+			bypass.Bypass = true
+
+			// two sequential Bypass queries both reach the upstream
+			_, err := sut.Resolve(ctx, bypass)
+			Expect(err).Should(Succeed())
+			m.AssertNumberOfCalls(GinkgoT(), "Resolve", 1)
+
+			bypass2 := newRequest("example.com.", A)
+			bypass2.Bypass = true
+			_, err = sut.Resolve(ctx, bypass2)
+			Expect(err).Should(Succeed())
+			m.AssertNumberOfCalls(GinkgoT(), "Resolve", 2)
+
+			// a normal query afterwards is a miss (cache was never populated)
+			resp, err := sut.Resolve(ctx, newRequest("example.com.", A))
+			Expect(err).Should(Succeed())
+			Expect(resp).Should(HaveResponseType(ResponseTypeRESOLVED))
+			m.AssertNumberOfCalls(GinkgoT(), "Resolve", 3)
 		})
 	})
 })

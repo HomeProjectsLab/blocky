@@ -49,7 +49,7 @@ func BenchmarkCachingResolverResolve(b *testing.B) {
 
 	ctx := b.Context()
 
-	sut, err := NewCachingResolver(ctx, cfg, config.DNSSEC{}, nil)
+	sut, err := NewCachingResolver(ctx, cfg, config.DNSSEC{}, config.TTLJitterConfig{}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

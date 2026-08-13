@@ -147,6 +147,29 @@ var _ = Describe("QueryLoggingResolver", func() {
 			})
 		})
 
+		When("request is a decoy", func() {
+			resp := func() *Response {
+				return &Response{RType: ResponseTypeRESOLVED, Res: new(dns.Msg), Reason: "reason"}
+			}
+
+			It("copies request.Decoy into the log entry", func() {
+				req := newRequestWithClient("noise.example.com.", A, "192.168.178.25", "client1")
+				req.Decoy = true
+
+				entry := sut.createLogEntry(req, resp(), time.Now(), 5)
+				Expect(entry).ShouldNot(BeNil())
+				Expect(entry.Decoy).Should(BeTrue())
+			})
+
+			It("does not mark ordinary requests as decoy", func() {
+				req := newRequestWithClient("real.example.com.", A, "192.168.178.25", "client1")
+
+				entry := sut.createLogEntry(req, resp(), time.Now(), 5)
+				Expect(entry).ShouldNot(BeNil())
+				Expect(entry.Decoy).Should(BeFalse())
+			})
+		})
+
 		Describe("ignore", func() {
 			var ignored *log.MockLoggerHook
 

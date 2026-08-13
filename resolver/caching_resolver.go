@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -64,6 +65,10 @@ type CachingResolver struct {
 	// dnssec.validate — unsigned caches shouldn't grow with RRSIGs.
 	prefetchDO bool
 
+	// jitter randomizes cached-answer TTLs by +/- PercentPct so an observer can't use
+	// TTL-expiry cadence as a clock/correlation signal (privacy.ttlJitter).
+	jitter config.TTLJitterConfig
+
 	resultCache cache.ExpiringCache[[]byte]
 
 	compiledExclusions []*regexp.Regexp
@@ -73,14 +78,16 @@ type CachingResolver struct {
 func NewCachingResolver(ctx context.Context,
 	cfg config.Caching,
 	dnssecCfg config.DNSSEC,
+	jitterCfg config.TTLJitterConfig,
 	decorator CacheDecorator,
 ) (*CachingResolver, error) {
-	return newCachingResolver(ctx, cfg, dnssecCfg, decorator, true)
+	return newCachingResolver(ctx, cfg, dnssecCfg, jitterCfg, decorator, true)
 }
 
 func newCachingResolver(ctx context.Context,
 	cfg config.Caching,
 	dnssecCfg config.DNSSEC,
+	jitterCfg config.TTLJitterConfig,
 	decorator CacheDecorator,
 	emitMetricEvents bool,
 ) (*CachingResolver, error) {
@@ -89,6 +96,7 @@ func newCachingResolver(ctx context.Context,
 		typed:            withType("caching"),
 		emitMetricEvents: emitMetricEvents,
 		prefetchDO:       dnssecCfg.Validate,
+		jitter:           jitterCfg,
 	}
 
 	configureCaches(ctx, c, &cfg)
@@ -217,7 +225,9 @@ func (r *CachingResolver) LogConfig(logger *logrus.Entry) {
 func (r *CachingResolver) Resolve(ctx context.Context, request *model.Request) (response *model.Response, err error) {
 	ctx, logger := r.log(ctx)
 
-	if !r.IsEnabled() || !r.isRequestCacheable(request) {
+	// request.Bypass skips both the cache lookup and the store: the early return
+	// goes straight to the next resolver and never reaches putInCache.
+	if !r.IsEnabled() || !r.isRequestCacheable(request) || request.Bypass {
 		logger.Debug("skip cache")
 
 		return r.next.Resolve(ctx, request)
@@ -425,13 +435,32 @@ func (r *CachingResolver) adjustTTLs(answer []dns.RR) (ttl time.Duration) {
 			}
 		}
 
-		headerTTL := atomic.LoadUint32(&a.Header().Ttl)
+		// Jitter after clamping so the stored bytes AND the returned entry lifetime
+		// carry the same value (setTTLInCachedResponse re-derives the baseline from the
+		// stored record TTLs, so both stay consistent).
+		headerTTL := r.jitterTTL(atomic.LoadUint32(&a.Header().Ttl))
+		atomic.StoreUint32(&a.Header().Ttl, headerTTL)
+
 		if minTTL > headerTTL {
 			minTTL = headerTTL
 		}
 	}
 
 	return time.Duration(minTTL) * time.Second
+}
+
+// jitterTTL scales ttl by a uniform random factor in [1-p/100, 1+p/100] and clamps to >=1s.
+// Returns ttl unchanged when jitter is disabled or the percent is zero.
+func (r *CachingResolver) jitterTTL(ttl uint32) uint32 {
+	if !r.jitter.Enable || r.jitter.PercentPct == 0 {
+		return ttl
+	}
+
+	p := float64(r.jitter.PercentPct) / 100
+	factor := 1 + p*(2*rand.Float64()-1) //nolint:gosec // not security-sensitive
+	jittered := uint32(math.Round(float64(ttl) * factor))
+
+	return max(jittered, 1)
 }
 
 func (r *CachingResolver) publishMetricsIfEnabled(event string, val any) {

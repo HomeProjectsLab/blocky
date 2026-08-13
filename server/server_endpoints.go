@@ -254,8 +254,12 @@ var uiPages = []struct {
 	{"/", "dashboard", "Dashboard"},
 	{"/live", "live", "Live"},
 	{"/queries", "queries", "Queries"},
+	{"/clients", "clients", "Clients"},
 	{"/upstreams", "upstreams", "Upstreams"},
+	{"/blocking", "blocking", "Blocking"},
+	{"/privacy", "privacy", "Privacy"},
 	{"/settings", "settings", "Settings"},
+	{"/system", "system", "System"},
 }
 
 func configureRootHandler(router *chi.Mux) {

@@ -1,0 +1,5 @@
+source: PLACEHOLDER (hand-written popular domains, NOT a real Tranco snapshot)
+id: none
+fetched: 2026-08-13
+count: 249
+regenerate: go run ./tools/gen-decoy-list -id <TRANCO_LIST_ID> -out decoy/tranco-1m.txt.gz

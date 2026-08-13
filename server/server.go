@@ -17,6 +17,7 @@ import (
 	"github.com/0xERR0R/blocky/cache"
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/configstore"
+	"github.com/0xERR0R/blocky/decoy"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/model"
@@ -61,6 +62,8 @@ type Server struct {
 	upstreamTree     *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
 	logFlushers      []interface{ Flush() error }   // query-log resolvers flushed synchronously in Stop
 	qlHub            *querylog.Hub                  // live query stream fan-out; nil unless sqlite query log
+	decoyEngine      *decoy.Engine                 // background noise generator; nil unless privacy.decoy.enable
+	decoySource      *querylog.DecoySource         // closed in Stop; nil unless decoy engine present
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
@@ -216,6 +219,10 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 			qlr.SetHub(server.qlHub)
 		}
 	})
+
+	if err := server.setupDecoyEngine(cfg); err != nil {
+		return nil, err
+	}
 
 	if redisResult.bridge != nil {
 		server.closers = append(server.closers, redisResult.bridge)
@@ -532,6 +539,10 @@ func createQueryResolver(
 	bootstrap *resolver.Bootstrap,
 	cacheDecorator resolver.CacheDecorator,
 ) (resolver.ChainedResolver, error) {
+	// Derive the encrypted-upstream padding flag from privacy config so it rides along
+	// the Upstreams config already threaded to every upstream client (RFC 7830).
+	cfg.Upstreams.EDNSPadding = cfg.Privacy.EDNSPadding.Enable
+
 	upstreamTree, utErr := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
 	blocking, blErr := resolver.NewBlockingResolver(ctx, cfg.Blocking, bootstrap)
 	queryLogging, qlErr := resolver.NewQueryLoggingResolver(ctx, cfg.QueryLog)
@@ -548,7 +559,7 @@ func createQueryResolver(
 
 	// cfg.DNSSEC gates the DO bit on prefetch reloads (they bypass the DNSSEC
 	// resolver above the cache).
-	cachingResolver, crErr := resolver.NewCachingResolver(ctx, cfg.Caching, cfg.DNSSEC, decorator)
+	cachingResolver, crErr := resolver.NewCachingResolver(ctx, cfg.Caching, cfg.DNSSEC, cfg.Privacy.TTLJitter, decorator)
 	// Pass upstreamTree to DNSSEC resolver so it can query for DNSKEY/DS records
 	dnssecResolver, dsErr := resolver.NewDNSSECResolver(ctx, cfg.DNSSEC, upstreamTree)
 
@@ -672,8 +683,38 @@ func toMB(b uint64) uint64 {
 }
 
 // Start starts the server
+// setupDecoyEngine wires the background noise generator when privacy.decoy is
+// enabled. It requires the sqlite query log (the replay pool and the seeded
+// list both live in that database); with any other query-log target it warns
+// and stays disabled.
+func (s *Server) setupDecoyEngine(cfg *config.Config) error {
+	if !cfg.Privacy.Decoy.Enable {
+		return nil
+	}
+
+	if cfg.QueryLog.Type != config.QueryLogTypeSqlite {
+		logger().Warn("privacy.decoy is enabled but requires queryLog.type: sqlite; decoy engine disabled")
+
+		return nil
+	}
+
+	source, err := querylog.NewDecoySource(cfg.QueryLog.Target.Reveal())
+	if err != nil {
+		return fmt.Errorf("can't open decoy source: %w", err)
+	}
+
+	s.decoySource = source
+	s.decoyEngine = decoy.NewEngine(cfg.Privacy.Decoy, source, s.resolve)
+
+	return nil
+}
+
 func (s *Server) Start(ctx context.Context, errCh chan<- error) {
 	logger().Info("Starting server")
+
+	if s.decoyEngine != nil {
+		go s.decoyEngine.Run(ctx)
+	}
 
 	for _, srv := range s.dnsServers {
 		go func() {
@@ -745,6 +786,12 @@ func (s *Server) Stop(ctx context.Context) error {
 	for _, c := range s.closers {
 		if err := c.Close(); err != nil {
 			logger().Warn("failed to close resource: ", err)
+		}
+	}
+
+	if s.decoySource != nil {
+		if err := s.decoySource.Close(); err != nil {
+			logger().Warn("failed to close decoy source: ", err)
 		}
 	}
 

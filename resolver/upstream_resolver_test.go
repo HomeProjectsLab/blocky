@@ -61,6 +61,75 @@ var _ = Describe("UpstreamResolver", Label("upstreamResolver"), func() {
 		})
 	})
 
+	Describe("EDNS padding", func() {
+		var req *dns.Msg
+
+		paddingLen := func(m *dns.Msg) (int, bool) {
+			opt := m.IsEdns0()
+			if opt == nil {
+				return 0, false
+			}
+
+			for _, o := range opt.Option {
+				if p, ok := o.(*dns.EDNS0_PADDING); ok {
+					return len(p.Padding), true
+				}
+			}
+
+			return 0, false
+		}
+
+		resolverWith := func(net config.NetProtocol, pad bool) *UpstreamResolver {
+			cfg := newUpstreamConfig(config.Upstream{Net: net, Host: "localhost"}, defaultUpstreamsConfig)
+			cfg.EDNSPadding = pad
+
+			return newUpstreamResolverUnchecked(cfg, systemResolverBootstrap)
+		}
+
+		BeforeEach(func() {
+			req = new(dns.Msg)
+			req.SetQuestion("example.com.", dns.TypeA)
+		})
+
+		It("pads an encrypted (DoT) query to a 128-byte block boundary without mutating the shared request", func() {
+			out := resolverWith(config.NetProtocolTcpTls, true).padEncryptedRequest(req)
+
+			_, hasPad := paddingLen(out)
+			Expect(hasPad).Should(BeTrue())
+			Expect(out.Len() % ednsPaddingBlockSize).Should(Equal(0))
+			Expect(req.IsEdns0()).Should(BeNil(), "the caller's shared request must not be mutated")
+		})
+
+		It("does not double-pad a query that already carries a padding option", func() {
+			util.SetEdns0Option(req, &dns.EDNS0_PADDING{Padding: make([]byte, 40)})
+
+			out := resolverWith(config.NetProtocolTcpTls, true).padEncryptedRequest(req)
+
+			count := 0
+			for _, o := range out.IsEdns0().Option {
+				if _, ok := o.(*dns.EDNS0_PADDING); ok {
+					count++
+				}
+			}
+			Expect(count).Should(Equal(1))
+			Expect(out.Len() % ednsPaddingBlockSize).Should(Equal(0))
+		})
+
+		It("does not pad a plaintext udp+tcp query", func() {
+			out := resolverWith(config.NetProtocolTcpUdp, true).padEncryptedRequest(req)
+
+			Expect(out).Should(BeIdenticalTo(req))
+			_, hasPad := paddingLen(out)
+			Expect(hasPad).Should(BeFalse())
+		})
+
+		It("does not pad when disabled, even on an encrypted transport", func() {
+			out := resolverWith(config.NetProtocolTcpTls, false).padEncryptedRequest(req)
+
+			Expect(out).Should(BeIdenticalTo(req))
+		})
+	})
+
 	Describe("IsEnabled", func() {
 		It("is true", func() {
 			Expect(sut.IsEnabled()).Should(BeTrue())

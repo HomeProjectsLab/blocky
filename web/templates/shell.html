@@ -15,8 +15,12 @@
             <a href="/" {{if eq .Page "dashboard"}}aria-current="page"{{end}}>Dashboard</a>
             <a href="/live" {{if eq .Page "live"}}aria-current="page"{{end}}>Live</a>
             <a href="/queries" {{if eq .Page "queries"}}aria-current="page"{{end}}>Queries</a>
+            <a href="/clients" {{if eq .Page "clients"}}aria-current="page"{{end}}>Clients</a>
             <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
+            <a href="/blocking" {{if eq .Page "blocking"}}aria-current="page"{{end}}>Blocking</a>
+            <a href="/privacy" {{if eq .Page "privacy"}}aria-current="page"{{end}}>Privacy</a>
             <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
+            <a href="/system" {{if eq .Page "system"}}aria-current="page"{{end}}>System</a>
         </nav>
     </div>
     <div class="ticker" id="ticker" aria-live="off">
@@ -123,11 +127,95 @@
         </div>
     </section>
 {{else if eq .Page "upstreams"}}
-    <div class="page-head"><h1>Upstreams</h1></div>
-    <section class="panel"><p class="empty">Upstream management is coming in the next phase.</p></section>
+    <div class="page-head">
+        <h1>Upstreams</h1>
+        <button id="apply-btn" hidden>Apply changes</button>
+    </div>
+    <p class="empty" id="up-status" hidden></p>
+    <div id="up-groups"></div>
+    <section class="panel"><button id="add-group-btn">+ Add group</button></section>
+{{else if eq .Page "blocking"}}
+    <div class="page-head"><h1>Blocking</h1></div>
+    <section class="panel">
+        <h2>Status</h2>
+        <div class="ctl-row">
+            <span class="status-dot" id="bl-dot"></span>
+            <span id="bl-state">—</span>
+            <span class="spacer"></span>
+            <label class="dt-label">disable for
+                <select id="bl-duration">
+                    <option value="">a while</option>
+                    <option value="1m">1m</option><option value="5m">5m</option>
+                    <option value="30m">30m</option><option value="1h">1h</option>
+                </select>
+            </label>
+            <button id="bl-disable">Disable</button>
+            <button id="bl-enable">Enable</button>
+        </div>
+    </section>
+    <section class="panel">
+        <h2>Maintenance</h2>
+        <div class="ctl-row">
+            <button id="lists-refresh">Refresh blocklists</button>
+            <button id="cache-flush">Flush DNS cache</button>
+            <span id="bl-action" class="empty"></span>
+        </div>
+    </section>
+    <section class="panel">
+        <h2>Configured blocklists</h2>
+        <div id="bl-lists"><p class="empty">Loading…</p></div>
+    </section>
+{{else if eq .Page "clients"}}
+    <div class="page-head"><h1>Clients</h1></div>
+    <section class="panel panel-flush">
+        <div class="wire-scroll">
+            <table class="wire" id="cl-table">
+                <thead><tr><th>client</th><th class="num">queries</th><th class="num">blocked</th><th>last seen</th></tr></thead>
+                <tbody id="cl-body"></tbody>
+            </table>
+        </div>
+        <p class="empty" id="cl-empty" hidden>No client activity in the last 24h.</p>
+    </section>
+    <aside class="drawer" id="cl-drawer" hidden>
+        <div class="drawer-head"><h2 id="cl-drawer-title">Client</h2><button id="cl-drawer-close" aria-label="Close detail">✕</button></div>
+        <div id="cl-detail"></div>
+    </aside>
+{{else if eq .Page "privacy"}}
+    <div class="page-head">
+        <h1>Privacy</h1>
+        <div class="ctl-row"><button id="pv-save">Save</button><button id="pv-apply" hidden>Apply</button></div>
+    </div>
+    <p class="empty" id="pv-status" hidden></p>
+    <form id="pv-form"></form>
 {{else if eq .Page "settings"}}
     <div class="page-head"><h1>Settings</h1></div>
-    <section class="panel"><p class="empty">Settings are coming in the next phase.</p></section>
+    <section class="panel">
+        <h2>Current configuration</h2>
+        <dl class="kv" id="set-summary"><p class="empty">Loading…</p></dl>
+        <p class="empty">Typed fields are read-only — edit any value in the raw YAML below, validate, save, then apply.</p>
+    </section>
+    <section class="panel">
+        <h2>Raw config (YAML)</h2>
+        <textarea id="set-yaml" spellcheck="false" rows="24" aria-label="Raw configuration YAML"></textarea>
+        <p class="err-line" id="set-error" hidden></p>
+        <div class="ctl-row">
+            <button id="set-validate">Validate</button>
+            <button id="set-save">Save</button>
+            <button id="set-apply">Apply</button>
+            <button id="set-reload" type="button">Reload</button>
+            <span id="set-msg" class="empty"></span>
+        </div>
+    </section>
+{{else if eq .Page "system"}}
+    <div class="page-head"><h1>System</h1></div>
+    <section class="tiles" id="sys-tiles"></section>
+    <section class="panel">
+        <h2>Maintenance</h2>
+        <div class="ctl-row">
+            <button id="sys-cache-flush">Flush DNS cache</button>
+            <span id="sys-msg" class="empty"></span>
+        </div>
+    </section>
 {{end}}
 </main>
 

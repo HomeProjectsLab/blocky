@@ -231,7 +231,84 @@ tr[data-band="error"] .rt { color: var(--c-error); }
     color: var(--muted); font-family: var(--font-mono); font-size: 11px;
 }
 
+/* ---------- management pages (upstreams/blocking/privacy/settings/system) ---------- */
+.ctl-row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.ctl-row .spacer { flex: 1; }
+.sub-h { margin-top: 1rem; }
+
+.btn-danger { border-color: var(--c-error); color: var(--c-error); }
+.btn-danger:hover { background: var(--c-error); color: #fff; border-color: var(--c-error); }
+.btn-sub { background: var(--bg1); }
+.btn-icon { padding: 0.2rem 0.5rem; line-height: 1; }
+
+.status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+.status-dot.on { background: var(--c-cached); }
+.status-dot.off { background: var(--c-blocked); }
+
+/* upstreams */
+.group-panel .group-name { margin: 0; }
+.strat-sel { min-width: 12rem; }
+.strat-desc { display: block; margin: 0.25rem 0 0; }
+.hop-wrap { color: var(--ink2); font-size: 12px; }
+.hop-in { width: 5rem; }
+.entries { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.5rem 0; }
+.entry-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.entry-addr { flex: 1; min-width: 12rem; }
+.entry-weight { width: 4.5rem; }
+
+/* key/value summary (settings) */
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1rem; font-family: var(--font-mono); font-size: 12px; margin: 0 0 0.75rem; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; color: var(--ink); }
+
+/* raw yaml editor */
+#set-yaml {
+    width: 100%; resize: vertical; min-height: 20rem;
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+    background: var(--bg0); color: var(--ink); border: 1px solid var(--grid);
+    border-radius: 4px; padding: 0.75rem;
+}
+.err-line {
+    color: var(--c-error); font-family: var(--font-mono); font-size: 12px;
+    background: var(--bg2); border: 1px solid var(--c-error); border-radius: 4px;
+    padding: 0.5rem 0.7rem; margin: 0.5rem 0; white-space: pre-wrap; word-break: break-word;
+}
+.yaml-view {
+    font-family: var(--font-mono); font-size: 12px; background: var(--bg0);
+    border: 1px solid var(--grid); border-radius: 4px; padding: 0.75rem;
+    overflow-x: auto; margin: 0 0 0.5rem;
+}
+
+/* privacy form fields */
+.field { margin: 0.6rem 0; max-width: 34rem; }
+.field-label { display: block; font-size: 0.75rem; color: var(--ink2); margin-bottom: 0.2rem; }
+.field input[type="text"], .field input[type="number"] { width: 100%; }
+.field-help { color: var(--muted); font-size: 11px; margin: 0.2rem 0 0; }
+.toggle-label { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--ink); font-size: 13px; cursor: pointer; }
+
+/* clients: fingerprint panel + transport mix */
+.spark { min-height: 120px; }
+.spark .chart, .spark { height: 120px; }
+.mix { margin: 0.25rem 0 0.5rem; }
+.mix-row { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 12px; }
+.mix-name { color: var(--ink); }
+.mix-count { color: var(--ink2); }
+.mix + * { margin-top: 0.5rem; }
+.fp-card { background: var(--bg2); border: 1px solid var(--grid); border-radius: 6px; padding: 0.6rem 0.75rem; margin-bottom: 0.6rem; }
+.fp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+.fp-guess { color: var(--ink); font-weight: 600; font-size: 13px; }
+.fp-count { color: var(--ink2); font-family: var(--font-mono); font-size: 12px; }
+.fp-hash { color: var(--muted); font-family: var(--font-mono); font-size: 11px; margin: 0.15rem 0 0.4rem; word-break: break-all; }
+.fp-feats { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.chip {
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink2);
+    background: var(--bg1); border: 1px solid var(--grid); border-radius: 3px; padding: 0.1rem 0.4rem;
+}
+#cl-detail .bar-list { margin-top: 0.25rem; }
+
 @media (max-width: 640px) {
     .shell-bar { gap: 0.75rem; }
     .drawer { width: 100%; }
+    dl.kv { grid-template-columns: 1fr; gap: 0.1rem 0; }
+    dl.kv dd { margin-bottom: 0.4rem; }
 }

@@ -49,6 +49,10 @@ const (
 	// transport names as understood by dns.Client.Net
 	transportTCP = "tcp"
 	transportUDP = "udp"
+
+	// ednsPaddingBlockSize is the block boundary outgoing queries are padded up to on encrypted
+	// transports (RFC 8467 recommends 128 bytes for client queries).
+	ednsPaddingBlockSize = 128
 )
 
 // UpstreamServerError wraps a response with RCode ServFail so no other resolver tries to use it.
@@ -474,6 +478,33 @@ func responseMatchesRequest(req, resp *dns.Msg) bool {
 	return true
 }
 
+// padEncryptedRequest returns the query to send to the upstream. On encrypted transports
+// (DoT/DoH/DoQ) with padding enabled it returns a copy carrying an EDNS0 padding option (RFC 7830)
+// that rounds the packed query up to an ednsPaddingBlockSize multiple, hiding the query's true
+// length from a network observer. On plaintext tcp+udp (or when disabled) msg is returned unchanged
+// — padding port-53 just wastes bytes. The caller's shared request is never mutated.
+func (r *UpstreamResolver) padEncryptedRequest(msg *dns.Msg) *dns.Msg {
+	if !r.cfg.EDNSPadding || r.cfg.Net == config.NetProtocolTcpUdp {
+		return msg
+	}
+
+	clone := msg.Copy()
+	if clone.IsEdns0() == nil {
+		clone.SetEdns0(ednsUDPSize, false)
+	}
+
+	// Add an empty padding option first so its 4-byte header counts toward the length;
+	// SetEdns0Option replaces any existing padding option, so we never double-pad.
+	padding := &dns.EDNS0_PADDING{Padding: []byte{}}
+	util.SetEdns0Option(clone, padding)
+
+	if rem := clone.Len() % ednsPaddingBlockSize; rem != 0 {
+		padding.Padding = make([]byte, ednsPaddingBlockSize-rem)
+	}
+
+	return clone
+}
+
 // NewUpstreamResolver creates new resolver instance
 func NewUpstreamResolver(
 	ctx context.Context, cfg upstreamConfig, bootstrap *Bootstrap,
@@ -553,6 +584,9 @@ func (r *UpstreamResolver) Resolve(ctx context.Context, request *model.Request) 
 		ip   net.IP
 	)
 
+	// Pad once outside the retry loop: the padded copy is transport-invariant per request.
+	outgoing := r.padEncryptedRequest(request.Req)
+
 	err = retry.Do(
 		func() error {
 			ip = ips.Current()
@@ -561,7 +595,7 @@ func (r *UpstreamResolver) Resolve(ctx context.Context, request *model.Request) 
 			ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout.ToDuration())
 			defer cancel()
 
-			response, rtt, err := r.upstreamClient.callExternal(ctx, request.Req, upstreamURL)
+			response, rtt, err := r.upstreamClient.callExternal(ctx, outgoing, upstreamURL)
 			if err != nil {
 				return fmt.Errorf("can't resolve request via upstream server %s (%s): %w", r.cfg, upstreamURL, err)
 			}

@@ -282,7 +282,7 @@ func (r *QueryLoggingResolver) createLogEntry(request *model.Request, response *
 		ClientNames:    []string{"none"},
 		BlockyInstance: r.instanceID,
 		Fingerprint:    request.Fingerprint,
-		Decoy:          false, // decoy engine lands in a later phase; column exists so the schema is stable
+		Decoy:          request.Decoy, // synthetic noise queries from the decoy engine
 	}
 
 	for _, f := range r.cfg.Fields {

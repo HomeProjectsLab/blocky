@@ -47,12 +47,28 @@ var _ = Describe("Web UI shell", func() {
 		}
 	})
 
+	Describe("navigation", func() {
+		It("lists every management page in the nav", func() {
+			_, body := get("/")
+
+			for _, label := range []string{"Clients", "Upstreams", "Blocking", "Privacy", "Settings", "System"} {
+				Expect(body).Should(ContainSubstring(">" + label + "<"))
+			}
+		})
+	})
+
 	Describe("static assets", func() {
 		for _, path := range []string{
 			"/static/vendor/uplot.min.css",
 			"/static/vendor/uplot.iife.min.js",
 			"/static/app/app.css",
 			"/static/app/app.js",
+			"/static/app/upstreams.js",
+			"/static/app/blocking.js",
+			"/static/app/clients.js",
+			"/static/app/privacy.js",
+			"/static/app/settings.js",
+			"/static/app/system.js",
 		} {
 			It("serves "+path, func() {
 				res, body := get(path)

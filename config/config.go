@@ -326,6 +326,8 @@ type Config struct {
 	RateLimit RateLimit `yaml:"rateLimit"`
 	// DNS rebinding protection configuration.
 	RebindingProtection RebindingProtection `yaml:"rebindingProtection"`
+	// Privacy/decoy features: background noise queries, TTL jitter, EDNS padding.
+	Privacy PrivacyConfig `yaml:"privacy"`
 
 	// Deprecated options
 	Deprecated struct {
@@ -1037,7 +1039,11 @@ func (cfg *Config) validate(logger *logrus.Entry) error {
 		return err
 	}
 
-	return cfg.RebindingProtection.validate()
+	if err := cfg.RebindingProtection.validate(); err != nil {
+		return err
+	}
+
+	return cfg.Privacy.validate(logger)
 }
 
 // ConvertPort converts string representation into a valid port (0 - 65535)
