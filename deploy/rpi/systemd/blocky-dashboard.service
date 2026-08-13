@@ -1,0 +1,21 @@
+[Unit]
+Description=blocky console dashboard (htop-style, HDMI tty1)
+After=blocky.service
+Wants=blocky.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/blocky dashboard --api-url http://localhost:80
+Restart=always
+RestartSec=3
+# Drive the physical console directly — no login, no X.
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Environment=TERM=linux
+
+[Install]
+WantedBy=multi-user.target

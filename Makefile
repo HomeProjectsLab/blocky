@@ -1,4 +1,4 @@
-.PHONY: all clean generate generate-check build test fuzz e2e-test e2e-test-coverage lint run fmt docker-build help check-tools
+.PHONY: all clean generate generate-check build test fuzz e2e-test e2e-test-coverage lint run fmt docker-build image image-selftest help check-tools
 .DEFAULT_GOAL:=help
 
 VERSION?=$(shell git describe --always --tags)
@@ -188,6 +188,24 @@ docker-build: check-docker generate ## Build docker image
 		-o type=docker \
 		-t ${DOCKER_IMAGE_NAME} \
 		.
+
+image: ## Bake the unattended Raspberry Pi 3 appliance image (blocky-rpi3-arm64.img.xz)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /tmp/blocky-arm64 .
+	docker run --privileged --rm \
+		-v "$(CURDIR)":/repo -v /tmp/blocky-arm64:/blocky-arm64:ro -w /repo \
+		-e BLOCKY_BIN=/blocky-arm64 -e OUT=/repo/blocky-rpi3-arm64.img.xz \
+		ubuntu:24.04 bash -c 'export DEBIAN_FRONTEND=noninteractive; \
+			apt-get update -qq && apt-get install -y -qq util-linux dosfstools e2fsprogs xz-utils fdisk curl ca-certificates >/dev/null; \
+			deploy/rpi/build-image.sh'
+
+image-selftest: ## Verify the image tooling (mount/inject/unmount) without a base download
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /tmp/blocky-arm64 .
+	docker run --privileged --rm \
+		-v "$(CURDIR)":/repo -v /tmp/blocky-arm64:/blocky-arm64:ro -w /repo \
+		-e BLOCKY_BIN=/blocky-arm64 \
+		ubuntu:24.04 bash -c 'export DEBIAN_FRONTEND=noninteractive; \
+			apt-get update -qq && apt-get install -y -qq util-linux dosfstools e2fsprogs xz-utils fdisk >/dev/null; \
+			deploy/rpi/build-image.sh --self-test'
 
 check-tools: check-go check-docker ## Check if all required tools are installed
 

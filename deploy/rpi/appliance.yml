@@ -1,0 +1,22 @@
+# blocky appliance seed config — imported once on first boot into /data/config.db.
+# The Pi runs nothing else, so the web UI/API binds the standard HTTP port 80.
+ports:
+  dns: 53
+  http: 80
+upstreams:
+  groups:
+    default:
+      - 9.9.9.9
+      - 149.112.112.112
+  groupConfig:
+    default:
+      strategy: recursive   # resolve from the root servers; quad9 above is the fallback tier
+queryLog:
+  type: sqlite
+  target: /var/lib/blocky/querylog.db
+privacy:
+  decoy:
+    enable: true            # the appliance runs the noise machine
+lists:
+  updater:
+    enable: true
