@@ -123,6 +123,19 @@ func (r *RecursiveResolver) Resolve(ctx context.Context, request *model.Request)
 		Class: question.Qclass,
 	}
 
+	// NOTE (privacy.queryCaseRandomization): 0x20 case randomization is NOT applied on
+	// the recursive egress. zdns builds its own datagram in wireLookupUDP/wireLookupTCP/
+	// doDoT/doDoH (zdns/src/zdns/lookup.go) via m.SetQuestion(dotName(q.Name), …); dotName
+	// (util.go) only appends a trailing dot and preserves case, and per-query buffer size is
+	// hardcoded (m.SetEdns0(1232, dnssec)) — neither is reachable from ResolverConfig. Making
+	// them per-query needs a zdns fork of those four funcs: replace dotName(q.Name) with a
+	// 0x20-randomized name and verify/normalize the echoed case on the returned msg (the exact
+	// randomizeQuestionCase / normalizeResponseCase pair used on the forwarding path in
+	// query_case.go). Until that fork lands the toggle is a documented no-op here — the
+	// forwarding path (UpstreamResolver) honors it fully, including the recursive group's
+	// upstream fallback tier. Static EDNS options (cookie/padding) WOULD be honored via
+	// zcfg.EdnsOptions (see newZdnsConfig), but padding plaintext auth queries is as pointless
+	// as padding port-53 (padEncryptedRequest declines it too), so none is injected.
 	res, _, status, err := zr.IterativeLookup(ctx, &q)
 
 	// A DNSSEC-bogus answer means SERVFAIL, never the fallback tier: forwarding

@@ -587,6 +587,14 @@ func (r *UpstreamResolver) Resolve(ctx context.Context, request *model.Request) 
 	// Pad once outside the retry loop: the padded copy is transport-invariant per request.
 	outgoing := r.padEncryptedRequest(request.Req)
 
+	// 0x20 case randomization is re-rolled per attempt (inside the loop): a fresh
+	// mixed-case name each retry, and a spoofer can't learn the case from a prior try.
+	caseRandomize := r.cfg.QueryCaseRandomization && len(request.Req.Question) > 0
+	canonicalName := ""
+	if caseRandomize {
+		canonicalName = request.Req.Question[0].Name
+	}
+
 	err = retry.Do(
 		func() error {
 			ip = ips.Current()
@@ -595,9 +603,18 @@ func (r *UpstreamResolver) Resolve(ctx context.Context, request *model.Request) 
 			ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout.ToDuration())
 			defer cancel()
 
-			response, rtt, err := r.upstreamClient.callExternal(ctx, outgoing, upstreamURL)
+			sent := outgoing
+			if caseRandomize {
+				sent = randomizeQuestionCase(outgoing)
+			}
+
+			response, rtt, err := r.upstreamClient.callExternal(ctx, sent, upstreamURL)
 			if err != nil {
 				return fmt.Errorf("can't resolve request via upstream server %s (%s): %w", r.cfg, upstreamURL, err)
+			}
+
+			if caseRandomize && !normalizeResponseCase(response, sent.Question[0].Name, canonicalName) {
+				return fmt.Errorf("upstream %s (%s): %w", r.cfg, upstreamURL, errCaseMismatch)
 			}
 
 			resp = response
@@ -610,7 +627,7 @@ func (r *UpstreamResolver) Resolve(ctx context.Context, request *model.Request) 
 		retry.DelayType(retry.FixedDelay),
 		retry.Delay(1*time.Millisecond),
 		retry.LastErrorOnly(true),
-		retry.RetryIf(isTimeout),
+		retry.RetryIf(func(err error) bool { return isTimeout(err) || errors.Is(err, errCaseMismatch) }),
 		retry.OnRetry(func(n uint, err error) {
 			logger.WithFields(logrus.Fields{
 				logFieldUpstream: r.cfg.String(),

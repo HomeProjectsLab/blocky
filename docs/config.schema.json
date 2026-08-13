@@ -1813,6 +1813,11 @@
           },
           "additionalProperties": false,
           "type": "object"
+        },
+        "queryCaseRandomization": {
+          "type": "boolean",
+          "description": "QueryCaseRandomization applies DNS 0x20 case randomization (draft-vixie-dnsext-dns0x20)\nto outgoing forwarded queries: each ASCII letter of the question name is independently\nupper/lower-cased on the wire, the upstream must echo the exact case (spoofing defense),\nand the answer is normalized back to the client's case. Forwarding path only; the\nrecursive (zdns) path ignores it until the documented zdns fork lands.",
+          "default": false
         }
       },
       "additionalProperties": false,

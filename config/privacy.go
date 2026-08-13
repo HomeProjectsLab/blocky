@@ -13,6 +13,12 @@ type PrivacyConfig struct {
 	Decoy       DecoyConfig       `yaml:"decoy"`
 	TTLJitter   TTLJitterConfig   `yaml:"ttlJitter"`
 	EDNSPadding EDNSPaddingConfig `yaml:"ednsPadding"`
+	// QueryCaseRandomization applies DNS 0x20 case randomization (draft-vixie-dnsext-dns0x20)
+	// to outgoing forwarded queries: each ASCII letter of the question name is independently
+	// upper/lower-cased on the wire, the upstream must echo the exact case (spoofing defense),
+	// and the answer is normalized back to the client's case. Forwarding path only; the
+	// recursive (zdns) path ignores it until the documented zdns fork lands.
+	QueryCaseRandomization bool `yaml:"queryCaseRandomization" default:"false"`
 }
 
 // DecoyConfig configures the background noise/decoy query engine. Decoy

@@ -25,6 +25,9 @@ type realRow struct {
 	QuestionName string    `gorm:"column:question_name"`
 	QuestionType string    `gorm:"column:question_type"`
 	Decoy        bool      `gorm:"column:decoy"`
+	EDNSUDPSize  uint16    `gorm:"column:edns_udp_size"`
+	EDNSOptCodes string    `gorm:"column:edns_opt_codes"`
+	FpDetail     string    `gorm:"column:fp_detail"`
 }
 
 func (realRow) TableName() string { return "log_entries" }

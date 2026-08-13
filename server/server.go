@@ -572,6 +572,7 @@ func createQueryResolver(
 	// Derive the encrypted-upstream padding flag from privacy config so it rides along
 	// the Upstreams config already threaded to every upstream client (RFC 7830).
 	cfg.Upstreams.EDNSPadding = cfg.Privacy.EDNSPadding.Enable
+	cfg.Upstreams.QueryCaseRandomization = cfg.Privacy.QueryCaseRandomization
 
 	upstreamTree, utErr := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
 	blocking, blErr := resolver.NewBlockingResolver(ctx, cfg.Blocking, bootstrap)

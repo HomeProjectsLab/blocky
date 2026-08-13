@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,15 +208,20 @@ func (s *DecoySource) HourlyRealCounts() ([24]int64, error) {
 	return counts, nil
 }
 
-// FpSample is a transport-agnostic EDNS/qtype shape sampled from a real client.
+// FpSample is the complete wire-relevant shape sampled from one real client
+// query, enough to rebuild a matching OPT record and question on a decoy.
 type FpSample struct {
-	Qtype       string // question type of the sampled real query
-	HadEDNS0    bool   // whether the real query carried an OPT record
-	EDNSUDPSize uint16 // advertised UDP payload size
-	DO          bool   // DNSSEC OK bit
+	Qtype        string   // question type of the sampled real query
+	QClass       uint16   // question class (0 == not recorded, treat as IN)
+	HadEDNS0     bool     // whether the real query carried an OPT record
+	EDNSUDPSize  uint16   // advertised UDP payload size
+	DO           bool     // DNSSEC OK bit
+	EDNSOptCodes []uint16 // EDNS option codes in wire order — the discriminating signal
+	HasCookie    bool     // real query carried an EDNS0 COOKIE
+	Mixed0x20    bool     // real qname carried mixed (0x20-randomized) case
 }
 
-// SampleRealFingerprint returns the EDNS shape of one random recent real query
+// SampleRealFingerprint returns the wire shape of one random recent real query
 // so decoys can be stamped to match the real client-software distribution
 // (otherwise every synthetic query looks like the resolver's default). Zero
 // value (HadEDNS0 false) at cold start — caller then leaves the plain query.
@@ -224,32 +231,62 @@ func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
 	var row struct {
 		QuestionType string `gorm:"column:question_type"`
 		EDNSUDPSize  uint16 `gorm:"column:edns_udp_size"`
+		EDNSOptCodes string `gorm:"column:edns_opt_codes"`
 		FpDetail     string `gorm:"column:fp_detail"`
 	}
 
-	err := s.db.Raw(`SELECT question_type, edns_udp_size, fp_detail FROM log_entries
+	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
 		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
 		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
 	if err != nil {
 		return FpSample{}, err
 	}
 
-	fp := FpSample{Qtype: row.QuestionType, EDNSUDPSize: row.EDNSUDPSize}
+	fp := FpSample{
+		Qtype:        row.QuestionType,
+		EDNSUDPSize:  row.EDNSUDPSize,
+		EDNSOptCodes: parseOptCodes(row.EDNSOptCodes),
+	}
 
-	// DO and HadEDNS0 live inside the fp_detail JSON blob, not in columns.
+	// DO/HadEDNS0/qclass/cookie/0x20 live inside the fp_detail JSON blob.
 	if row.FpDetail != "" {
 		var d struct {
-			DO       bool `json:"do"`
-			HadEDNS0 bool `json:"hadEdns0"`
+			QClass    uint16 `json:"qclass"`
+			DO        bool   `json:"do"`
+			HadEDNS0  bool   `json:"hadEdns0"`
+			HasCookie bool   `json:"hasCookie"`
+			Mixed0x20 bool   `json:"mixed0x20"`
 		}
 
 		if json.Unmarshal([]byte(row.FpDetail), &d) == nil {
+			fp.QClass = d.QClass
 			fp.DO = d.DO
 			fp.HadEDNS0 = d.HadEDNS0
+			fp.HasCookie = d.HasCookie
+			fp.Mixed0x20 = d.Mixed0x20
 		}
 	}
 
 	return fp, nil
+}
+
+// parseOptCodes turns the stored "10,8,12" wire-order column into codes. Bad
+// tokens are skipped so a malformed row degrades to fewer codes, never an error.
+func parseOptCodes(s string) []uint16 {
+	if s == "" {
+		return nil
+	}
+
+	parts := strings.Split(s, ",")
+	codes := make([]uint16, 0, len(parts))
+
+	for _, p := range parts {
+		if n, err := strconv.ParseUint(strings.TrimSpace(p), 10, 16); err == nil {
+			codes = append(codes, uint16(n))
+		}
+	}
+
+	return codes
 }
 
 // SampleRecentReal returns up to limit real (non-decoy) queries sampled at

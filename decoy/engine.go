@@ -2,6 +2,7 @@ package decoy
 
 import (
 	"context"
+	"encoding/hex"
 	"math/rand"
 	"net"
 	"time"
@@ -289,22 +290,84 @@ func (e *Engine) clientIP() net.IP {
 	return net.ParseIP(splitClientIPs[e.rnd.Intn(len(splitClientIPs))])
 }
 
-// applyFingerprint (technique 3) stamps the EDNS shape of a sampled real query
-// onto the decoy so synthetic queries aren't filterable by "all look default".
+// applyFingerprint (technique 3) rebuilds the wire shape of a sampled real query
+// onto the decoy: qclass, 0x20 case, and a full OPT record (buffer size, DO, and
+// the EDNS option codes IN THE SAMPLED ORDER — option order is the discriminating
+// fingerprint signal). req.Fingerprint is stamped to match what goes on the wire
+// so the decoy is logged consistently with its own egress.
 func (e *Engine) applyFingerprint(req *model.Request) {
-	if !e.cfg.FingerprintMatch {
+	if !e.cfg.FingerprintMatch || len(req.Req.Question) == 0 {
 		return
 	}
 
 	fp, err := e.source.SampleRealFingerprint()
-	if err != nil || !fp.HadEDNS0 {
-		return // cold start / no EDNS on the sampled client — leave the plain query
+	if err != nil {
+		return // query error — leave the plain decoy
 	}
 
-	req.Req.SetEdns0(fp.EDNSUDPSize, fp.DO)
+	if fp.QClass != 0 && fp.QClass != dns.ClassINET {
+		req.Req.Question[0].Qclass = fp.QClass
+		req.Fingerprint.QClass = fp.QClass
+	}
+
+	// Match the sampled client's casing behaviour: some stacks randomize 0x20,
+	// most don't. Only mix case when the sampled real query did.
+	if fp.Mixed0x20 {
+		req.Req.Question[0].Name = e.randomize0x20(req.Req.Question[0].Name)
+		req.Fingerprint.Mixed0x20 = true
+	}
+
+	if !fp.HadEDNS0 {
+		return // sampled client had no OPT — leave a bare query (part of the mix)
+	}
+
+	opt := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	opt.SetUDPSize(fp.EDNSUDPSize)
+	opt.SetDo(fp.DO)
+
+	for _, code := range fp.EDNSOptCodes {
+		if o := e.synthOption(code); o != nil {
+			opt.Option = append(opt.Option, o)
+		}
+	}
+
+	req.Req.Extra = append(req.Req.Extra, opt)
+
 	req.Fingerprint.HadEDNS0 = true
 	req.Fingerprint.EDNSUDPSize = fp.EDNSUDPSize
 	req.Fingerprint.DO = fp.DO
+	req.Fingerprint.EDNSOptCodes = fp.EDNSOptCodes
+	req.Fingerprint.HasCookie = fp.HasCookie
+}
+
+// synthOption builds a plausible client-side EDNS option for a sampled wire
+// option code, preserving the code (and thus the OPT's code ordering) which is
+// the discriminating signal. COOKIE gets a fresh random 8-byte client cookie so
+// its length is realistic; NSID/keepalive/padding get the empty request-side
+// payloads a real client actually sends.
+//
+// ponytail: best-effort — ECS (subnet) and opaque/local codes return nil (skipped)
+// because a faithful payload would guess or leak a client subnet; only the codes
+// we can honestly reconstruct are emitted, in order. Upgrade path: mirror the real
+// row's ECS prefix if it's ever worth reproducing.
+func (e *Engine) synthOption(code uint16) dns.EDNS0 {
+	switch code {
+	case dns.EDNS0COOKIE:
+		b := make([]byte, 8) //nolint:mnd // client cookie is 8 bytes (RFC 7873)
+		for i := range b {
+			b[i] = byte(e.rnd.Intn(256)) //nolint:mnd,gosec // decoy noise, not crypto
+		}
+
+		return &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: hex.EncodeToString(b)}
+	case dns.EDNS0NSID:
+		return &dns.EDNS0_NSID{Code: dns.EDNS0NSID} // request-side NSID is empty
+	case dns.EDNS0TCPKEEPALIVE:
+		return &dns.EDNS0_TCP_KEEPALIVE{Code: dns.EDNS0TCPKEEPALIVE}
+	case dns.EDNS0PADDING:
+		return &dns.EDNS0_PADDING{}
+	default:
+		return nil
+	}
 }
 
 // mutate returns a variant of a replayed query that is never byte-identical to

@@ -36,6 +36,9 @@ type Upstreams struct {
 	// EDNSPadding pads outgoing queries on encrypted transports (DoT/DoH/DoQ) to a block
 	// boundary (RFC 7830). Runtime-derived from privacy.ednsPadding, not user-set here.
 	EDNSPadding bool `yaml:"-"`
+	// QueryCaseRandomization applies DNS 0x20 case randomization to outgoing forwarded
+	// queries. Runtime-derived from privacy.queryCaseRandomization, not user-set here.
+	QueryCaseRandomization bool `yaml:"-"`
 }
 
 // UpstreamGroupConfig holds per-group settings overriding the global ones.
