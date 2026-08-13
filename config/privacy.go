@@ -26,6 +26,14 @@ type DecoyConfig struct {
 	ActiveHoursStart int     `yaml:"activeHoursStart" default:"0"` // 0-23; noise only within [start,end)
 	ActiveHoursEnd   int     `yaml:"activeHoursEnd" default:"24"`  // 1-24
 	RefreshURL       string  `yaml:"refreshURL"`                   // optional live list source; empty = embedded
+
+	// Obfuscation techniques (all default-on; each independently toggleable).
+	DiurnalShaping   bool `yaml:"diurnalShaping" default:"true"`   // scale rate by real per-hour volume
+	ReplayMutate     bool `yaml:"replayMutate" default:"true"`     // mutate replayed queries so they aren't byte-identical
+	FingerprintMatch bool `yaml:"fingerprintMatch" default:"true"` // stamp EDNS shape sampled from real clients
+	SplitUpstream    bool `yaml:"splitUpstream" default:"true"`    // vary decoy client identity to diverge group routing
+	MissChaffPct     uint `yaml:"missChaffPct" default:"15"`       // % of decoys that are likely-NXDOMAIN random labels
+	ClusterPct       uint `yaml:"clusterPct" default:"20"`         // % of emissions that fire a small related burst
 }
 
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.
@@ -67,6 +75,14 @@ func (c *DecoyConfig) validate() error {
 
 	if c.ReplayWeight == 0 && c.ListWeight == 0 {
 		return fmt.Errorf("privacy.decoy: replayWeight and listWeight must not both be zero when enabled")
+	}
+
+	if c.MissChaffPct > 100 {
+		return fmt.Errorf("privacy.decoy: missChaffPct (%d) must be in [0, 100]", c.MissChaffPct)
+	}
+
+	if c.ClusterPct > 100 {
+		return fmt.Errorf("privacy.decoy: clusterPct (%d) must be in [0, 100]", c.ClusterPct)
 	}
 
 	return nil

@@ -17,6 +17,12 @@ type SourceOpener interface {
 }
 
 func NewSourceOpener(txtLocInfo string, source config.BytesSource, downloader FileDownloader) (SourceOpener, error) {
+	// "blocklist:<category>" parses as a file source; route it to the
+	// database-backed category adapter instead of the filesystem.
+	if source.Type == config.BytesSourceTypeFile && strings.HasPrefix(source.From, BlocklistSourcePrefix) {
+		return newBlocklistOpener(source.From), nil
+	}
+
 	switch source.Type {
 	case config.BytesSourceTypeText:
 		return &textOpener{source: source, locInfo: txtLocInfo}, nil

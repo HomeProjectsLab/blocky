@@ -135,7 +135,11 @@
     <div id="up-groups"></div>
     <section class="panel"><button id="add-group-btn">+ Add group</button></section>
 {{else if eq .Page "blocking"}}
-    <div class="page-head"><h1>Blocking</h1></div>
+    <div class="page-head">
+        <h1>Blocking</h1>
+        <button id="bl-apply" hidden>Apply changes</button>
+    </div>
+    <p class="empty" id="bl-status" hidden></p>
     <section class="panel">
         <h2>Status</h2>
         <div class="ctl-row">
@@ -144,26 +148,52 @@
             <span class="spacer"></span>
             <label class="dt-label">disable for
                 <select id="bl-duration">
-                    <option value="">a while</option>
+                    <option value="">until re-enabled</option>
                     <option value="1m">1m</option><option value="5m">5m</option>
                     <option value="30m">30m</option><option value="1h">1h</option>
                 </select>
             </label>
             <button id="bl-disable">Disable</button>
             <button id="bl-enable">Enable</button>
-        </div>
-    </section>
-    <section class="panel">
-        <h2>Maintenance</h2>
-        <div class="ctl-row">
-            <button id="lists-refresh">Refresh blocklists</button>
-            <button id="cache-flush">Flush DNS cache</button>
+            <button id="lists-refresh" class="btn-sub">Refresh lists</button>
+            <button id="cache-flush" class="btn-sub">Flush cache</button>
             <span id="bl-action" class="empty"></span>
         </div>
     </section>
+    <section class="tiles" id="bl-tiles">
+        <div class="tile"><span class="tile-label">Blocked (24h)</span><span class="tile-value" id="bt-blocked">—</span></div>
+        <div class="tile"><span class="tile-label">Block rate</span><span class="tile-value" id="bt-rate">—</span></div>
+        <div class="tile"><span class="tile-label">Active lists</span><span class="tile-value" id="bt-lists">—</span></div>
+        <div class="tile"><span class="tile-label">Domains covered</span><span class="tile-value" id="bt-domains">—</span></div>
+    </section>
     <section class="panel">
-        <h2>Configured blocklists</h2>
-        <div id="bl-lists"><p class="empty">Loading…</p></div>
+        <h2>Blocklist categories</h2>
+        <p class="empty">Toggling a category updates every device without a custom profile below. Changes take effect after Apply.</p>
+        <div class="cat-grid" id="bl-cats"><p class="empty">Loading…</p></div>
+    </section>
+    <section class="panel">
+        <h2>Per-device profiles</h2>
+        <p class="empty">Give a device (client name, IP or CIDR) its own category set — it then ignores the global toggles above. Manual allow/deny rules still apply everywhere.</p>
+        <div id="bl-segments"></div>
+        <div class="ctl-row"><button id="seg-add" class="btn-sub">+ Add device profile</button></div>
+    </section>
+    <section class="top-grid">
+        <div class="panel">
+            <h2>Always allow</h2>
+            <p class="empty">Domains that are never blocked, for anyone. Supports *.wildcards and /regex/.</p>
+            <div class="ctl-row"><input type="text" id="allow-in" placeholder="good.example.com" autocomplete="off"><button id="allow-add">Allow</button></div>
+            <ul class="entry-list" id="allow-list"></ul>
+        </div>
+        <div class="panel">
+            <h2>Always block</h2>
+            <p class="empty">Domains that are always blocked, for everyone.</p>
+            <div class="ctl-row"><input type="text" id="deny-in" placeholder="bad.example.com" autocomplete="off"><button id="deny-add">Block</button></div>
+            <ul class="entry-list" id="deny-list"></ul>
+        </div>
+    </section>
+    <section class="top-grid">
+        <div class="panel"><h2>Top blocked (24h)</h2><ol class="bar-list" id="bl-top"></ol></div>
+        <div class="panel"><h2>Recent blocks by list</h2><ol class="bar-list" id="bl-bygroup"></ol><p class="empty" id="bl-bygroup-empty" hidden>No blocks recorded yet.</p></div>
     </section>
 {{else if eq .Page "clients"}}
     <div class="page-head"><h1>Clients</h1></div>

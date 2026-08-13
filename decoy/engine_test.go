@@ -87,7 +87,7 @@ var _ = Describe("Engine", func() {
 			eng := NewEngine(cfg, src, nil)
 
 			for i := 0; i < 50; i++ {
-				name, _ := eng.nextQuery()
+				name := eng.nextQuery().name
 				Expect(name).Should(BeElementOf("list1.com", "list2.com"))
 			}
 		})
@@ -106,7 +106,7 @@ var _ = Describe("Engine", func() {
 
 			replay, list := 0, 0
 			for i := 0; i < 2000; i++ {
-				name, _ := eng.nextQuery()
+				name := eng.nextQuery().name
 				switch name {
 				case "replaytarget.example":
 					replay++
@@ -134,7 +134,7 @@ var _ = Describe("Engine", func() {
 			eng := NewEngine(cfg, src, nil)
 
 			for i := 0; i < 50; i++ {
-				name, _ := eng.nextQuery()
+				name := eng.nextQuery().name
 				Expect(name).Should(Equal("liststatic.example"))
 			}
 		})
@@ -148,6 +148,9 @@ var _ = Describe("Engine", func() {
 			})
 			_, e := src.SeedIfEmpty(strings.NewReader("liststatic.example\n"))
 			Expect(e).Should(Succeed())
+
+			cfg.MissChaffPct = 0 // keep this test 1:1 (fan-out toggles have their own tests)
+			cfg.ClusterPct = 0
 
 			var captured []*model.Request
 			eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {

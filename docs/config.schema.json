@@ -1719,6 +1719,139 @@
       "type": "object",
       "description": "DNS rebinding protection configuration."
     },
+    "privacy": {
+      "properties": {
+        "decoy": {
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "default": false
+            },
+            "queriesPerMinute": {
+              "type": "number",
+              "default": 4
+            },
+            "replayWeight": {
+              "type": "integer",
+              "description": "real-query replay pool weight",
+              "default": 10
+            },
+            "listWeight": {
+              "type": "integer",
+              "description": "Tranco 1M static list weight",
+              "default": 1
+            },
+            "activeHoursStart": {
+              "type": "integer",
+              "description": "0-23; noise only within [start,end)",
+              "default": 0
+            },
+            "activeHoursEnd": {
+              "type": "integer",
+              "description": "1-24",
+              "default": 24
+            },
+            "refreshURL": {
+              "type": "string",
+              "description": "optional live list source; empty = embedded"
+            },
+            "diurnalShaping": {
+              "type": "boolean",
+              "description": "Obfuscation techniques (all default-on; each independently toggleable).",
+              "default": true
+            },
+            "replayMutate": {
+              "type": "boolean",
+              "description": "mutate replayed queries so they aren't byte-identical",
+              "default": true
+            },
+            "fingerprintMatch": {
+              "type": "boolean",
+              "description": "stamp EDNS shape sampled from real clients",
+              "default": true
+            },
+            "splitUpstream": {
+              "type": "boolean",
+              "description": "vary decoy client identity to diverge group routing",
+              "default": true
+            },
+            "missChaffPct": {
+              "type": "integer",
+              "description": "% of decoys that are likely-NXDOMAIN random labels",
+              "default": 15
+            },
+            "clusterPct": {
+              "type": "integer",
+              "description": "% of emissions that fire a small related burst",
+              "default": 20
+            }
+          },
+          "additionalProperties": false,
+          "type": "object"
+        },
+        "ttlJitter": {
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "default": false
+            },
+            "percent": {
+              "type": "integer",
+              "description": "+/- percent",
+              "default": 10
+            }
+          },
+          "additionalProperties": false,
+          "type": "object"
+        },
+        "ednsPadding": {
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false,
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Privacy/decoy features: background noise queries, TTL jitter, EDNS padding."
+    },
+    "lists": {
+      "properties": {
+        "updater": {
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Enable the background updater. Seeding from embedded assets still happens\non startup regardless, so downstream consumers always have data.",
+              "default": true
+            },
+            "intervalHours": {
+              "type": "integer",
+              "description": "IntervalHours between upstream version checks (default weekly).",
+              "default": 168
+            },
+            "trancoUrl": {
+              "type": "string",
+              "description": "TrancoURL is the Tranco \"latest list\" API base. The updater GETs\n\u003cTrancoURL\u003e/api/lists/date/latest for the list id, then downloads\n\u003cTrancoURL\u003e/download/\u003cid\u003e/1000000.",
+              "default": "https://tranco-list.eu"
+            },
+            "blocklistRepo": {
+              "type": "string",
+              "description": "BlocklistRepo is the blocklistproject GitHub repo (owner/name) whose main\ncommit SHA gates blocklist refresh.",
+              "default": "blocklistproject/Lists"
+            }
+          },
+          "additionalProperties": false,
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Unified list-updater subsystem (Tranco decoy list + blocklistproject lists)."
+    },
     "upstream": {
       "additionalProperties": {
         "items": {

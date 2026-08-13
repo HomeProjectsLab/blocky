@@ -47,6 +47,20 @@ var _ = Describe("Web UI shell", func() {
 		}
 	})
 
+	Describe("blocking page", func() {
+		It("renders the ad-blocker management sections", func() {
+			_, body := get("/blocking")
+
+			for _, id := range []string{
+				"bl-apply", "bl-cats", "bl-segments", "seg-add",
+				"allow-in", "allow-list", "deny-in", "deny-list",
+				"bt-blocked", "bt-rate", "bl-top", "bl-bygroup",
+			} {
+				Expect(body).Should(ContainSubstring(`id="` + id + `"`))
+			}
+		})
+	})
+
 	Describe("navigation", func() {
 		It("lists every management page in the nav", func() {
 			_, body := get("/")

@@ -97,11 +97,16 @@ func Open(dir string) (*Store, error) {
 	// single local file: serialize through one connection (see querylog writer)
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&configBlob{}, &UpstreamGroup{}, &UpstreamEntry{}); err != nil {
+	if err := db.AutoMigrate(&configBlob{}, &UpstreamGroup{}, &UpstreamEntry{},
+		&BlockingCategory{}, &BlockingClientSegment{}, &AllowlistEntry{}, &DenylistEntry{}); err != nil {
 		return nil, fmt.Errorf("can't migrate config database schema: %w", err)
 	}
 
 	if err := seedIfEmpty(db, absDir); err != nil {
+		return nil, err
+	}
+
+	if err := seedBlockingCategories(db); err != nil {
 		return nil, err
 	}
 
@@ -170,7 +175,9 @@ func (s *Store) blob() (*configBlob, error) {
 // LoadConfig reads the stored YAML and parses it through the full
 // validation pipeline (defaults, strict unmarshal, migration, validation).
 // If any upstream_group rows exist, they replace the blob's upstream groups
-// entirely (see UpstreamGroup) and the merged config is re-validated.
+// entirely (see UpstreamGroup); if any blocking_category rows exist (seeded on
+// Open) and the query log is sqlite, the blocking tables replace the blob's
+// blocking lists the same way. The merged config is re-validated.
 func (s *Store) LoadConfig() (*config.Config, error) {
 	b, err := s.blob()
 	if err != nil {
@@ -187,12 +194,33 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 		return nil, err
 	}
 
-	if len(groups) == 0 {
-		return cfg, nil
+	overlaid := false
+
+	if len(groups) > 0 {
+		if err := overlayUpstreams(cfg, groups, entries); err != nil {
+			return nil, err
+		}
+
+		overlaid = true
 	}
 
-	if err := overlayUpstreams(cfg, groups, entries); err != nil {
-		return nil, err
+	// blocking tables govern blocking only in sqlite query-log mode: the
+	// category sources stream from that database (see lists.BlocklistProvider).
+	if cfg.QueryLog.Type == config.QueryLogTypeSqlite {
+		bl, err := s.loadBlockingRows()
+		if err != nil {
+			return nil, err
+		}
+
+		if bl.active() {
+			overlayBlocking(cfg, bl)
+
+			overlaid = true
+		}
+	}
+
+	if !overlaid {
+		return cfg, nil
 	}
 
 	if err := cfg.Validate(); err != nil {

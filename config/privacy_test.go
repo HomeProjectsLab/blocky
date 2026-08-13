@@ -19,6 +19,12 @@ var _ = Describe("Privacy config", func() {
 			Expect(p.Decoy.ActiveHoursStart).Should(Equal(0))
 			Expect(p.Decoy.ActiveHoursEnd).Should(Equal(24))
 			Expect(p.Decoy.RefreshURL).Should(BeEmpty())
+			Expect(p.Decoy.DiurnalShaping).Should(BeTrue())
+			Expect(p.Decoy.ReplayMutate).Should(BeTrue())
+			Expect(p.Decoy.FingerprintMatch).Should(BeTrue())
+			Expect(p.Decoy.SplitUpstream).Should(BeTrue())
+			Expect(p.Decoy.MissChaffPct).Should(Equal(uint(15)))
+			Expect(p.Decoy.ClusterPct).Should(Equal(uint(20)))
 			Expect(p.TTLJitter.Enable).Should(BeFalse())
 			Expect(p.TTLJitter.PercentPct).Should(Equal(uint(10)))
 			Expect(p.EDNSPadding.Enable).Should(BeFalse())
@@ -77,6 +83,18 @@ var _ = Describe("Privacy config", func() {
 			p.Decoy.ReplayWeight = 0
 			p.Decoy.ListWeight = 0
 			Expect(p.validate(nil)).Should(Succeed())
+		})
+
+		It("rejects missChaffPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.MissChaffPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("missChaffPct")))
+		})
+
+		It("rejects clusterPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.ClusterPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("clusterPct")))
 		})
 
 		It("rejects ttlJitter percent above 90", func() {

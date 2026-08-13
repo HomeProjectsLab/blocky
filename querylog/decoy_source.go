@@ -2,6 +2,7 @@ package querylog
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -31,9 +32,10 @@ const decoySeedBatch = 2000
 type DecoySource struct {
 	db *gorm.DB
 
-	mu       sync.Mutex
-	rnd      *rand.Rand
-	maxRowid int64 // cached after seeding; decoy_domains is insert-only read-only
+	mu         sync.Mutex
+	rnd        *rand.Rand
+	maxRowid   int64 // cached after seeding; decoy_domains is insert-only read-only
+	blMaxRowid int64 // cached max rowid of blocklist_domains for random-rowid sampling
 }
 
 // decoyDomain is the gorm model for the seeded Tranco list. rowid is SQLite's
@@ -72,13 +74,17 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 		return nil, fmt.Errorf("can't open query log database for decoy source: %w", err)
 	}
 
-	if err := db.AutoMigrate(&decoyDomain{}); err != nil {
-		return nil, fmt.Errorf("can't create decoy_domains table: %w", err)
+	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}); err != nil {
+		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
 
 	s := &DecoySource{db: db, rnd: rand.New(rand.NewSource(time.Now().UnixNano()))} //nolint:gosec // noise timing, not crypto
 
 	if err := s.loadMaxRowid(); err != nil {
+		return nil, err
+	}
+
+	if err := s.loadBlMaxRowid(); err != nil {
 		return nil, err
 	}
 
@@ -172,6 +178,78 @@ func (s *DecoySource) SampleList() (string, error) {
 	err := s.db.Raw("SELECT domain FROM decoy_domains WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&domain).Error
 
 	return domain, err
+}
+
+// HourlyRealCounts returns real (non-decoy) query counts bucketed by UTC
+// hour-of-day over the recent window, read from the agg_hourly aggregate table
+// (which already excludes decoy rows). Used to shape the decoy rate to real
+// activity. A missing agg_hourly table (non-sqlite target, or before the writer
+// creates it) surfaces as an error and the caller treats it as cold start.
+func (s *DecoySource) HourlyRealCounts() ([24]int64, error) {
+	var counts [24]int64
+
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var rows []struct {
+		Hour time.Time `gorm:"column:hour"`
+		Cnt  int64     `gorm:"column:cnt"`
+	}
+
+	if err := s.db.Raw(`SELECT hour, cnt FROM agg_hourly WHERE hour >= ?`, since.UTC()).Scan(&rows).Error; err != nil {
+		return counts, err
+	}
+
+	for _, r := range rows {
+		counts[r.Hour.UTC().Hour()] += r.Cnt
+	}
+
+	return counts, nil
+}
+
+// FpSample is a transport-agnostic EDNS/qtype shape sampled from a real client.
+type FpSample struct {
+	Qtype       string // question type of the sampled real query
+	HadEDNS0    bool   // whether the real query carried an OPT record
+	EDNSUDPSize uint16 // advertised UDP payload size
+	DO          bool   // DNSSEC OK bit
+}
+
+// SampleRealFingerprint returns the EDNS shape of one random recent real query
+// so decoys can be stamped to match the real client-software distribution
+// (otherwise every synthetic query looks like the resolver's default). Zero
+// value (HadEDNS0 false) at cold start — caller then leaves the plain query.
+func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var row struct {
+		QuestionType string `gorm:"column:question_type"`
+		EDNSUDPSize  uint16 `gorm:"column:edns_udp_size"`
+		FpDetail     string `gorm:"column:fp_detail"`
+	}
+
+	err := s.db.Raw(`SELECT question_type, edns_udp_size, fp_detail FROM log_entries
+		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
+		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
+	if err != nil {
+		return FpSample{}, err
+	}
+
+	fp := FpSample{Qtype: row.QuestionType, EDNSUDPSize: row.EDNSUDPSize}
+
+	// DO and HadEDNS0 live inside the fp_detail JSON blob, not in columns.
+	if row.FpDetail != "" {
+		var d struct {
+			DO       bool `json:"do"`
+			HadEDNS0 bool `json:"hadEdns0"`
+		}
+
+		if json.Unmarshal([]byte(row.FpDetail), &d) == nil {
+			fp.DO = d.DO
+			fp.HadEDNS0 = d.HadEDNS0
+		}
+	}
+
+	return fp, nil
 }
 
 // SampleRecentReal returns up to limit real (non-decoy) queries sampled at

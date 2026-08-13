@@ -286,6 +286,46 @@ dl.kv dd { margin: 0; color: var(--ink); }
 .field-help { color: var(--muted); font-size: 11px; margin: 0.2rem 0 0; }
 .toggle-label { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--ink); font-size: 13px; cursor: pointer; }
 
+/* blocking: category grid, device profiles, allow/deny lists */
+.cat-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 0.6rem;
+}
+.cat-card {
+    display: flex; align-items: center; gap: 0.6rem;
+    background: var(--bg2); border: 1px solid var(--grid); border-radius: 6px;
+    padding: 0.5rem 0.7rem; cursor: pointer;
+}
+.cat-card input { margin: 0; }
+.cat-card.on { border-color: var(--c-blocked); }
+.cat-name { font-weight: 600; font-size: 13px; }
+.cat-count { color: var(--ink2); font-family: var(--font-mono); font-size: 11px; }
+.cat-badge {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--c-blocked); border: 1px solid var(--c-blocked);
+    border-radius: 3px; padding: 0 0.25rem;
+}
+.seg-row {
+    background: var(--bg2); border: 1px solid var(--grid); border-radius: 6px;
+    padding: 0.6rem 0.75rem; margin-bottom: 0.6rem;
+}
+.seg-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
+.seg-client { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.seg-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.chip-toggle {
+    font-family: var(--font-mono); font-size: 11px; padding: 0.15rem 0.5rem;
+    border-radius: 10px; background: var(--bg1); color: var(--ink2);
+    border: 1px solid var(--grid);
+}
+.chip-toggle[aria-pressed="true"] { background: var(--c-blocked); border-color: var(--c-blocked); color: #0b1016; }
+.entry-list { list-style: none; margin: 0.6rem 0 0; padding: 0; }
+.entry-list li {
+    display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+    font-family: var(--font-mono); font-size: 12px;
+    padding: 0.25rem 0; border-bottom: 1px solid var(--grid);
+}
+#allow-in, #deny-in { flex: 1; min-width: 10rem; }
+
 /* clients: fingerprint panel + transport mix */
 .spark { min-height: 120px; }
 .spark .chart, .spark { height: 120px; }

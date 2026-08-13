@@ -18,6 +18,7 @@ import (
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/decoy"
+	"github.com/0xERR0R/blocky/lists"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/model"
@@ -62,8 +63,9 @@ type Server struct {
 	upstreamTree     *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
 	logFlushers      []interface{ Flush() error }   // query-log resolvers flushed synchronously in Stop
 	qlHub            *querylog.Hub                  // live query stream fan-out; nil unless sqlite query log
-	decoyEngine      *decoy.Engine                 // background noise generator; nil unless privacy.decoy.enable
-	decoySource      *querylog.DecoySource         // closed in Stop; nil unless decoy engine present
+	decoyEngine      *decoy.Engine                  // background noise generator; nil unless privacy.decoy.enable
+	decoySource      *querylog.DecoySource          // closed in Stop; shared by decoy engine + list updater
+	listUpdater      *lists.Updater                 // background list refresher; nil unless lists.updater.enable
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
@@ -184,6 +186,28 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		return nil, err
 	}
 
+	// The shared list/decoy source must exist BEFORE the resolver chain is
+	// built: the blocking resolver's "blocklist:<category>" sources stream from
+	// it while their list caches load during construction.
+	decoySource, err := openDecoySource(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Seed the enabled blocklist categories BEFORE the resolver chain is built:
+	// the blocking resolver imports its blocklist:<category> sources during
+	// construction, so the rows must already exist (the background updater seeds
+	// asynchronously in Start, which is too late — blocking would load 0 domains).
+	// SeedBlocklistIfEmpty makes this a fast no-op on every launch after the first.
+	if decoySource != nil && cfg.Lists.Updater.Enable && blockingUsesBlocklistSources(cfg) {
+		seeder := lists.NewUpdater(cfg.Lists.Updater, decoySource, false)
+		seeder.SetEnabledCategories(enabledBlocklistCategories(store))
+
+		if err := seeder.SeedBlocklistFloor(); err != nil {
+			return nil, fmt.Errorf("can't seed blocklist floor: %w", err)
+		}
+	}
+
 	queryResolver, queryError := createQueryResolver(ctx, cfg, bootstrap, redisResult.decorator)
 	if queryError != nil {
 		return nil, queryError
@@ -196,6 +220,7 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		servers:          make(map[net.Listener]*httpServer),
 		http3PacketConns: http3PacketConns,
 		store:            store,
+		decoySource:      decoySource,
 	}
 
 	// live query stream: only the sqlite query log target feeds the UI, so the
@@ -241,7 +266,12 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		return nil, fmt.Errorf("failed to create OpenAPI interface implementation: %w", err)
 	}
 
-	httpRouter := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub)
+	var blStats blocklistStatser
+	if server.decoySource != nil {
+		blStats = server.decoySource
+	}
+
+	httpRouter := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats)
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(http3PacketConns) > 0 {
@@ -683,30 +713,99 @@ func toMB(b uint64) uint64 {
 }
 
 // Start starts the server
-// setupDecoyEngine wires the background noise generator when privacy.decoy is
-// enabled. It requires the sqlite query log (the replay pool and the seeded
-// list both live in that database); with any other query-log target it warns
-// and stays disabled.
+// setupDecoyEngine wires the decoy noise generator and the unified list updater.
+// Both live on one sqlite query-log connection (the decoy list, the blocklist
+// tables and the version meta all persist there), so the DecoySource is opened
+// once and shared. With any non-sqlite query-log target both stay disabled.
 func (s *Server) setupDecoyEngine(cfg *config.Config) error {
-	if !cfg.Privacy.Decoy.Enable {
+	needDecoy := cfg.Privacy.Decoy.Enable
+	needUpdater := cfg.Lists.Updater.Enable
+
+	if !needDecoy && !needUpdater {
 		return nil
 	}
 
-	if cfg.QueryLog.Type != config.QueryLogTypeSqlite {
-		logger().Warn("privacy.decoy is enabled but requires queryLog.type: sqlite; decoy engine disabled")
+	if s.decoySource == nil {
+		logger().Warn("privacy.decoy / lists.updater require queryLog.type: sqlite; both disabled")
 
 		return nil
+	}
+
+	if needDecoy {
+		s.decoyEngine = decoy.NewEngine(cfg.Privacy.Decoy, s.decoySource, s.resolve)
+	}
+
+	if needUpdater {
+		metrics.RegisterMetric(lists.ListUpdateTotal)
+		s.listUpdater = lists.NewUpdater(cfg.Lists.Updater, s.decoySource, needDecoy)
+		// Seed only the categories the user has enabled, so a fresh box carries a
+		// few small lists instead of all ~5.4M embedded domains (~540MB).
+		s.listUpdater.SetEnabledCategories(enabledBlocklistCategories(s.store))
+	}
+
+	return nil
+}
+
+// enabledBlocklistCategories returns the provider the list updater uses to
+// decide which blocklist categories to seed and keep. With no config store it
+// falls back to the updater's small default set.
+func enabledBlocklistCategories(store *configstore.Store) func() ([]string, error) {
+	if store == nil {
+		return nil
+	}
+
+	return func() ([]string, error) {
+		cats, err := store.ListBlockingCategories()
+		if err != nil {
+			return nil, err
+		}
+
+		enabled := make([]string, 0, len(cats))
+		for _, c := range cats {
+			if c.Enabled {
+				enabled = append(enabled, c.Name)
+			}
+		}
+
+		return enabled, nil
+	}
+}
+
+// openDecoySource opens the shared sqlite list/decoy store when anything needs
+// it (decoy engine, list updater, or blocking sources reading blocklist
+// categories) and registers it as the lists package's blocklist provider.
+// Returns nil (all consumers stay disabled) with a non-sqlite query log.
+func openDecoySource(cfg *config.Config) (*querylog.DecoySource, error) {
+	if cfg.QueryLog.Type != config.QueryLogTypeSqlite {
+		return nil, nil
+	}
+
+	if !cfg.Privacy.Decoy.Enable && !cfg.Lists.Updater.Enable && !blockingUsesBlocklistSources(cfg) {
+		return nil, nil
 	}
 
 	source, err := querylog.NewDecoySource(cfg.QueryLog.Target.Reveal())
 	if err != nil {
-		return fmt.Errorf("can't open decoy source: %w", err)
+		return nil, fmt.Errorf("can't open list/decoy source: %w", err)
 	}
 
-	s.decoySource = source
-	s.decoyEngine = decoy.NewEngine(cfg.Privacy.Decoy, source, s.resolve)
+	lists.SetBlocklistProvider(source)
 
-	return nil
+	return source, nil
+}
+
+// blockingUsesBlocklistSources reports whether any denylist references a
+// database-backed "blocklist:<category>" source.
+func blockingUsesBlocklistSources(cfg *config.Config) bool {
+	for _, sources := range cfg.Blocking.Denylists {
+		for _, src := range sources {
+			if src.Type == config.BytesSourceTypeFile && strings.HasPrefix(src.From, lists.BlocklistSourcePrefix) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (s *Server) Start(ctx context.Context, errCh chan<- error) {
@@ -714,6 +813,10 @@ func (s *Server) Start(ctx context.Context, errCh chan<- error) {
 
 	if s.decoyEngine != nil {
 		go s.decoyEngine.Run(ctx)
+	}
+
+	if s.listUpdater != nil {
+		go s.listUpdater.Run(ctx)
 	}
 
 	for _, srv := range s.dnsServers {

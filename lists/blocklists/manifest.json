@@ -1,0 +1,131 @@
+{
+  "commit": "ee3bdbaddf49c756cf3340bb2e6a9dee5282d1c6",
+  "fetchedAt": "2026-08-13T02:46:38Z",
+  "categories": [
+    {
+      "name": "ads",
+      "domains": 234025,
+      "bytes": 1509817
+    },
+    {
+      "name": "tracking",
+      "domains": 143876,
+      "bytes": 944270
+    },
+    {
+      "name": "fraud",
+      "domains": 256268,
+      "bytes": 1468606
+    },
+    {
+      "name": "phishing",
+      "domains": 190215,
+      "bytes": 1409155
+    },
+    {
+      "name": "scam",
+      "domains": 8527,
+      "bytes": 53030
+    },
+    {
+      "name": "malware",
+      "domains": 2656393,
+      "bytes": 16726110
+    },
+    {
+      "name": "abuse",
+      "domains": 435119,
+      "bytes": 2999257
+    },
+    {
+      "name": "gambling",
+      "domains": 278856,
+      "bytes": 1132234
+    },
+    {
+      "name": "porn",
+      "domains": 953393,
+      "bytes": 4968174
+    },
+    {
+      "name": "redirect",
+      "domains": 108685,
+      "bytes": 501880
+    },
+    {
+      "name": "basic",
+      "domains": 76036,
+      "bytes": 500618
+    },
+    {
+      "name": "youtube",
+      "domains": 24280,
+      "bytes": 100846
+    },
+    {
+      "name": "facebook",
+      "domains": 22362,
+      "bytes": 120711
+    },
+    {
+      "name": "drugs",
+      "domains": 26029,
+      "bytes": 155407
+    },
+    {
+      "name": "tiktok",
+      "domains": 3725,
+      "bytes": 15823
+    },
+    {
+      "name": "ransomware",
+      "domains": 1904,
+      "bytes": 13146
+    },
+    {
+      "name": "torrent",
+      "domains": 2620,
+      "bytes": 15352
+    },
+    {
+      "name": "piracy",
+      "domains": 2154,
+      "bytes": 10835
+    },
+    {
+      "name": "twitter",
+      "domains": 1193,
+      "bytes": 5139
+    },
+    {
+      "name": "crypto",
+      "domains": 1272,
+      "bytes": 6651
+    },
+    {
+      "name": "adobe",
+      "domains": 384,
+      "bytes": 2290
+    },
+    {
+      "name": "whatsapp",
+      "domains": 226,
+      "bytes": 999
+    },
+    {
+      "name": "vaping",
+      "domains": 108,
+      "bytes": 621
+    },
+    {
+      "name": "smart-tv",
+      "domains": 77,
+      "bytes": 708
+    },
+    {
+      "name": "fortnite",
+      "domains": 5,
+      "bytes": 201
+    }
+  ]
+}

@@ -196,13 +196,15 @@ func (s *Server) Query(
 
 func createHTTPRouter(
 	cfg *config.Config, openAPIImpl api.StrictServerInterface, store *configstore.Store, swapper upstreamSwapper,
-	qlHub *querylog.Hub,
+	qlHub *querylog.Hub, blStats blocklistStatser,
 ) *chi.Mux {
 	router := chi.NewRouter()
 
 	api.RegisterOpenAPIEndpoints(router, openAPIImpl)
 
 	registerConfigUIEndpoints(router, store, swapper)
+
+	registerBlockingUIEndpoints(router, store, blStats)
 
 	registerStatsUIEndpoints(router, cfg, qlHub, store)
 
