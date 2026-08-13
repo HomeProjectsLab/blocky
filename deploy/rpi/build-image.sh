@@ -25,12 +25,16 @@ BASE_URL="${BASE_URL:-https://downloads.raspberrypi.com/raspios_lite_arm64/image
 BASE_IMG="${BASE_IMG:-}"
 OUT="${OUT:-$REPO_ROOT/blocky-rpi3-arm64.img.xz}"
 SELF_TEST=0
+RAW="${RAW:-0}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--base) BASE_IMG="$2"; shift 2 ;;
 	--out) OUT="$2"; shift 2 ;;
 	--self-test) SELF_TEST=1; shift ;;
+	# Leave the result uncompressed — for writing straight to a device, where
+	# the xz round-trip is pure wasted CPU.
+	--raw) RAW=1; shift ;;
 	*) echo "unknown arg: $1" >&2; exit 2 ;;
 	esac
 done
@@ -139,8 +143,13 @@ if [ "$SELF_TEST" = 1 ]; then
 	echo "   units + enable-symlinks + appliance.yml injected, cleanly unmounted."
 	exit 0
 fi
-echo ">> compressing to $OUT …"
-xz -T0 -6 -c "$IMG" > "$OUT"
+if [ "$RAW" = 1 ]; then
+	echo ">> writing raw image to $OUT …"
+	cp "$IMG" "$OUT"
+else
+	echo ">> compressing to $OUT …"
+	xz -T0 -6 -c "$IMG" > "$OUT"
+fi
 echo ">> done: $OUT ($(du -h "$OUT" | cut -f1))"
 echo "   sha256: $(sha256sum "$OUT" | cut -d' ' -f1)"
 cat <<EOF
