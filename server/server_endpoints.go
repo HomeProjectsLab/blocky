@@ -8,6 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/resolver"
@@ -242,7 +245,41 @@ func configureStaticAssetsHandler(router *chi.Mux) {
 	util.FatalOnError("unable to load static asset files", err)
 
 	fs := http.FileServer(http.FS(assets))
-	router.Handle("/static/*", http.StripPrefix("/static/", fs))
+
+	// The assets are baked into the binary, so they only change when the binary
+	// does. Without validators the browser re-fetches every module on each page
+	// navigation — a page pulls ~20 ES modules plus the uPlot bundle, and over
+	// plain HTTP/1.1 (6 connections per host, one permanently held by the SSE
+	// stream) that serialises into a visible stall on every tab switch. Tag them
+	// with a build-stable ETag and let the browser reuse them.
+	etag := `"` + staticAssetsVersion() + `"`
+
+	router.Handle("/static/*", http.StripPrefix("/static/",
+		http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			rw.Header().Set("ETag", etag)
+			rw.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+
+			// Fast path: the client already has this exact build's assets.
+			if match := req.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
+				rw.WriteHeader(http.StatusNotModified)
+
+				return
+			}
+
+			fs.ServeHTTP(rw, req)
+		})))
+}
+
+// staticAssetsVersion identifies the embedded asset set. util.Version changes
+// on every release build; for dev builds ("undefined") fall back to the start
+// time so a restart still invalidates stale caches.
+func staticAssetsVersion() string {
+	v := util.Version
+	if v == "" || v == "undefined" {
+		v = strconv.FormatInt(time.Now().Unix(), 10)
+	}
+
+	return v
 }
 
 func configureRobotsHandler(router *chi.Mux) {
