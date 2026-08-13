@@ -19,8 +19,10 @@ import (
 // the test can seed the replay pool without depending on the writer internals.
 type realRow struct {
 	RequestTS     time.Time `gorm:"column:request_ts"`
+	ClientName    string    `gorm:"column:client_name"`
 	QuestionName  string    `gorm:"column:question_name"`
 	QuestionType  string    `gorm:"column:question_type"`
+	ResponseType  string    `gorm:"column:response_type"`
 	EffectiveTLDP string    `gorm:"column:effective_tld_p"`
 	Decoy         bool      `gorm:"column:decoy"`
 	EDNSUDPSize   uint16    `gorm:"column:edns_udp_size"`
@@ -317,6 +319,176 @@ var _ = Describe("DecoySource", func() {
 			fp, e = src.SampleFingerprintForName("nothing.here.org")
 			Expect(e).Should(Succeed())
 			Expect(fp.EDNSUDPSize).Should(BeElementOf(uint16(1232), uint16(512)))
+		})
+	})
+
+	// seedLog rebuilds a fresh DB with the given real rows and returns an open
+	// DecoySource over it. Used by the cohort/session/revisit specs, which need
+	// crafted client_name / response_type / effective_tld_p timelines.
+	seedLog := func(name string, rows []realRow) *DecoySource {
+		p := filepath.Join(GinkgoT().TempDir(), name)
+		raw, e := gorm.Open(sqlite.Open(p), &gorm.Config{})
+		Expect(e).Should(Succeed())
+		Expect(raw.AutoMigrate(&realRow{})).Should(Succeed())
+		if len(rows) > 0 {
+			Expect(raw.Create(&rows).Error).Should(Succeed())
+		}
+		sqlDB, _ := raw.DB()
+		Expect(sqlDB.Close()).Should(Succeed())
+
+		src, e := NewDecoySource(p)
+		Expect(e).Should(Succeed())
+		DeferCleanup(func() { _ = src.Close() })
+
+		return src
+	}
+
+	Describe("SampleCohort (7G)", func() {
+		It("groups a same-client burst in time order, includes a blocked member, excludes other clients", func() {
+			now := time.Now()
+			src := seedLog("cohort.db", []realRow{
+				{RequestTS: now, ClientName: "h1", QuestionName: "page.com", QuestionType: "A", EffectiveTLDP: "page.com"},
+				{RequestTS: now.Add(300 * time.Millisecond), ClientName: "h1", QuestionName: "cdn.page.com", QuestionType: "AAAA"},
+				{RequestTS: now.Add(500 * time.Millisecond), ClientName: "h1", QuestionName: "tracker.com", QuestionType: "A", ResponseType: "BLOCKED"},
+				// different client inside the same window — must be excluded
+				{RequestTS: now.Add(200 * time.Millisecond), ClientName: "h2", QuestionName: "other.com", QuestionType: "A"},
+			})
+
+			// SampleCohort seeds on a RANDOM real row, so it may return either
+			// h1's burst or h2's singleton. Sample repeatedly: capture h1's cohort
+			// to assert its structure, and assert on EVERY draw that clients are
+			// never mixed (exclusion holds regardless of which seed was picked).
+			var burst []CohortMember
+
+			for i := 0; i < 60; i++ {
+				mem, e := src.SampleCohort()
+				Expect(e).Should(Succeed())
+
+				switch {
+				case len(mem) == 1:
+					Expect(mem[0].Domain).Should(Equal("other.com")) // h2's singleton, never mixed
+				case len(mem) == 3:
+					burst = mem // h1's three rows, no h2 row mixed in
+				default:
+					Fail("cohort mixed clients or wrong size: had length " + strconv.Itoa(len(mem)))
+				}
+			}
+
+			Expect(burst).ShouldNot(BeNil(), "expected to sample h1's 3-member cohort within 60 draws")
+			Expect(burst[0].Domain).Should(Equal("page.com")) // primary first
+			Expect(burst[0].DelayMs).Should(Equal(0))
+			Expect(burst[0].Qtype).Should(Equal(uint16(1)))  // A
+			Expect(burst[1].Domain).Should(Equal("cdn.page.com"))
+			Expect(burst[1].Qtype).Should(Equal(uint16(28))) // AAAA
+			Expect(burst[1].DelayMs).Should(BeNumerically("~", 300, 5))
+			Expect(burst[2].Domain).Should(Equal("tracker.com"))
+			Expect(burst[2].Blocked).Should(BeTrue()) // blocked member kept
+			Expect(burst[2].DelayMs).Should(BeNumerically("~", 500, 5))
+		})
+
+		It("returns nil on a cold start (no real rows)", func() {
+			src := seedLog("cohort_empty.db", nil)
+			mem, e := src.SampleCohort()
+			Expect(e).Should(Succeed())
+			Expect(mem).Should(BeNil())
+		})
+	})
+
+	Describe("NextInSession / SessionSeed (#1)", func() {
+		It("returns the frequent successor and \"\" for an unknown primary", func() {
+			now := time.Now().Add(-time.Hour)
+			// h1: a->b twice (two sessions), a->c once. b should dominate.
+			src := seedLog("session.db", []realRow{
+				{RequestTS: now, ClientName: "h1", QuestionName: "a.com", EffectiveTLDP: "a.com"},
+				{RequestTS: now.Add(1 * time.Minute), ClientName: "h1", QuestionName: "b.com", EffectiveTLDP: "b.com"},
+				{RequestTS: now.Add(2 * time.Hour), ClientName: "h1", QuestionName: "a.com", EffectiveTLDP: "a.com"},
+				{RequestTS: now.Add(2*time.Hour + time.Minute), ClientName: "h1", QuestionName: "b.com", EffectiveTLDP: "b.com"},
+				{RequestTS: now.Add(4 * time.Hour), ClientName: "h1", QuestionName: "a.com", EffectiveTLDP: "a.com"},
+				{RequestTS: now.Add(4*time.Hour + time.Minute), ClientName: "h1", QuestionName: "c.com", EffectiveTLDP: "c.com"},
+			})
+
+			for i := 0; i < 30; i++ {
+				nxt, e := src.NextInSession("a.com")
+				Expect(e).Should(Succeed())
+				Expect(nxt).Should(BeElementOf("b.com", "c.com"))
+			}
+
+			nxt, e := src.NextInSession("zzz.com")
+			Expect(e).Should(Succeed())
+			Expect(nxt).Should(BeEmpty())
+		})
+
+		It("does not learn a transition across an idle longer than the session gap", func() {
+			now := time.Now().Add(-time.Hour)
+			// a -> b but 45min apart: beyond sessionGap, so no transition.
+			src := seedLog("session_gap.db", []realRow{
+				{RequestTS: now, ClientName: "h1", QuestionName: "a.com", EffectiveTLDP: "a.com"},
+				{RequestTS: now.Add(45 * time.Minute), ClientName: "h1", QuestionName: "b.com", EffectiveTLDP: "b.com"},
+			})
+
+			nxt, e := src.NextInSession("a.com")
+			Expect(e).Should(Succeed())
+			Expect(nxt).Should(BeEmpty())
+		})
+
+		It("SessionSeed returns a session-starting primary", func() {
+			now := time.Now().Add(-time.Hour)
+			src := seedLog("seed.db", []realRow{
+				{RequestTS: now, ClientName: "h1", QuestionName: "start.com", EffectiveTLDP: "start.com"},
+				{RequestTS: now.Add(time.Minute), ClientName: "h1", QuestionName: "mid.com", EffectiveTLDP: "mid.com"},
+			})
+
+			seed, e := src.SessionSeed()
+			Expect(e).Should(Succeed())
+			Expect(seed).Should(Equal("start.com")) // only the first row starts a session
+		})
+	})
+
+	Describe("RevisitInterval (#5)", func() {
+		It("returns ~the median gap for a domain with several visits", func() {
+			now := time.Now().Add(-6 * time.Hour)
+			// visits at 0, +1h, +2h, +4h -> deltas 1h,1h,2h -> median 1h
+			src := seedLog("revisit.db", []realRow{
+				{RequestTS: now, ClientName: "h1", QuestionName: "news.com", EffectiveTLDP: "news.com"},
+				{RequestTS: now.Add(1 * time.Hour), ClientName: "h1", QuestionName: "news.com", EffectiveTLDP: "news.com"},
+				{RequestTS: now.Add(2 * time.Hour), ClientName: "h1", QuestionName: "news.com", EffectiveTLDP: "news.com"},
+				{RequestTS: now.Add(4 * time.Hour), ClientName: "h1", QuestionName: "news.com", EffectiveTLDP: "news.com"},
+			})
+
+			d, ok := src.RevisitInterval("www.news.com")
+			Expect(ok).Should(BeTrue())
+			Expect(d).Should(BeNumerically("~", time.Hour, 2*time.Minute))
+		})
+
+		It("collapses an intra-page-load burst and reports ok=false for a single visit", func() {
+			now := time.Now().Add(-time.Hour)
+			// three queries within a second == one visit -> no revisit interval
+			src := seedLog("revisit_single.db", []realRow{
+				{RequestTS: now, ClientName: "h1", QuestionName: "solo.com", EffectiveTLDP: "solo.com"},
+				{RequestTS: now.Add(200 * time.Millisecond), ClientName: "h1", QuestionName: "solo.com", EffectiveTLDP: "solo.com"},
+				{RequestTS: now.Add(500 * time.Millisecond), ClientName: "h1", QuestionName: "solo.com", EffectiveTLDP: "solo.com"},
+			})
+
+			_, ok := src.RevisitInterval("solo.com")
+			Expect(ok).Should(BeFalse())
+		})
+	})
+
+	Describe("AddToCorpus (TASK P)", func() {
+		It("inserts a domain and refreshes hits on re-add", func() {
+			src := seedLog("addcorpus.db", nil)
+
+			Expect(src.AddToCorpus("warm.com")).Should(Succeed())
+			Expect(src.AddToCorpus("warm.com")).Should(Succeed())
+
+			var hits int64
+			Expect(src.db.Raw("SELECT hits FROM noise_corpus WHERE domain = ?", "warm.com").
+				Scan(&hits).Error).Should(Succeed())
+			Expect(hits).Should(Equal(int64(2)))
+
+			d, e := src.SampleCorpus()
+			Expect(e).Should(Succeed())
+			Expect(d).Should(Equal("warm.com"))
 		})
 	})
 })

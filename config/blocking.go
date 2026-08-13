@@ -30,6 +30,11 @@ type Blocking struct {
 	// Controls how block/allow lists are loaded and periodically refreshed.
 	Loading SourceLoading `yaml:"loading"`
 
+	// ShadowBlockedQueries egresses a discarded real upstream query alongside each
+	// client block so blocked trackers still appear on the wire. Runtime-derived from
+	// privacy.shadowBlockedQueries, not user-set here.
+	ShadowBlockedQueries bool `yaml:"-"`
+
 	// Deprecated options
 	Deprecated struct {
 		BlackLists            *map[string][]BytesSource `yaml:"blackLists"`

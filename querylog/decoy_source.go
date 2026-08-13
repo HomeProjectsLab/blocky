@@ -7,11 +7,13 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/miekg/dns"
 	"golang.org/x/net/publicsuffix"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -19,6 +21,25 @@ import (
 
 	"github.com/0xERR0R/blocky/log"
 )
+
+// sessionGap bounds one browsing session for the transition/seed Markov models:
+// two consecutive real queries from the same client more than sessionGap apart
+// are treated as different sessions, so a transition is only learned across a
+// human page-to-page hop, not across an overnight idle. ~30min matches the
+// common web-analytics session timeout.
+const sessionGap = 30 * time.Minute
+
+// cohortWindow is the ± span around a seed query used to gather a page-load
+// cohort (a burst of queries a single page fan-out triggers). A real page load
+// resolves its subresources within a second or two; ±this catches the burst
+// without merging the next navigation.
+const cohortWindow = 2 * time.Second
+
+// revisitMinGap collapses a domain's queries that are closer than this into one
+// "visit": a page load fires many queries at the same eTLD+1 within
+// milliseconds, and those intra-load repeats are not revisits. Consecutive
+// visits are what feed RevisitInterval's cadence median.
+const revisitMinGap = 5 * time.Minute
 
 // decoyReplayWindow bounds the replay pool to recent real queries: sampling
 // from a rolling window keeps replays plausible (an observer subtracting an
@@ -597,4 +618,290 @@ func (s *DecoySource) corpusRowAt(max int64) (string, int64, error) {
 	err := s.db.Raw("SELECT domain, hits FROM noise_corpus WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&row).Error
 
 	return row.Domain, row.Hits, err
+}
+
+// AddToCorpus inserts or refreshes domain in the persistent visited-domains
+// corpus (noise_corpus), the same table the real-query write path populates. It
+// bumps hits and moves last_seen forward (first_seen kept), so a pre-warmed
+// domain is sampled by SampleCorpus like any real visit. PER-INSTANCE ONLY —
+// never exported. No-op on an empty domain.
+func (s *DecoySource) AddToCorpus(domain string) error {
+	if domain == "" {
+		return nil
+	}
+
+	now := time.Now()
+
+	return s.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "domain"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"hits":      gorm.Expr("hits + 1"),
+			"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+		}),
+	}).Create(&noiseCorpus{Domain: domain, FirstSeen: now, LastSeen: now, Hits: 1}).Error
+}
+
+// --- cohort / session / revisit models (derived read-side from log_entries) --
+
+// CohortMember is one query of a real page-load cohort, in recorded time order.
+// The first member (DelayMs == 0) is the primary navigation; the rest are the
+// subresource fan-out at their observed offsets. Blocked members (trackers the
+// box denied) are included so the cohort mirrors the real page — the decoy
+// engine decides which to actually emit.
+type CohortMember struct {
+	Domain  string // question_name as resolved
+	Qtype   uint16 // DNS type (A/AAAA/HTTPS/…), converted from the stored string
+	DelayMs int    // offset from the cohort's first query, milliseconds
+	Blocked bool   // response_type == "BLOCKED"
+}
+
+// cohortRow is the log_entries projection SampleCohort reads.
+type cohortRow struct {
+	QuestionName string    `gorm:"column:question_name"`
+	QuestionType string    `gorm:"column:question_type"`
+	ResponseType string    `gorm:"column:response_type"`
+	RequestTS    time.Time `gorm:"column:request_ts"`
+}
+
+// SampleCohort picks a random real page-load burst and returns its members in
+// recorded time order, each carrying its delay from the burst's first query.
+//
+// Derivation: seed on a random recent real (non-decoy) row, then gather that
+// same client's real rows within ±cohortWindow of the seed and order by
+// request_ts. Blocked rows are NOT filtered — a real page's tracker/ad lookups
+// are part of its fingerprint, so the cohort includes them (Blocked=true) and
+// the engine chooses emission. The earliest row is the primary. Empty cohort
+// (cold start, no real rows yet) → nil, nil.
+//
+// O(window): the seed is one indexed random row; the gather rides the
+// (client_name, request_ts) composite index.
+//
+// ponytail: on-demand burst grouping, one seed + one ranged read per call. A
+// symmetric ±window can occasionally merge two back-to-back navigations into
+// one cohort; harmless for noise. Materialize a cohort table if this ever gets
+// heavy or the merge matters.
+func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var seed struct {
+		ClientName string    `gorm:"column:client_name"`
+		RequestTS  time.Time `gorm:"column:request_ts"`
+		Found      bool      `gorm:"column:found"`
+	}
+
+	err := s.db.Raw(`SELECT client_name, request_ts, 1 AS found FROM log_entries
+		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
+		ORDER BY RANDOM() LIMIT 1`, since).Scan(&seed).Error
+	if err != nil {
+		return nil, err
+	}
+
+	if !seed.Found {
+		return nil, nil // cold start
+	}
+
+	var rows []cohortRow
+
+	err = s.db.Raw(`SELECT question_name, question_type, response_type, request_ts FROM log_entries
+		WHERE decoy = 0 AND question_name <> '' AND client_name = ?
+		AND request_ts BETWEEN ? AND ?
+		ORDER BY request_ts ASC`,
+		seed.ClientName, seed.RequestTS.Add(-cohortWindow), seed.RequestTS.Add(cohortWindow)).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	first := rows[0].RequestTS
+	out := make([]CohortMember, 0, len(rows))
+
+	for _, r := range rows {
+		out = append(out, CohortMember{
+			Domain:  r.QuestionName,
+			Qtype:   qtypeFromString(r.QuestionType),
+			DelayMs: int(r.RequestTS.Sub(first).Milliseconds()),
+			Blocked: r.ResponseType == "BLOCKED",
+		})
+	}
+
+	return out, nil
+}
+
+// NextInSession returns a plausible next primary (eTLD+1) to follow
+// primaryDomain, drawn from real same-session transitions observed on this box.
+//
+// Derivation: a Markov step over the real timeline. Per client, consecutive
+// real rows (ordered by time, within sessionGap) whose eTLD+1 changes form a
+// transition cur→next; counts over the recent window are the weights, and one
+// weighted draw picks the successor. Returns "" when primaryDomain has no known
+// successor (cold start or a leaf domain) so the engine falls back to a fresh
+// source pick.
+//
+// ponytail: one windowed full scan of log_entries per call (LEAD over the
+// timeline; effective_tld_p is unindexed). Fine at noise cadence over a 7-day
+// window; materialize a transitions table if it shows up hot.
+func (s *DecoySource) NextInSession(primaryDomain string) (string, error) {
+	if primaryDomain == "" {
+		return "", nil
+	}
+
+	since := time.Now().Add(-decoyReplayWindow)
+	gapSecs := sessionGap.Seconds()
+
+	var rows []struct {
+		Domain string `gorm:"column:d"`
+		Cnt    int64  `gorm:"column:c"`
+	}
+
+	err := s.db.Raw(`SELECT nxt AS d, COUNT(*) AS c FROM (
+		SELECT effective_tld_p AS cur,
+		       LEAD(effective_tld_p) OVER w AS nxt,
+		       (julianday(LEAD(request_ts) OVER w) - julianday(request_ts))*86400 AS gap
+		FROM log_entries
+		WHERE decoy = 0 AND effective_tld_p <> '' AND request_ts >= ?
+		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+	)
+	WHERE cur = ? AND nxt IS NOT NULL AND nxt <> cur AND gap >= 0 AND gap <= ?
+	GROUP BY nxt`, since, primaryDomain, gapSecs).Scan(&rows).Error
+	if err != nil {
+		return "", err
+	}
+
+	var total int64
+	for _, r := range rows {
+		total += r.Cnt
+	}
+
+	if total == 0 {
+		return "", nil
+	}
+
+	s.mu.Lock()
+	pick := s.rnd.Int63n(total)
+	s.mu.Unlock()
+
+	for _, r := range rows {
+		pick -= r.Cnt
+		if pick < 0 {
+			return r.Domain, nil
+		}
+	}
+
+	return rows[len(rows)-1].Domain, nil
+}
+
+// SessionSeed returns a plausible session-STARTING primary (eTLD+1): a domain
+// that historically begins sessions (its client's first real query, or the
+// first after a > sessionGap idle), weighted by how often it does so. "" at
+// cold start. Same windowed-scan cost profile as NextInSession.
+func (s *DecoySource) SessionSeed() (string, error) {
+	since := time.Now().Add(-decoyReplayWindow)
+	gapSecs := sessionGap.Seconds()
+
+	var rows []struct {
+		Domain string `gorm:"column:d"`
+		Cnt    int64  `gorm:"column:c"`
+	}
+
+	err := s.db.Raw(`SELECT cur AS d, COUNT(*) AS c FROM (
+		SELECT effective_tld_p AS cur,
+		       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
+		FROM log_entries
+		WHERE decoy = 0 AND effective_tld_p <> '' AND request_ts >= ?
+		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+	)
+	WHERE gap IS NULL OR gap > ?
+	GROUP BY cur`, since, gapSecs).Scan(&rows).Error
+	if err != nil {
+		return "", err
+	}
+
+	var total int64
+	for _, r := range rows {
+		total += r.Cnt
+	}
+
+	if total == 0 {
+		return "", nil
+	}
+
+	s.mu.Lock()
+	pick := s.rnd.Int63n(total)
+	s.mu.Unlock()
+
+	for _, r := range rows {
+		pick -= r.Cnt
+		if pick < 0 {
+			return r.Domain, nil
+		}
+	}
+
+	return rows[len(rows)-1].Domain, nil
+}
+
+// RevisitInterval returns the typical gap between real visits to domain's
+// eTLD+1 (the median of consecutive-visit deltas) and ok=true, or ok=false when
+// there are fewer than two distinct visits to derive an interval from. The
+// engine uses it to re-emit a corpus domain on a human-plausible cadence
+// instead of flat Poisson.
+//
+// A "visit" collapses queries closer than revisitMinGap (one page load fires
+// many queries at the same eTLD+1 within milliseconds; those are not revisits).
+// Scans the recent window only, so a daily domain yields several samples while
+// the scan stays bounded.
+//
+// ponytail: median over an unindexed effective_tld_p scan; bounded by the
+// window and one specific domain, so cheap in practice.
+func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
+	etldp := effectiveTLDP(domain)
+	if etldp == "" {
+		return 0, false
+	}
+
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var ts []time.Time
+
+	err := s.db.Raw(`SELECT request_ts FROM log_entries
+		WHERE decoy = 0 AND effective_tld_p = ? AND request_ts >= ?
+		ORDER BY request_ts ASC`, etldp, since).Scan(&ts).Error
+	if err != nil || len(ts) < 2 {
+		return 0, false
+	}
+
+	// Collapse intra-page-load bursts into single visits, then delta them.
+	deltas := make([]time.Duration, 0, len(ts))
+	last := ts[0]
+
+	for _, t := range ts[1:] {
+		d := t.Sub(last)
+		if d < revisitMinGap {
+			continue // same visit
+		}
+
+		deltas = append(deltas, d)
+		last = t
+	}
+
+	if len(deltas) == 0 {
+		return 0, false // one visit after collapsing
+	}
+
+	sort.Slice(deltas, func(i, j int) bool { return deltas[i] < deltas[j] })
+
+	return deltas[len(deltas)/2], true // lower-median; noise cadence, not statistics
+}
+
+// qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)
+// to its DNS type code, defaulting to A on an unknown/empty token. (querylog
+// can't import decoy's identical helper — that would be an import cycle.)
+func qtypeFromString(s string) uint16 {
+	if t, ok := dns.StringToType[s]; ok {
+		return t
+	}
+
+	return dns.TypeA
 }

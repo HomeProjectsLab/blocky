@@ -100,7 +100,17 @@ type BlockingResolver struct {
 	status              *status
 	clientGroups        clientGroupsIndex
 	fqdnIPCache         cache.ExpiringCache[[]net.IP]
+
+	// shadowSeen suppresses shadowing the same blocked name more than once per
+	// shadowSuppressWindow (a page fires A+AAAA and repeats for one tracker).
+	shadowSeen map[string]time.Time
+	shadowMu   sync.Mutex
 }
+
+const (
+	shadowSuppressWindow = 60 * time.Second
+	shadowTimeout        = 5 * time.Second
+)
 
 // scheduledGroup pairs a list group name with optional schedules.
 // If schedules has entries, at least one must be active (OR logic).
@@ -466,6 +476,86 @@ func (r *BlockingResolver) handleBlocked(logger *logrus.Entry,
 	return modelResp, nil
 }
 
+// shadowBlockedQuery asynchronously egresses the real upstream query for a
+// domain the client is being blocked from, discarding the answer. This keeps
+// real page-load cohorts complete on the wire (trackers present as shadow
+// queries) so the box doesn't advertise itself as a blocking resolver. The
+// client already has its block response — the shadow must never delay or alter
+// it. Never shadows a decoy (decoys already egress) and de-dups a name within
+// shadowSuppressWindow to avoid hammering upstream on repeated blocks.
+func (r *BlockingResolver) shadowBlockedQuery(ctx context.Context,
+	request *model.Request, question dns.Question, logger *logrus.Entry,
+) {
+	if !r.cfg.ShadowBlockedQueries || request.Decoy {
+		return
+	}
+
+	name := strings.ToLower(util.ExtractDomain(question))
+	if !r.claimShadow(name) {
+		return
+	}
+
+	// Copy the request so the goroutine never races the client-facing request the
+	// caller keeps using. Marked Decoy so the query log/aggregates treat it as the
+	// synthetic cover it is; left non-Bypass so a later real (still-blocked) client
+	// query benefits from the warmed cache.
+	shadow := &model.Request{
+		ClientIP:        request.ClientIP,
+		RequestClientID: request.RequestClientID,
+		Protocol:        request.Protocol,
+		ClientNames:     request.ClientNames,
+		Req:             request.Req.Copy(),
+		RequestTS:       time.Now(),
+		Fingerprint:     request.Fingerprint,
+		Decoy:           true,
+	}
+
+	go func() {
+		// Detach from the per-request ctx (cancelled once the block response is
+		// written to the client) but keep a bounded timeout so the shadow still
+		// egresses and never leaks. r.next is below blocking, so it won't re-block.
+		// ponytail: WithoutCancel drops the deadline+cancel, shadowTimeout re-bounds.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shadowTimeout)
+		defer cancel()
+
+		if _, err := r.next.Resolve(sctx, shadow); err != nil {
+			logger.WithError(err).Debug("shadow query failed")
+		}
+	}()
+}
+
+// claimShadow reports whether name may be shadowed now, recording the attempt.
+// Returns false if name was shadowed within shadowSuppressWindow.
+func (r *BlockingResolver) claimShadow(name string) bool {
+	now := time.Now()
+
+	r.shadowMu.Lock()
+	defer r.shadowMu.Unlock()
+
+	if r.shadowSeen == nil {
+		r.shadowSeen = make(map[string]time.Time)
+	}
+
+	if last, ok := r.shadowSeen[name]; ok && now.Sub(last) < shadowSuppressWindow {
+		return false
+	}
+
+	// Opportunistic prune so the map stays bounded by the live blocked-name set.
+	// ponytail: full sweep past a threshold; fine at block cadence, swap for a
+	// TTL cache only if this ever shows up hot.
+	if len(r.shadowSeen) > 1024 {
+		for k, t := range r.shadowSeen {
+			if now.Sub(t) >= shadowSuppressWindow {
+				delete(r.shadowSeen, k)
+			}
+		}
+	}
+
+	r.shadowSeen[name] = now
+
+	return true
+}
+
 // LogConfig implements `config.Configurable`.
 func (r *BlockingResolver) LogConfig(logger *logrus.Entry) {
 	r.cfg.LogConfig(logger)
@@ -523,6 +613,12 @@ func (r *BlockingResolver) handleDenylist(ctx context.Context, groupsToCheck []s
 		if matches := r.matches(groupsToCheck, r.denylistMatcher, domain); len(matches) > 0 {
 			resp, err := r.handleBlocked(logger, request, question,
 				formatBlockReason(matches, ""), formatBlockReasonLabel(matches, ""))
+
+			// Egress the real query on the wire (answer discarded) so the blocked
+			// tracker still appears in the client's page-load cohort. Never delays or
+			// affects the client block response above. The response-based block below
+			// (line ~570) already forwarded upstream, so it needs no shadow.
+			r.shadowBlockedQuery(ctx, request, question, logger)
 
 			return true, resp, err
 		}

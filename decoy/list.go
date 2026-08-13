@@ -16,6 +16,11 @@ import (
 //go:embed tranco-1m.txt.gz
 var trancoGz []byte
 
+// OpenList returns a reader over the decompressed embedded Tranco list (one
+// domain per line, rank order), for callers outside this package (the prewarm
+// worker mines its mid-popularity band). Caller must Close it.
+func OpenList() (io.ReadCloser, error) { return openList() }
+
 // openList returns a reader over the decompressed embedded list (one domain per
 // line). Caller must Close it.
 func openList() (io.ReadCloser, error) {

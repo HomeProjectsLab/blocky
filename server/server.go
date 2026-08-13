@@ -22,6 +22,7 @@ import (
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/model"
+	"github.com/0xERR0R/blocky/prewarm"
 	"github.com/0xERR0R/blocky/querylog"
 	"github.com/0xERR0R/blocky/redis"
 	"github.com/0xERR0R/blocky/resolver"
@@ -66,6 +67,7 @@ type Server struct {
 	decoyEngine      *decoy.Engine                  // background noise generator; nil unless privacy.decoy.enable
 	decoySource      *querylog.DecoySource          // closed in Stop; shared by decoy engine + list updater
 	listUpdater      *lists.Updater                 // background list refresher; nil unless lists.updater.enable
+	prewarm          *prewarm.Worker                // corpus pre-warmer; nil unless privacy.decoy.enable + prewarmEnable
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
@@ -573,6 +575,7 @@ func createQueryResolver(
 	// the Upstreams config already threaded to every upstream client (RFC 7830).
 	cfg.Upstreams.EDNSPadding = cfg.Privacy.EDNSPadding.Enable
 	cfg.Upstreams.QueryCaseRandomization = cfg.Privacy.QueryCaseRandomization
+	cfg.Blocking.ShadowBlockedQueries = cfg.Privacy.ShadowBlockedQueries
 
 	upstreamTree, utErr := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
 	blocking, blErr := resolver.NewBlockingResolver(ctx, cfg.Blocking, bootstrap)
@@ -737,6 +740,8 @@ func (s *Server) setupDecoyEngine(cfg *config.Config) error {
 		// Live real-query tap (reactive volume + browse-triggered companions).
 		// Nil in non-sqlite mode, but the decoy engine only runs in sqlite mode.
 		s.decoyEngine.SetHub(s.qlHub)
+		// Corpus pre-warmer: pull trending/mid-band domains in before first visit.
+		s.prewarm = prewarm.New(cfg.Privacy.Decoy, s.decoySource)
 	}
 
 	if needUpdater {
@@ -821,6 +826,10 @@ func (s *Server) Start(ctx context.Context, errCh chan<- error) {
 
 	if s.listUpdater != nil {
 		go s.listUpdater.Run(ctx)
+	}
+
+	if s.prewarm != nil {
+		go s.prewarm.Run(ctx)
 	}
 
 	for _, srv := range s.dnsServers {

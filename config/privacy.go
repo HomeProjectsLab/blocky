@@ -19,6 +19,12 @@ type PrivacyConfig struct {
 	// and the answer is normalized back to the client's case. Forwarding path only; the
 	// recursive (zdns) path ignores it until the documented zdns fork lands.
 	QueryCaseRandomization bool `yaml:"queryCaseRandomization" default:"false"`
+	// ShadowBlockedQueries decouples the client answer from the wire query for blocked
+	// domains: the client still gets the block response (ad-blocking intact), but the
+	// real upstream query is also egressed asynchronously and its answer discarded, so
+	// real page-load cohorts stay complete on the wire and dissolve the "blocking
+	// resolver" signature. Opt-in: it doubles upstream volume for blocked domains.
+	ShadowBlockedQueries bool `yaml:"shadowBlockedQueries" default:"false"`
 }
 
 // DecoyConfig configures the background noise/decoy query engine. Decoy
@@ -32,12 +38,12 @@ type DecoyConfig struct {
 	// so the user's own domains dominate: replay+corpus (visited) : list ≈ 20:1.
 	// Companions are a separate, higher tier — triggered per real query
 	// (companionPct), so realistic page-load bursts dominate the noise overall.
-	ReplayWeight uint `yaml:"replayWeight" default:"15"` // recent-real replay pool (7-day window)
-	CorpusWeight uint `yaml:"corpusWeight" default:"5"`  // persistent all-time visited-domains corpus
-	ListWeight   uint `yaml:"listWeight" default:"1"`    // Tranco 1M public static list (thin breadth layer)
-	ActiveHoursStart int     `yaml:"activeHoursStart" default:"0"` // 0-23; full rate within [start,end), floor rate outside
-	ActiveHoursEnd   int     `yaml:"activeHoursEnd" default:"24"`  // 1-24
-	RefreshURL       string  `yaml:"refreshURL"`                   // optional live list source; empty = embedded
+	ReplayWeight     uint   `yaml:"replayWeight" default:"15"`    // recent-real replay pool (7-day window)
+	CorpusWeight     uint   `yaml:"corpusWeight" default:"5"`     // persistent all-time visited-domains corpus
+	ListWeight       uint   `yaml:"listWeight" default:"1"`       // Tranco 1M public static list (thin breadth layer)
+	ActiveHoursStart int    `yaml:"activeHoursStart" default:"0"` // 0-23; full rate within [start,end), floor rate outside
+	ActiveHoursEnd   int    `yaml:"activeHoursEnd" default:"24"`  // 1-24
+	RefreshURL       string `yaml:"refreshURL"`                   // optional live list source; empty = embedded
 
 	// Obfuscation techniques (all default-on; each independently toggleable).
 	DiurnalShaping   bool `yaml:"diurnalShaping" default:"true"`   // scale rate by real per-hour volume
@@ -56,6 +62,15 @@ type DecoyConfig struct {
 	DualStackPct             uint    `yaml:"dualStackPct" default:"55"`             // % of A/AAAA decoys that also emit the sibling record (browser dual-stack)
 	OffHoursFloorQPM         float64 `yaml:"offHoursFloorQPM" default:"0.5"`        // always-on Poisson floor rate outside active hours (never gate fully to zero)
 	ActiveHoursEdgeJitterMin int     `yaml:"activeHoursEdgeJitterMin" default:"30"` // ± minutes of per-day jitter on the active-hours window edges
+
+	// Corpus pre-warming: proactively pull TRENDING/RISING domains into the noise
+	// corpus before the user first visits them, so a genuinely new domain is
+	// already covered by chaff. Offline-first: with no PrewarmURL it mines the
+	// embedded Tranco list's mid-popularity band (ranks ~1k-50k, the domains a
+	// normal person is likely to newly encounter), rotating the slab each run.
+	PrewarmEnable        bool   `yaml:"prewarmEnable" default:"true"`
+	PrewarmURL           string `yaml:"prewarmURL"` // optional trending source (Tranco rising / CF Radar CSV/txt); empty = embedded band
+	PrewarmIntervalHours uint   `yaml:"prewarmIntervalHours" default:"12"`
 }
 
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.

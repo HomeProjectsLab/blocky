@@ -1831,6 +1831,19 @@
               "type": "integer",
               "description": "± minutes of per-day jitter on the active-hours window edges",
               "default": 30
+            },
+            "prewarmEnable": {
+              "type": "boolean",
+              "description": "Corpus pre-warming: proactively pull TRENDING/RISING domains into the noise\ncorpus before the user first visits them, so a genuinely new domain is\nalready covered by chaff. Offline-first: with no PrewarmURL it mines the\nembedded Tranco list's mid-popularity band (ranks ~1k-50k, the domains a\nnormal person is likely to newly encounter), rotating the slab each run.",
+              "default": true
+            },
+            "prewarmURL": {
+              "type": "string",
+              "description": "optional trending source (Tranco rising / CF Radar CSV/txt); empty = embedded band"
+            },
+            "prewarmIntervalHours": {
+              "type": "integer",
+              "default": 12
             }
           },
           "additionalProperties": false,
@@ -1864,6 +1877,11 @@
         "queryCaseRandomization": {
           "type": "boolean",
           "description": "QueryCaseRandomization applies DNS 0x20 case randomization (draft-vixie-dnsext-dns0x20)\nto outgoing forwarded queries: each ASCII letter of the question name is independently\nupper/lower-cased on the wire, the upstream must echo the exact case (spoofing defense),\nand the answer is normalized back to the client's case. Forwarding path only; the\nrecursive (zdns) path ignores it until the documented zdns fork lands.",
+          "default": false
+        },
+        "shadowBlockedQueries": {
+          "type": "boolean",
+          "description": "ShadowBlockedQueries decouples the client answer from the wire query for blocked\ndomains: the client still gets the block response (ad-blocking intact), but the\nreal upstream query is also egressed asynchronously and its answer discarded, so\nreal page-load cohorts stay complete on the wire and dissolve the \"blocking\nresolver\" signature. Opt-in: it doubles upstream volume for blocked domains.",
           "default": false
         }
       },
