@@ -26,6 +26,13 @@ func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog
 		r.Get("/latency", s.latency)
 	})
 
+	router.Route("/api/ui/noise", func(r chi.Router) {
+		r.Get("/overview", s.noiseOverview)
+		r.Get("/buckets", s.noiseBuckets)
+		r.Get("/top", s.noiseTop)
+		r.Get("/sourcemix", s.noiseSourceMix)
+	})
+
 	router.Get("/api/ui/queries", s.queries)
 	router.Get("/api/ui/stream", s.stream)
 	router.Get("/api/ui/system", s.system)

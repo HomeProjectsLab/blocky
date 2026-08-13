@@ -187,6 +187,41 @@ var _ = Describe("Engine", func() {
 		})
 	})
 
+	Describe("provenance stamping", func() {
+		// Each single-branch emission stamps request.DecoySource with the label the
+		// query-log writer persists into log_entries.decoy_source.
+		sourceOfOneEmit := func(tune func(*config.DecoyConfig)) string {
+			src := newSourceDB(nil)
+			_, e := src.SeedIfEmpty(strings.NewReader("liststatic.example\n")) // miss-chaff parent
+			Expect(e).Should(Succeed())
+
+			cfg.MissChaffPct, cfg.ChatterPct, cfg.FailChaffPct = 0, 0, 0
+			cfg.CohortPct, cfg.ClusterPct, cfg.DualStackPct = 0, 0, 0
+			cfg.ShadowTTL = false
+			tune(&cfg)
+
+			var got string
+			eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {
+				got = req.DecoySource
+
+				return &model.Response{Res: new(dns.Msg)}, nil
+			})
+			eng.emit(context.Background())
+
+			return got
+		}
+
+		It("stamps miss chaff", func() {
+			Expect(sourceOfOneEmit(func(c *config.DecoyConfig) { c.MissChaffPct = 100 })).Should(Equal("miss"))
+		})
+		It("stamps device chatter", func() {
+			Expect(sourceOfOneEmit(func(c *config.DecoyConfig) { c.ChatterPct = 100 })).Should(Equal("chatter"))
+		})
+		It("stamps fail chaff", func() {
+			Expect(sourceOfOneEmit(func(c *config.DecoyConfig) { c.FailChaffPct = 100 })).Should(Equal("fail"))
+		})
+	})
+
 	Describe("active hours gate", func() {
 		It("is within the window for a full-day config", func() {
 			cfg.ActiveHoursStart = 0

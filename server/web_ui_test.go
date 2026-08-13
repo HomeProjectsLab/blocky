@@ -61,11 +61,25 @@ var _ = Describe("Web UI shell", func() {
 		})
 	})
 
+	Describe("noise page", func() {
+		It("renders the decoy dashboard container + noise wire", func() {
+			_, body := get("/noise")
+
+			Expect(body).Should(ContainSubstring(`data-page="noise"`))
+			for _, id := range []string{
+				"noise-tiles", "n-decoys", "n-distinct", "noise-chart",
+				"n-sourcemix", "n-topdomains", "noise-wire", "noise-wire-body",
+			} {
+				Expect(body).Should(ContainSubstring(`id="` + id + `"`))
+			}
+		})
+	})
+
 	Describe("navigation", func() {
 		It("lists every management page in the nav", func() {
 			_, body := get("/")
 
-			for _, label := range []string{"Clients", "Upstreams", "Blocking", "Privacy", "Settings", "System"} {
+			for _, label := range []string{"Noise", "Clients", "Upstreams", "Blocking", "Privacy", "Settings", "System"} {
 				Expect(body).Should(ContainSubstring(">" + label + "<"))
 			}
 		})
@@ -77,6 +91,7 @@ var _ = Describe("Web UI shell", func() {
 			"/static/vendor/uplot.iife.min.js",
 			"/static/app/app.css",
 			"/static/app/app.js",
+			"/static/app/noise.js",
 			"/static/app/upstreams.js",
 			"/static/app/blocking.js",
 			"/static/app/clients.js",

@@ -203,6 +203,22 @@ tr[data-band="error"] .rt { color: var(--c-error); }
 
 .live-controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 
+/* ---------- decoy / chaff rows ---------- */
+/* masked look: dimmed, dashed hairlines, hatched rail so fake queries read as
+   fake at a glance while keeping every real column at full precision. */
+tr[data-decoy="1"] td { opacity: 0.7; border-bottom-style: dashed; }
+tr[data-decoy="1"] td.rail {
+    opacity: 1;
+    background: repeating-linear-gradient(45deg, var(--c-other) 0 2px, transparent 2px 4px);
+}
+.src-tag {
+    display: inline-block; padding: 0 0.35rem;
+    font: 10px var(--font-mono); line-height: 1.5; color: var(--ink2);
+    background: var(--bg2); border: 1px solid var(--grid); border-radius: 3px;
+    text-transform: uppercase; letter-spacing: 0.05em; vertical-align: middle;
+}
+.wire td.src { color: var(--ink2); }
+
 /* ---------- detail drawer ---------- */
 .drawer {
     position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 100%);

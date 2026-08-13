@@ -9,6 +9,7 @@ const emptyMsg = document.getElementById("wire-empty");
 const pauseBtn = document.getElementById("pause-btn");
 const fClient = document.getElementById("f-client");
 const fDomain = document.getElementById("f-domain");
+const fMode = document.getElementById("f-mode");
 const drawer = document.getElementById("drawer");
 const drawerBody = document.getElementById("drawer-body");
 
@@ -26,6 +27,9 @@ function setPaused(p) {
 }
 
 function matchesFilter(item) {
+    const mode = fMode.value;
+    if (mode === "real" && item.decoy) return false;
+    if (mode === "decoy" && !item.decoy) return false;
     const c = fClient.value.trim().toLowerCase();
     const d = fDomain.value.trim().toLowerCase();
     if (c && !(item.client || "").toLowerCase().includes(c) &&
@@ -47,6 +51,13 @@ function addRow(item) {
         `<td class="${i === 2 ? "q" : i === 4 ? "rt" : i === 5 ? "num" : ""}"></td>`).join("");
     const tds = tr.querySelectorAll("td");
     cells.forEach((c, i) => { tds[i + 1].textContent = c; });
+    if (item.decoy) {
+        tr.dataset.decoy = "1";
+        const tag = document.createElement("span");
+        tag.className = "src-tag";
+        tag.textContent = item.decoySource || "decoy";
+        tds[5].append(" ", tag); // outcome cell
+    }
     if (!matchesFilter(item)) tr.hidden = true;
     body.prepend(tr);
     while (body.children.length > MAX_ROWS) body.lastElementChild.remove();
@@ -84,6 +95,7 @@ function refilter() {
 }
 fClient.addEventListener("input", refilter);
 fDomain.addEventListener("input", refilter);
+fMode.addEventListener("change", refilter);
 
 // Row click → detail drawer with all contract fields.
 const FIELDS = [
@@ -91,7 +103,7 @@ const FIELDS = [
     ["question", "question"], ["qtype", "qtype"], ["rtype", "outcome"],
     ["rcode", "rcode"], ["answer", "answer"], ["durationMs", "duration ms"],
     ["transport", "transport"], ["fpHash", "fingerprint hash"],
-    ["reason", "reason"], ["decoy", "decoy"],
+    ["reason", "reason"], ["decoy", "decoy"], ["decoySource", "decoy source"],
 ];
 
 body.addEventListener("click", (ev) => {

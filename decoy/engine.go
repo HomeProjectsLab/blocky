@@ -78,6 +78,21 @@ const (
 	srcList          // public Tranco static list
 )
 
+// Provenance labels stamped on decoyQuery.source and persisted to
+// log_entries.decoy_source so the Noise dashboard can break decoys down by what
+// produced them. Session-walk and revisit picks are the household's own corpus
+// domains, so they carry provReplay/provCorpus/provList from their draw.
+const (
+	provReplay    = "replay"
+	provCorpus    = "corpus"
+	provList      = "list"
+	provCohort    = "cohort"
+	provCompanion = "companion"
+	provChatter   = "chatter"
+	provMiss      = "miss"
+	provFail      = "fail"
+)
+
 //nolint:gochecknoglobals
 var decoyQueriesTotal = promauto.With(metrics.Reg).NewCounter(prometheus.CounterOpts{
 	Name: "blocky_decoy_queries_total",
@@ -563,9 +578,10 @@ type decoyQuery struct {
 	name         string
 	qtype        uint16
 	qclass       uint16
-	replay       bool // sourced from the real-query replay pool
-	allowBlocked bool // recorded-cohort member: egress even if the box would block it (shadow-completion parity)
-	delayMs      int  // recorded page-load offset from the cohort's first member (cohort emission only)
+	source       string // provenance label (prov* consts) -> log_entries.decoy_source
+	replay       bool   // sourced from the real-query replay pool
+	allowBlocked bool   // recorded-cohort member: egress even if the box would block it (shadow-completion parity)
+	delayMs      int    // recorded page-load offset from the cohort's first member (cohort emission only)
 }
 
 // sessionCap bounds a synthetic session's length: after this many topical hops
@@ -592,7 +608,7 @@ func (e *Engine) emit(ctx context.Context) {
 			return
 		}
 
-		e.resolveOne(ctx, decoyQuery{name: e.randLabel() + "." + parent, qtype: dns.TypeA})
+		e.resolveOne(ctx, decoyQuery{name: e.randLabel() + "." + parent, qtype: dns.TypeA, source: provMiss})
 
 		return
 	}
@@ -608,7 +624,7 @@ func (e *Engine) emit(ctx context.Context) {
 	// #4 failure realism: a share deliberately queries a likely-NXDOMAIN name so
 	// decoys don't always resolve (real traffic carries a background miss rate).
 	if e.rndPct(e.cfg.FailChaffPct) {
-		e.resolveOne(ctx, decoyQuery{name: e.deadName(), qtype: dns.TypeA})
+		e.resolveOne(ctx, decoyQuery{name: e.deadName(), qtype: dns.TypeA, source: provFail})
 
 		return
 	}
@@ -670,7 +686,7 @@ func (e *Engine) emitCohort(ctx context.Context) bool {
 
 	qs := make([]decoyQuery, 0, len(cohort))
 	for _, m := range cohort {
-		qs = append(qs, decoyQuery{name: m.Domain, qtype: m.Qtype, allowBlocked: m.Blocked, delayMs: m.DelayMs})
+		qs = append(qs, decoyQuery{name: m.Domain, qtype: m.Qtype, source: provCohort, allowBlocked: m.Blocked, delayMs: m.DelayMs})
 	}
 
 	go e.emitBurstTimed(ctx, qs)
@@ -707,7 +723,7 @@ func (e *Engine) emitBurstTimed(ctx context.Context, qs []decoyQuery) {
 func (e *Engine) nextStructuralQuery() decoyQuery {
 	if e.cfg.SessionCoherence && e.source != nil {
 		if dom := e.walkSession(); dom != "" {
-			return decoyQuery{name: dom, qtype: e.realQtype()}
+			return decoyQuery{name: dom, qtype: e.realQtype(), source: provCorpus}
 		}
 	}
 
@@ -776,7 +792,7 @@ const revisitMapCap = 256
 func (e *Engine) reviseOrNext() decoyQuery {
 	if e.cfg.RevisitCadence {
 		if d := e.dueDomain(); d != "" {
-			return decoyQuery{name: d, qtype: e.realQtype()}
+			return decoyQuery{name: d, qtype: e.realQtype(), source: provCorpus}
 		}
 	}
 
@@ -936,12 +952,13 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 	}
 
 	req := &model.Request{
-		ClientIP:  ip,
-		Req:       msg,
-		Protocol:  proto,
-		RequestTS: e.now(),
-		Bypass:    true,
-		Decoy:     true,
+		ClientIP:    ip,
+		Req:         msg,
+		Protocol:    proto,
+		RequestTS:   e.now(),
+		Bypass:      true,
+		Decoy:       true,
+		DecoySource: q.source,
 	}
 
 	if attributed && e.cfg.FingerprintMatch {
@@ -1057,13 +1074,13 @@ func (e *Engine) nextQuery() decoyQuery {
 		if q, err := e.source.SampleRecentReal(1); err != nil {
 			e.logger.WithError(err).Debug("replay sample failed")
 		} else if len(q) > 0 {
-			return decoyQuery{name: q[0].Name, qtype: qtypeFromString(q[0].Qtype), replay: true}
+			return decoyQuery{name: q[0].Name, qtype: qtypeFromString(q[0].Qtype), source: provReplay, replay: true}
 		}
 	case srcCorpus:
 		if d, err := e.source.SampleCorpus(); err != nil {
 			e.logger.WithError(err).Debug("corpus sample failed")
 		} else if d != "" {
-			return decoyQuery{name: d, qtype: e.realQtype()}
+			return decoyQuery{name: d, qtype: e.realQtype(), source: provCorpus}
 		}
 	}
 
@@ -1074,7 +1091,7 @@ func (e *Engine) nextQuery() decoyQuery {
 		return decoyQuery{}
 	}
 
-	return decoyQuery{name: domain, qtype: e.realQtype()}
+	return decoyQuery{name: domain, qtype: e.realQtype(), source: provList}
 }
 
 // chooseSource picks a decoy source by weight (ReplayWeight:CorpusWeight:ListWeight).
@@ -1121,10 +1138,10 @@ func (e *Engine) clientIP() net.IP {
 // address (real hosts reverse-resolve LAN peers and their own gateway).
 func (e *Engine) chatterQuery() decoyQuery {
 	if e.rnd.Intn(5) == 0 { //nolint:mnd // ~20% PTR reverse lookup
-		return decoyQuery{name: e.randPTRName(), qtype: dns.TypePTR}
+		return decoyQuery{name: e.randPTRName(), qtype: dns.TypePTR, source: provChatter}
 	}
 
-	return decoyQuery{name: deviceChatter[e.rnd.Intn(len(deviceChatter))], qtype: e.realQtype()}
+	return decoyQuery{name: deviceChatter[e.rnd.Intn(len(deviceChatter))], qtype: e.realQtype(), source: provChatter}
 }
 
 // randPTRName builds an in-addr.arpa PTR name for a random 192.168.x.y host (the
@@ -1152,7 +1169,7 @@ func (e *Engine) heartbeatLoop(ctx context.Context) {
 		case <-time.After(d):
 		}
 
-		e.resolveOne(ctx, decoyQuery{name: heartbeatHosts[e.rnd.Intn(len(heartbeatHosts))], qtype: dns.TypeA})
+		e.resolveOne(ctx, decoyQuery{name: heartbeatHosts[e.rnd.Intn(len(heartbeatHosts))], qtype: dns.TypeA, source: provChatter})
 	}
 }
 
@@ -1448,13 +1465,13 @@ func (e *Engine) companionsFor(domain string) []decoyQuery {
 	// AAAA), so companions are ONLY sub-resource domains — never the main again.
 	// www.<reg> + one guaranteed third-party sibling are always present (>=2 burst).
 	keep := []decoyQuery{
-		{name: "www." + reg, qtype: dns.TypeA},
-		{name: clusterCompanions[e.rnd.Intn(len(clusterCompanions))], qtype: e.realQtype()},
+		{name: "www." + reg, qtype: dns.TypeA, source: provCompanion},
+		{name: clusterCompanions[e.rnd.Intn(len(clusterCompanions))], qtype: e.realQtype(), source: provCompanion},
 	}
 
 	fill := e.pickCompanions(2) //nolint:mnd // 0..2 more third-party siblings
 	if d, err := e.source.SampleList(); err == nil && d != "" {
-		fill = append(fill, decoyQuery{name: d, qtype: e.realQtype()})
+		fill = append(fill, decoyQuery{name: d, qtype: e.realQtype(), source: provCompanion})
 	}
 
 	return e.assembleBurst(nil, keep, fill) // no lead: the real query was the main
@@ -1468,8 +1485,8 @@ func (e *Engine) clusterOf(q decoyQuery) []decoyQuery {
 	// Pure noise: this invents a page load, so the MAIN domain (q) leads and its
 	// sub-resources follow (www.<main>, the main's AAAA, third-party companions).
 	fill := append([]decoyQuery{
-		{name: "www." + q.name, qtype: dns.TypeA},
-		{name: q.name, qtype: dns.TypeAAAA},
+		{name: "www." + q.name, qtype: dns.TypeA, source: q.source}, // same site as the anchor
+		{name: q.name, qtype: dns.TypeAAAA, source: q.source},
 	}, e.pickCompanions(2)...) //nolint:mnd // up to 2 pool companions
 
 	return e.assembleBurst(&q, nil, fill)
@@ -1538,7 +1555,7 @@ func (e *Engine) pickCompanions(max int) []decoyQuery {
 
 	out := make([]decoyQuery, 0, k)
 	for _, i := range idx[:k] {
-		out = append(out, decoyQuery{name: clusterCompanions[i], qtype: e.realQtype()})
+		out = append(out, decoyQuery{name: clusterCompanions[i], qtype: e.realQtype(), source: provCompanion})
 	}
 
 	return out

@@ -24,6 +24,7 @@ type QueryItem struct {
 	FpHash      string   `json:"fpHash"`
 	Reason      string   `json:"reason"`
 	Decoy       bool     `json:"decoy"`
+	DecoySource string   `json:"decoySource"`
 }
 
 // ItemFromLogEntry maps a live entry to the contract shape (stream path).
@@ -42,6 +43,7 @@ func ItemFromLogEntry(e *LogEntry) QueryItem {
 		FpHash:      e.Fingerprint.Hash(),
 		Reason:      e.ResponseReason,
 		Decoy:       e.Decoy,
+		DecoySource: e.DecoySource,
 	}
 }
 

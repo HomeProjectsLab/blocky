@@ -25,6 +25,7 @@ type LogEntry struct {
 	SocketProtocol model.RequestProtocol
 	Fingerprint    model.Fingerprint
 	Decoy          bool
+	DecoySource    string
 }
 
 type Writer interface {

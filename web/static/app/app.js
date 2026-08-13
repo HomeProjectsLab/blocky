@@ -8,6 +8,7 @@ const pageModules = {
     dashboard: "./dashboard.js",
     live: "./live.js",
     queries: "./queries.js",
+    noise: "./noise.js",
     upstreams: "./upstreams.js",
     blocking: "./blocking.js",
     clients: "./clients.js",

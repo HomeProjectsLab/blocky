@@ -282,7 +282,8 @@ func (r *QueryLoggingResolver) createLogEntry(request *model.Request, response *
 		ClientNames:    []string{"none"},
 		BlockyInstance: r.instanceID,
 		Fingerprint:    request.Fingerprint,
-		Decoy:          request.Decoy, // synthetic noise queries from the decoy engine
+		Decoy:          request.Decoy,       // synthetic noise queries from the decoy engine
+		DecoySource:    request.DecoySource, // provenance of the decoy (empty for real queries)
 	}
 
 	for _, f := range r.cfg.Fields {

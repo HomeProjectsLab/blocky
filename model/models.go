@@ -96,4 +96,9 @@ type Request struct {
 	// The query-log writer copies it into LogEntry.Decoy so dashboards and
 	// aggregates can exclude background noise from real client traffic.
 	Decoy bool
+	// DecoySource classifies what produced a decoy query (replay/corpus/list/
+	// cohort/companion/chatter/miss/fail); empty for real queries. The decoy
+	// engine stamps it; the query-log writer persists it into log_entries so the
+	// Noise dashboard can break decoys down by provenance.
+	DecoySource string
 }

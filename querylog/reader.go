@@ -388,6 +388,7 @@ func itemFromRow(e *logEntry) QueryItem {
 		FpHash:      e.FpHash,
 		Reason:      e.Reason,
 		Decoy:       e.Decoy,
+		DecoySource: e.DecoySource,
 	}
 }
 
@@ -540,6 +541,109 @@ func (r *Reader) ClientDetail(name string, from, to time.Time) (*ClientDetail, e
 	}
 
 	return d, nil
+}
+
+// Decoy stats read the raw log_entries table scoped to decoy = 1 (decoys are
+// deliberately kept out of the hourly aggregates that back the real-traffic
+// dashboards, so there's no aggregate table to read). They feed the Noise
+// dashboard and mirror the real-traffic readers above, filtered to decoys.
+
+// DecoyOverview is the /api/ui/stats/decoy/overview response.
+type DecoyOverview struct {
+	Decoys          int64            `json:"decoys"`          // total decoy queries in range
+	DistinctDomains int64            `json:"distinctDomains"` // distinct fake domains (eTLD+1)
+	BySource        map[string]int64 `json:"bySource"`        // provenance -> count
+}
+
+func (r *Reader) DecoyOverview(from, to time.Time) (*DecoyOverview, error) {
+	var totals struct {
+		Decoys          int64 `gorm:"column:decoys"`
+		DistinctDomains int64 `gorm:"column:distinct_domains"`
+	}
+
+	err := r.db.Raw(`SELECT COUNT(*) AS decoys,
+		COUNT(DISTINCT COALESCE(NULLIF(effective_tldp,''), question_name)) AS distinct_domains
+		FROM log_entries WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?`,
+		from, to).Scan(&totals).Error
+	if err != nil {
+		return nil, err
+	}
+
+	mix, err := r.DecoySourceMix(from, to)
+	if err != nil {
+		return nil, err
+	}
+
+	bySource := make(map[string]int64, len(mix))
+	for _, m := range mix {
+		bySource[m.Name] = m.Count
+	}
+
+	return &DecoyOverview{Decoys: totals.Decoys, DistinctDomains: totals.DistinctDomains, BySource: bySource}, nil
+}
+
+// DecoySourceMix returns the count per decoy_source (the replay:corpus:list:
+// companion:cohort:chatter:miss:fail ratio) in the range, most frequent first.
+// TopItem.Name is the provenance label.
+func (r *Reader) DecoySourceMix(from, to time.Time) ([]TopItem, error) {
+	items := []TopItem{}
+	err := r.db.Raw(`SELECT decoy_source AS name, COUNT(*) AS c FROM log_entries
+		WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?
+		GROUP BY decoy_source ORDER BY c DESC`, from, to).Scan(&items).Error
+
+	return items, err
+}
+
+// DecoyTopDomains returns the n most frequent fake domains (eTLD+1, falling back
+// to the question name) emitted as decoys in the range.
+func (r *Reader) DecoyTopDomains(from, to time.Time, n int) ([]TopItem, error) {
+	items := []TopItem{}
+	err := r.db.Raw(`SELECT COALESCE(NULLIF(effective_tldp,''), question_name) AS name, COUNT(*) AS c
+		FROM log_entries WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?
+		GROUP BY name ORDER BY c DESC LIMIT ?`, from, to, n).Scan(&items).Error
+
+	return items, err
+}
+
+// DecoyBuckets returns decoy counts grouped into step-second slots, split by
+// decoy_source (Bucket.Counts is source -> count). Unlike the real-traffic
+// Buckets it reads raw rows, so any step is honoured (decoys are low-volume and
+// time-bounded); a non-positive step falls back to one hour.
+func (r *Reader) DecoyBuckets(from, to time.Time, step int64) ([]Bucket, error) {
+	if step <= 0 {
+		step = 3600 //nolint:mnd // one-hour fallback
+	}
+
+	var rows []struct {
+		TS     time.Time `gorm:"column:request_ts"`
+		Source string    `gorm:"column:decoy_source"`
+	}
+
+	err := r.db.Raw(`SELECT request_ts, decoy_source FROM log_entries
+		WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?`, from, to).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	byTS := map[int64]map[string]int64{}
+
+	for _, row := range rows {
+		ts := row.TS.Unix() / step * step
+		if byTS[ts] == nil {
+			byTS[ts] = map[string]int64{}
+		}
+
+		byTS[ts][row.Source]++
+	}
+
+	buckets := make([]Bucket, 0, len(byTS))
+	for ts, counts := range byTS {
+		buckets = append(buckets, Bucket{TS: ts, Counts: counts})
+	}
+
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].TS < buckets[j].TS })
+
+	return buckets, nil
 }
 
 func (r *Reader) fingerprintClusters(d *ClientDetail, name string, from, to time.Time) error {

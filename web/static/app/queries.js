@@ -52,14 +52,18 @@ function render() {
     for (const item of rows) {
         const tr = document.createElement("tr");
         tr.dataset.band = band(item);
+        if (item.decoy) tr.dataset.decoy = "1";
         const cells = [
             fmtDateTime(item.ts), item.client, item.question, item.qtype,
-            item.rtype, item.rcode, item.answer, String(item.durationMs),
+            item.rtype, item.decoySource || "", item.rcode, item.answer, String(item.durationMs),
         ];
         tr.innerHTML = `<td class="rail"></td>` + cells.map((c, i) =>
-            `<td class="${i === 2 || i === 6 ? "q" : i === 4 ? "rt" : i === 7 ? "num" : ""}"></td>`).join("");
+            `<td class="${i === 2 || i === 7 ? "q" : i === 4 ? "rt" : i === 5 ? "src" : i === 8 ? "num" : ""}"></td>`).join("");
         const tds = tr.querySelectorAll("td");
-        cells.forEach((c, i) => { tds[i + 1].textContent = c ?? ""; });
+        cells.forEach((c, i) => {
+            if (i === 5 && c) { tds[i + 1].innerHTML = `<span class="src-tag"></span>`; tds[i + 1].firstChild.textContent = c; }
+            else { tds[i + 1].textContent = c ?? ""; }
+        });
         body.append(tr);
     }
     const fromN = total === 0 ? 0 : offset + 1;
@@ -81,7 +85,7 @@ nextBtn.addEventListener("click", () => { offset += LIMIT; load(); });
 // CSV export of the current page's rows (client-side blob).
 document.getElementById("csv-btn").addEventListener("click", () => {
     const cols = ["ts", "client", "clientNames", "question", "qtype", "rtype",
-        "rcode", "answer", "durationMs", "transport", "fpHash", "reason", "decoy"];
+        "rcode", "answer", "durationMs", "transport", "fpHash", "reason", "decoy", "decoySource"];
     const escCSV = (v) => {
         if (Array.isArray(v)) v = v.join(";");
         const s = v == null ? "" : String(v);

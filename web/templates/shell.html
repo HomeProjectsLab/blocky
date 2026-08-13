@@ -15,6 +15,7 @@
             <a href="/" {{if eq .Page "dashboard"}}aria-current="page"{{end}}>Dashboard</a>
             <a href="/live" {{if eq .Page "live"}}aria-current="page"{{end}}>Live</a>
             <a href="/queries" {{if eq .Page "queries"}}aria-current="page"{{end}}>Queries</a>
+            <a href="/noise" {{if eq .Page "noise"}}aria-current="page"{{end}}>Noise</a>
             <a href="/clients" {{if eq .Page "clients"}}aria-current="page"{{end}}>Clients</a>
             <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
             <a href="/blocking" {{if eq .Page "blocking"}}aria-current="page"{{end}}>Blocking</a>
@@ -73,6 +74,11 @@
         <div class="live-controls">
             <input type="search" id="f-client" placeholder="filter client" autocomplete="off">
             <input type="search" id="f-domain" placeholder="filter domain" autocomplete="off">
+            <select id="f-mode" aria-label="Real / decoy filter">
+                <option value="all">All traffic</option>
+                <option value="real">Real only</option>
+                <option value="decoy">Decoy only</option>
+            </select>
             <button id="pause-btn" aria-pressed="false">Pause stream</button>
         </div>
     </div>
@@ -115,7 +121,7 @@
         </form>
         <div class="wire-scroll">
             <table class="wire" id="qtable">
-                <thead><tr><th class="rail-h"></th><th>time</th><th>client</th><th>question</th><th>type</th><th>outcome</th><th>rcode</th><th>answer</th><th class="num">ms</th></tr></thead>
+                <thead><tr><th class="rail-h"></th><th>time</th><th>client</th><th>question</th><th>type</th><th>outcome</th><th>source</th><th>rcode</th><th>answer</th><th class="num">ms</th></tr></thead>
                 <tbody id="qtable-body"></tbody>
             </table>
         </div>
@@ -125,6 +131,42 @@
             <span id="pager-info">—</span>
             <button id="next-btn" disabled>Next</button>
         </div>
+    </section>
+{{else if eq .Page "noise"}}
+    <div class="page-head">
+        <h1>Noise</h1>
+        <div class="range-row" id="range-row" role="group" aria-label="Time range">
+            <button data-range="1h">1h</button>
+            <button data-range="6h">6h</button>
+            <button data-range="24h" aria-pressed="true">24h</button>
+            <button data-range="7d">7d</button>
+        </div>
+    </div>
+    <p class="empty">Decoy queries the resolver mixes into your real traffic to mask which domains you actually visit. Everything here is fake — the machine working on your behalf.</p>
+    <section class="tiles" id="noise-tiles">
+        <div class="tile"><span class="tile-label">Decoys</span><span class="tile-value" id="n-decoys">—</span></div>
+        <div class="tile"><span class="tile-label">Fake domains</span><span class="tile-value" id="n-distinct">—</span></div>
+        <div class="tile"><span class="tile-label">Top source</span><span class="tile-value" id="n-topsrc">—</span></div>
+        <div class="tile"><span class="tile-label">Sources active</span><span class="tile-value" id="n-srccount">—</span></div>
+    </section>
+    <section class="panel">
+        <h2>Decoy queries by source</h2>
+        <div class="chart" id="noise-chart"></div>
+        <p class="empty" id="noise-empty" hidden>No decoys in this window — enable the decoy engine or widen the time range.</p>
+    </section>
+    <section class="top-grid">
+        <div class="panel"><h2>Source mix</h2><ol class="bar-list" id="n-sourcemix"></ol></div>
+        <div class="panel"><h2>Top fake domains</h2><ol class="bar-list" id="n-topdomains"></ol></div>
+    </section>
+    <section class="panel panel-flush">
+        <h2>Noise wire</h2>
+        <div class="wire-scroll">
+            <table class="wire" id="noise-wire">
+                <thead><tr><th class="rail-h"></th><th>time</th><th>source</th><th>client</th><th>question</th><th>type</th><th>outcome</th><th class="num">ms</th></tr></thead>
+                <tbody id="noise-wire-body"></tbody>
+            </table>
+        </div>
+        <p class="empty" id="noise-wire-empty">Waiting for the first decoy…</p>
     </section>
 {{else if eq .Page "upstreams"}}
     <div class="page-head">

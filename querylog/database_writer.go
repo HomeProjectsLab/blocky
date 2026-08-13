@@ -44,6 +44,7 @@ type logEntry struct {
 	EDNSUDPSize   uint16 `gorm:"column:edns_udp_size"`
 	EDNSOptCodes  string `gorm:"column:edns_opt_codes"` // wire order, e.g. "10,8,12"
 	Decoy         bool   `gorm:"index"`
+	DecoySource   string `gorm:"index"` // provenance label for decoys (empty for real rows)
 	FpDetail      string // JSON with the per-query fingerprint noise
 }
 
@@ -286,6 +287,7 @@ func (d *DatabaseWriter) Write(entry *LogEntry) {
 		EDNSUDPSize:   fp.EDNSUDPSize,
 		EDNSOptCodes:  strings.Join(optCodes, ","),
 		Decoy:         entry.Decoy,
+		DecoySource:   entry.DecoySource,
 		FpDetail:      string(detail),
 	}
 

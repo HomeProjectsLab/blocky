@@ -373,6 +373,7 @@ var _ = Describe("DatabaseWriter", func() {
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_transport"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_fp_hash"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_decoy"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_decoy_source"`).WillReturnResult(sqlmock.NewResult(0, 0))
 				})
 
 				By("create postgres specific manually defined primary key", func() {
