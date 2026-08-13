@@ -256,7 +256,12 @@ var _ = Describe("RecursiveResolver", Label("recursiveResolver"), func() {
 			resp, err := sut.Resolve(ctx, newRequest(domain, A))
 			Expect(err).Should(Succeed())
 
-			Expect(resp.Res.Rcode).Should(Equal(dns.RcodeNameError))
+			// Classic zones answer NXDOMAIN; zones using Compact Denial of
+			// Existence (RFC 9824, e.g. Cloudflare-hosted example.com) answer
+			// NOERROR with an empty answer section instead. Both mean "name
+			// does not resolve" — the invariant under test is that neither
+			// triggers the fallback tier.
+			Expect(resp.Res.Rcode).Should(BeElementOf(dns.RcodeNameError, dns.RcodeSuccess))
 			Expect(resp.Res.Answer).Should(BeEmpty())
 		})
 
