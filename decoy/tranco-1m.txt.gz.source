@@ -1,5 +1,8 @@
-source: PLACEHOLDER (hand-written popular domains, NOT a real Tranco snapshot)
-id: none
-fetched: 2026-08-13
-count: 249
-regenerate: go run ./tools/gen-decoy-list -id <TRANCO_LIST_ID> -out decoy/tranco-1m.txt.gz
+Tranco top-1M domain list (domain-per-line, gzip).
+Source:   https://tranco-list.eu/download/26J79/1000000
+List ID:  26J79
+Created:  2026-08-12
+Method:   dowdall combination of crux, farsight, majestic, radar, umbrella
+Regenerate: go run ./tools/gen-decoy-list   (fetches the current latest list)
+The running binary auto-updates this from tranco-list.eu; this embedded copy
+is the offline cold-start floor.
