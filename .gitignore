@@ -12,7 +12,9 @@ todo.txt
 !docs/config.yml
 node_modules
 package-lock.json
-vendor/
+# Go module vendoring only — NOT web/static/vendor, which holds the committed,
+# embedded frontend libs (uPlot) the binary needs to build.
+/vendor/
 coverage.html
 coverage.txt
 coverage/

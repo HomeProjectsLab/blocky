@@ -18,6 +18,7 @@ import (
 	"github.com/0xERR0R/blocky/docs"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/model"
+	"github.com/0xERR0R/blocky/querylog"
 	"github.com/0xERR0R/blocky/util"
 	"github.com/0xERR0R/blocky/web"
 
@@ -195,6 +196,7 @@ func (s *Server) Query(
 
 func createHTTPRouter(
 	cfg *config.Config, openAPIImpl api.StrictServerInterface, store *configstore.Store, swapper upstreamSwapper,
+	qlHub *querylog.Hub,
 ) *chi.Mux {
 	router := chi.NewRouter()
 
@@ -202,13 +204,15 @@ func createHTTPRouter(
 
 	registerConfigUIEndpoints(router, store, swapper)
 
+	registerStatsUIEndpoints(router, cfg, qlHub, store)
+
 	configureDebugHandler(router)
 
 	configureDocsHandler(router)
 
 	configureStaticAssetsHandler(router)
 
-	configureRootHandler(cfg, router)
+	configureRootHandler(router)
 
 	configureRobotsHandler(router)
 
@@ -243,60 +247,36 @@ func configureRobotsHandler(router *chi.Mux) {
 	router.Handle("/robots.txt", http.FileServer(http.FS(web.WebFs)))
 }
 
-func configureRootHandler(cfg *config.Config, router *chi.Mux) {
-	router.Get("/", func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set(contentTypeHeader, htmlContentType)
+// uiPages maps SPA shell routes to their page identity (data-page attr) and title.
+var uiPages = []struct {
+	Route, Page, Title string
+}{
+	{"/", "dashboard", "Dashboard"},
+	{"/live", "live", "Live"},
+	{"/queries", "queries", "Queries"},
+	{"/upstreams", "upstreams", "Upstreams"},
+	{"/settings", "settings", "Settings"},
+}
 
-		t := template.New("index")
+func configureRootHandler(router *chi.Mux) {
+	t := template.Must(template.New("shell").Parse(web.ShellTmpl))
 
-		_, _ = t.Parse(web.IndexTmpl)
+	type pageData struct {
+		Page    string
+		Title   string
+		Version string
+	}
 
-		type HandlerLink struct {
-			URL   string
-			Title string
-		}
+	for _, p := range uiPages {
+		pd := pageData{Page: p.Page, Title: p.Title, Version: util.Version}
 
-		type PageData struct {
-			Links     []HandlerLink
-			Version   string
-			BuildTime string
-		}
+		router.Get(p.Route, func(writer http.ResponseWriter, request *http.Request) {
+			writer.Header().Set(contentTypeHeader, htmlContentType)
 
-		pd := PageData{
-			Links:     nil,
-			Version:   util.Version,
-			BuildTime: util.BuildTime,
-		}
-
-		pd.Links = []HandlerLink{
-			{
-				URL:   "/docs/openapi.yaml",
-				Title: "Rest API Documentation (OpenAPI)",
-			},
-			{
-				URL:   "/static/rapidoc.html",
-				Title: "Interactive Rest API Documentation (RapiDoc)",
-			},
-			{
-				URL:   "/docs/config.schema.json",
-				Title: "Configuration JSON Schema",
-			},
-			{
-				URL:   "/debug/",
-				Title: "Go Profiler",
-			},
-		}
-
-		if cfg.Prometheus.Enable {
-			pd.Links = append(pd.Links, HandlerLink{
-				URL:   cfg.Prometheus.Path,
-				Title: "Prometheus endpoint",
-			})
-		}
-
-		err := t.Execute(writer, pd)
-		logAndResponseWithError(err, "can't write index template: ", writer)
-	})
+			err := t.Execute(writer, pd)
+			logAndResponseWithError(err, "can't write shell template: ", writer)
+		})
+	}
 }
 
 func logAndResponseWithError(err error, message string, writer http.ResponseWriter) {

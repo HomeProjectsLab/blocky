@@ -24,3 +24,9 @@ func newSQLiteDialector(_ string) (gorm.Dialector, error) {
 	return nil, fmt.Errorf("sqlite query log is not supported on this platform (%s/%s); "+
 		"use the csv, mysql, postgresql or timescale query log target instead", runtime.GOOS, runtime.GOARCH)
 }
+
+// newSQLiteReadOnlyDialector: same platform stub for the UI stats reader.
+func newSQLiteReadOnlyDialector(_ string) (gorm.Dialector, error) {
+	return nil, fmt.Errorf("sqlite query log reader is not supported on this platform (%s/%s)",
+		runtime.GOOS, runtime.GOARCH)
+}

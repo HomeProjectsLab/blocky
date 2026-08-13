@@ -6,10 +6,10 @@ import (
 	"io/fs"
 )
 
-// IndexTmpl html template for the start page
+// ShellTmpl is the html template for the web UI shell (all pages).
 //
-//go:embed index.html
-var IndexTmpl string
+//go:embed templates/shell.html
+var ShellTmpl string
 
 //go:embed all:static
 var static embed.FS

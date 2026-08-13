@@ -48,6 +48,19 @@ func newSQLiteDialector(target string) (gorm.Dialector, error) {
 	return sqlite.Open(buildSQLiteDSN(target)), nil
 }
 
+// newSQLiteReadOnlyDialector opens an existing query-log database read-only
+// (mode=ro), for the UI stats Reader. Read-only WAL readers never block the
+// writer's connection. The file must already exist (the writer creates it).
+func newSQLiteReadOnlyDialector(target string) (gorm.Dialector, error) {
+	if target == "" {
+		return nil, errors.New("sqlite query log reader requires a target file path")
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(%d)", encodeSQLitePath(target), sqliteBusyTimeoutMs)
+
+	return sqlite.Open(dsn), nil
+}
+
 // buildSQLiteDSN turns a filesystem path into a modernc/glebarez SQLite DSN with
 // WAL journaling enabled. The "file:" prefix selects SQLite's URI filename mode,
 // the canonical form for passing connection options as query parameters. Because
@@ -57,7 +70,10 @@ func newSQLiteDialector(target string) (gorm.Dialector, error) {
 // a different path. "%" is encoded first as it is the escape character itself;
 // strings.Replacer never re-scans its own output, so the inserted "%25" is safe.
 func buildSQLiteDSN(path string) string {
-	encodedPath := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
+	return fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)",
+		encodeSQLitePath(path), sqliteBusyTimeoutMs)
+}
 
-	return fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)", encodedPath, sqliteBusyTimeoutMs)
+func encodeSQLitePath(path string) string {
+	return strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
 }

@@ -112,6 +112,11 @@ func Open(dir string) (*Store, error) {
 	}, nil
 }
 
+// DBPath returns the filesystem path of the underlying config database file.
+func (s *Store) DBPath() string {
+	return filepath.Join(s.absDir, dbFileName)
+}
+
 // IsFresh reports whether the stored blob still equals the untouched starter
 // config seeded on first Open (i.e. nobody has ever changed the config).
 func (s *Store) IsFresh() (bool, error) {

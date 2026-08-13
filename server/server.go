@@ -20,6 +20,7 @@ import (
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/model"
+	"github.com/0xERR0R/blocky/querylog"
 	"github.com/0xERR0R/blocky/redis"
 	"github.com/0xERR0R/blocky/resolver"
 	"github.com/0xERR0R/blocky/server/freebind"
@@ -59,6 +60,7 @@ type Server struct {
 	store            *configstore.Store             // nil = config endpoints respond 503
 	upstreamTree     *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
 	logFlushers      []interface{ Flush() error }   // query-log resolvers flushed synchronously in Stop
+	qlHub            *querylog.Hub                  // live query stream fan-out; nil unless sqlite query log
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
@@ -193,6 +195,12 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		store:            store,
 	}
 
+	// live query stream: only the sqlite query log target feeds the UI, so the
+	// hub (and the /api/ui/stream endpoint) exists only in that mode
+	if cfg.QueryLog.Type == config.QueryLogTypeSqlite {
+		server.qlHub = querylog.NewHub()
+	}
+
 	// retain the upstream tree for live upstream swaps (it is the chain's
 	// non-chained tail, so GetFromChainWithType can't reach it)
 	resolver.ForEach(queryResolver, func(res resolver.Resolver) {
@@ -202,6 +210,10 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 
 		if fl, ok := res.(interface{ Flush() error }); ok {
 			server.logFlushers = append(server.logFlushers, fl)
+		}
+
+		if qlr, ok := res.(*resolver.QueryLoggingResolver); ok && server.qlHub != nil {
+			qlr.SetHub(server.qlHub)
 		}
 	})
 
@@ -222,7 +234,7 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		return nil, fmt.Errorf("failed to create OpenAPI interface implementation: %w", err)
 	}
 
-	httpRouter := createHTTPRouter(cfg, openAPIImpl, store, server)
+	httpRouter := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub)
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(http3PacketConns) > 0 {

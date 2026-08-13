@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{.Title}} · blocky*</title>
+    <link rel="stylesheet" href="/static/vendor/uplot.min.css">
+    <link rel="stylesheet" href="/static/app/app.css">
+</head>
+<body data-page="{{.Page}}">
+<header class="shell-header">
+    <div class="shell-bar">
+        <a class="wordmark" href="/">blocky<span class="wordmark-star">*</span></a>
+        <nav class="shell-nav" aria-label="Main">
+            <a href="/" {{if eq .Page "dashboard"}}aria-current="page"{{end}}>Dashboard</a>
+            <a href="/live" {{if eq .Page "live"}}aria-current="page"{{end}}>Live</a>
+            <a href="/queries" {{if eq .Page "queries"}}aria-current="page"{{end}}>Queries</a>
+            <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
+            <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
+        </nav>
+    </div>
+    <div class="ticker" id="ticker" aria-live="off">
+        <span class="ticker-rail" id="ticker-rail"></span>
+        <span class="ticker-text" id="ticker-text">waiting for queries…</span>
+    </div>
+</header>
+
+<main class="shell-main" id="page-{{.Page}}">
+{{if eq .Page "dashboard"}}
+    <div class="page-head">
+        <h1>Dashboard</h1>
+        <div class="range-row" id="range-row" role="group" aria-label="Time range">
+            <button data-range="1h">1h</button>
+            <button data-range="6h">6h</button>
+            <button data-range="24h" aria-pressed="true">24h</button>
+            <button data-range="7d">7d</button>
+        </div>
+    </div>
+    <section class="tiles" id="tiles">
+        <div class="tile"><span class="tile-label">Queries</span><span class="tile-value" id="t-queries">—</span></div>
+        <div class="tile"><span class="tile-label">Blocked</span><span class="tile-value" id="t-blocked">—</span></div>
+        <div class="tile"><span class="tile-label">Cached</span><span class="tile-value" id="t-cached">—</span></div>
+        <div class="tile"><span class="tile-label">Clients</span><span class="tile-value" id="t-clients">—</span></div>
+        <div class="tile"><span class="tile-label">p95 latency</span><span class="tile-value" id="t-p95">—</span></div>
+    </section>
+    <section class="panel">
+        <h2>Queries by outcome</h2>
+        <div class="chart" id="qps-chart"></div>
+        <p class="empty" id="qps-empty" hidden>No queries in this window — widen the time range.</p>
+    </section>
+    <section class="panel">
+        <h2>Latency percentiles</h2>
+        <div class="tiles tiles-small" id="lat-tiles">
+            <div class="tile"><span class="tile-label">p50</span><span class="tile-value" id="t-lp50">—</span></div>
+            <div class="tile"><span class="tile-label">p90</span><span class="tile-value" id="t-lp90">—</span></div>
+            <div class="tile"><span class="tile-label">p95</span><span class="tile-value" id="t-lp95">—</span></div>
+            <div class="tile"><span class="tile-label">p99</span><span class="tile-value" id="t-lp99">—</span></div>
+        </div>
+    </section>
+    <section class="top-grid">
+        <div class="panel"><h2>Top domains</h2><ol class="bar-list" id="top-domain"></ol></div>
+        <div class="panel"><h2>Top blocked</h2><ol class="bar-list" id="top-blocked"></ol></div>
+        <div class="panel"><h2>Top clients</h2><ol class="bar-list" id="top-client"></ol></div>
+        <div class="panel"><h2>Transports</h2><ol class="bar-list" id="top-transport"></ol></div>
+    </section>
+{{else if eq .Page "live"}}
+    <div class="page-head">
+        <h1>Live wire</h1>
+        <div class="live-controls">
+            <input type="search" id="f-client" placeholder="filter client" autocomplete="off">
+            <input type="search" id="f-domain" placeholder="filter domain" autocomplete="off">
+            <button id="pause-btn" aria-pressed="false">Pause stream</button>
+        </div>
+    </div>
+    <section class="panel panel-flush">
+        <div class="wire-scroll">
+            <table class="wire" id="wire">
+                <thead><tr><th class="rail-h"></th><th>time</th><th>client</th><th>question</th><th>type</th><th>outcome</th><th class="num">ms</th></tr></thead>
+                <tbody id="wire-body"></tbody>
+            </table>
+        </div>
+        <p class="empty" id="wire-empty">Waiting for the first query…</p>
+    </section>
+    <aside class="drawer" id="drawer" hidden>
+        <div class="drawer-head"><h2>Query detail</h2><button id="drawer-close" aria-label="Close detail">✕</button></div>
+        <dl id="drawer-body"></dl>
+    </aside>
+{{else if eq .Page "queries"}}
+    <div class="page-head"><h1>Queries</h1></div>
+    <section class="panel">
+        <form id="qform" class="qform">
+            <input type="text" name="client" placeholder="client" autocomplete="off">
+            <input type="text" name="domain" placeholder="domain" autocomplete="off">
+            <select name="qtype" aria-label="Query type">
+                <option value="">any qtype</option>
+                <option>A</option><option>AAAA</option><option>CNAME</option><option>TXT</option>
+                <option>MX</option><option>PTR</option><option>SRV</option><option>HTTPS</option>
+                <option>NS</option><option>SOA</option>
+            </select>
+            <select name="rtype" aria-label="Outcome">
+                <option value="">any outcome</option>
+                <option>RESOLVED</option><option>BLOCKED</option><option>CACHED</option>
+                <option>CONDITIONAL</option><option>CUSTOMDNS</option><option>HOSTSFILE</option>
+                <option>FILTERED</option><option>NOTFQDN</option><option>SPECIAL</option>
+            </select>
+            <label class="dt-label">from <input type="datetime-local" name="from"></label>
+            <label class="dt-label">to <input type="datetime-local" name="to"></label>
+            <label class="chk-label"><input type="checkbox" name="decoys"> decoys</label>
+            <button type="submit">Search</button>
+            <button type="button" id="csv-btn">Export CSV</button>
+        </form>
+        <div class="wire-scroll">
+            <table class="wire" id="qtable">
+                <thead><tr><th class="rail-h"></th><th>time</th><th>client</th><th>question</th><th>type</th><th>outcome</th><th>rcode</th><th>answer</th><th class="num">ms</th></tr></thead>
+                <tbody id="qtable-body"></tbody>
+            </table>
+        </div>
+        <p class="empty" id="q-empty" hidden>No queries match — clear a filter or widen the time range.</p>
+        <div class="pager">
+            <button id="prev-btn" disabled>Prev</button>
+            <span id="pager-info">—</span>
+            <button id="next-btn" disabled>Next</button>
+        </div>
+    </section>
+{{else if eq .Page "upstreams"}}
+    <div class="page-head"><h1>Upstreams</h1></div>
+    <section class="panel"><p class="empty">Upstream management is coming in the next phase.</p></section>
+{{else if eq .Page "settings"}}
+    <div class="page-head"><h1>Settings</h1></div>
+    <section class="panel"><p class="empty">Settings are coming in the next phase.</p></section>
+{{end}}
+</main>
+
+<footer class="shell-footer">
+    <span id="foot-version">blocky {{.Version}}</span>
+    <span id="foot-uptime"></span>
+</footer>
+
+<script src="/static/vendor/uplot.iife.min.js"></script>
+<script type="module" src="/static/app/app.js"></script>
+</body>
+</html>

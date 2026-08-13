@@ -1,0 +1,128 @@
+// dashboard.js — stat tiles, stacked QPS-by-outcome chart, latency tiles, top lists.
+import { getJSON } from "./api.js";
+import { fmtNum, fmtMs, fmtPct } from "./format.js";
+import { stackedArea } from "./chart.js";
+
+const RANGES = { "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600, "7d": 7 * 24 * 3600 };
+const STEPS = { "1h": 60, "6h": 300, "24h": 900, "7d": 3600 };
+
+// Fixed series order + status colors — never cycled, never re-ranked.
+const SERIES = [
+    { key: "RESOLVED", label: "resolved", color: cssTok("--c-resolved") },
+    { key: "BLOCKED", label: "blocked", color: cssTok("--c-blocked") },
+    { key: "CACHED", label: "cached", color: cssTok("--c-cached") },
+    { key: "OTHER", label: "other", color: cssTok("--c-other") },
+];
+
+function cssTok(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+let range = "24h";
+let chart = null;
+
+function window_() {
+    const to = new Date();
+    const from = new Date(to.getTime() - RANGES[range] * 1000);
+    return { from: from.toISOString(), to: to.toISOString() };
+}
+
+async function loadOverview() {
+    const w = window_();
+    const o = await getJSON("/api/ui/stats/overview", w);
+    setText("t-queries", fmtNum(o.queries));
+    setText("t-blocked", fmtPct(o.blocked, o.queries));
+    setText("t-cached", fmtPct(o.cached, o.queries));
+    setText("t-clients", fmtNum(o.clients));
+    setText("t-p95", fmtMs(o.p95Ms));
+}
+
+async function loadLatency() {
+    const w = window_();
+    const l = await getJSON("/api/ui/stats/latency", w);
+    setText("t-lp50", fmtMs(l.p50));
+    setText("t-lp90", fmtMs(l.p90));
+    setText("t-lp95", fmtMs(l.p95));
+    setText("t-lp99", fmtMs(l.p99));
+}
+
+async function loadBuckets() {
+    const w = window_();
+    const res = await getJSON("/api/ui/stats/buckets", { ...w, step: STEPS[range] });
+    const buckets = res.buckets || [];
+    const el = document.getElementById("qps-chart");
+    const empty = document.getElementById("qps-empty");
+
+    if (chart) { chart.destroy(); chart = null; }
+    el.innerHTML = "";
+
+    if (buckets.length === 0) { empty.hidden = false; return; }
+    empty.hidden = true;
+
+    const xs = buckets.map((b) => b.ts);
+    const known = new Set(["RESOLVED", "BLOCKED", "CACHED"]);
+    const rows = SERIES.map((s) => buckets.map((b) => {
+        const counts = b.counts || {};
+        if (s.key !== "OTHER") return counts[s.key] || 0;
+        let sum = 0;
+        for (const [k, v] of Object.entries(counts)) if (!known.has(k)) sum += v;
+        return sum;
+    }));
+
+    const toSec = Math.floor(Date.parse(w.to) / 1000);
+    const fromSec = Math.floor(Date.parse(w.from) / 1000);
+
+    chart = stackedArea(el, {
+        labels: SERIES.map((s) => s.label),
+        colors: SERIES.map((s) => s.color),
+        data: [xs, ...rows],
+        xRange: [fromSec, toSec],
+        fmtVal: fmtNum,
+    });
+}
+
+async function loadTop(col, elID) {
+    const w = window_();
+    const res = await getJSON("/api/ui/stats/top", { ...w, col, n: 10 });
+    const items = res.items || [];
+    const ol = document.getElementById(elID);
+    if (items.length === 0) {
+        ol.innerHTML = `<p class="empty">No queries in this window — widen the time range.</p>`;
+        return;
+    }
+    const max = Math.max(...items.map((i) => i.count), 1);
+    ol.innerHTML = items.map((i) => `
+        <li>
+            <div class="bar-row"><span class="bar-name" title="${esc(i.name)}">${esc(i.name)}</span><span class="bar-count">${fmtNum(i.count)}</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(i.count / max * 100).toFixed(1)}%"></div></div>
+        </li>`).join("");
+}
+
+function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function setText(id, text) {
+    document.getElementById(id).textContent = text;
+}
+
+function loadAll() {
+    const jobs = [
+        loadOverview(), loadLatency(), loadBuckets(),
+        loadTop("domain", "top-domain"), loadTop("blocked", "top-blocked"),
+        loadTop("client", "top-client"), loadTop("transport", "top-transport"),
+    ];
+    for (const j of jobs) j.catch((err) => console.error(err));
+}
+
+document.getElementById("range-row").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-range]");
+    if (!btn) return;
+    range = btn.dataset.range;
+    for (const b of document.querySelectorAll("#range-row button")) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+    }
+    loadAll();
+});
+
+loadAll();

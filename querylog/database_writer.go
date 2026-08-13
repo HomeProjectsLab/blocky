@@ -71,6 +71,9 @@ type DatabaseWriter struct {
 	pendingEntries   []*logEntry
 	lock             sync.RWMutex
 	dbFlushPeriod    time.Duration
+	// aggregate is true for sqlite targets: the hourly aggregate tables (see
+	// aggregates.go) back the /api/ui stats reader, which is sqlite-only.
+	aggregate bool
 }
 
 func NewDatabaseWriter(ctx context.Context, dbType config.QueryLogType, target string, logRetentionDays uint64,
@@ -133,6 +136,7 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 		db:               db,
 		logRetentionDays: logRetentionDays,
 		dbFlushPeriod:    dbFlushPeriod,
+		aggregate:        dbType == config.QueryLogTypeSqlite,
 	}
 
 	go w.periodicFlush(ctx)
@@ -153,6 +157,11 @@ func databaseMigration(db *gorm.DB, dbType config.QueryLogType, logRetentionDays
 		// SQLite gives every table an implicit auto-incrementing rowid that already
 		// acts as the primary key, so unlike the other targets no extra id column is
 		// added here (and SQLite cannot ALTER TABLE ... ADD a PRIMARY KEY column).
+
+		// sqlite additionally maintains the hourly aggregate tables for the UI stats API
+		if err := db.AutoMigrate(&aggHourly{}, &aggDomainHourly{}); err != nil {
+			return fmt.Errorf("failed to auto-migrate aggregate tables for querylog: %w", err)
+		}
 
 	case config.QueryLogTypeMysql:
 		tx := db.Exec("ALTER TABLE `" + tableName + "` ADD `id` INT PRIMARY KEY AUTO_INCREMENT")
@@ -305,9 +314,22 @@ func (d *DatabaseWriter) doDBWrite() error {
 
 		for i := 0; i < len(d.pendingEntries); i += bulkSize {
 			j := min(i+bulkSize, len(d.pendingEntries))
-			// write bulk
-			tx := d.db.Create(d.pendingEntries[i:j])
-			err = multierror.Append(err, tx.Error)
+			batch := d.pendingEntries[i:j]
+
+			// raw rows and their aggregate deltas commit atomically: a crash can't
+			// leave the dashboards (aggregates) out of sync with the raw log
+			txErr := d.db.Transaction(func(tx *gorm.DB) error {
+				if txErr := tx.Create(batch).Error; txErr != nil {
+					return txErr
+				}
+
+				if d.aggregate {
+					return upsertAggregates(tx, batch)
+				}
+
+				return nil
+			})
+			err = multierror.Append(err, txErr)
 		}
 
 		// clear the slice with pending entries

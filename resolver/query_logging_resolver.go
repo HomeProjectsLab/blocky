@@ -43,6 +43,13 @@ type QueryLoggingResolver struct {
 	writer        querylog.Writer
 	instanceID    string
 	ignoreDomains stringcache.GroupedStringCache
+	hub           *querylog.Hub // optional live-stream fan-out; nil (the default) is a no-op
+}
+
+// SetHub attaches the live-stream hub. Call before serving starts (the field
+// is read unsynchronized on the query path).
+func (r *QueryLoggingResolver) SetHub(hub *querylog.Hub) {
+	r.hub = hub
 }
 
 func GetQueryLoggingWriter(ctx context.Context, cfg config.QueryLog, instanceID string) (querylog.Writer, error) {
@@ -239,6 +246,9 @@ func (r *QueryLoggingResolver) Resolve(ctx context.Context, request *model.Reque
 	default:
 		logger.Error("query log writer is too slow, log entry will be dropped")
 	}
+
+	// live SSE stream; nil-hub safe, slow subscribers drop events (never blocks DNS)
+	r.hub.Publish(entry)
 
 	return resp, nil
 }
