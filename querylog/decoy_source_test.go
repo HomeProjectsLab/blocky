@@ -23,7 +23,7 @@ type realRow struct {
 	QuestionName  string    `gorm:"column:question_name"`
 	QuestionType  string    `gorm:"column:question_type"`
 	ResponseType  string    `gorm:"column:response_type"`
-	EffectiveTLDP string    `gorm:"column:effective_tld_p"`
+	EffectiveTLDP string    `gorm:"column:effective_tldp"`
 	Decoy         bool      `gorm:"column:decoy"`
 	EDNSUDPSize   uint16    `gorm:"column:edns_udp_size"`
 	EDNSOptCodes  string    `gorm:"column:edns_opt_codes"`
@@ -324,7 +324,7 @@ var _ = Describe("DecoySource", func() {
 
 	// seedLog rebuilds a fresh DB with the given real rows and returns an open
 	// DecoySource over it. Used by the cohort/session/revisit specs, which need
-	// crafted client_name / response_type / effective_tld_p timelines.
+	// crafted client_name / response_type / effective_tldp timelines.
 	seedLog := func(name string, rows []realRow) *DecoySource {
 		p := filepath.Join(GinkgoT().TempDir(), name)
 		raw, e := gorm.Open(sqlite.Open(p), &gorm.Config{})

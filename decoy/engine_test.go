@@ -30,7 +30,7 @@ type realRow struct {
 	EDNSUDPSize   uint16    `gorm:"column:edns_udp_size"`
 	EDNSOptCodes  string    `gorm:"column:edns_opt_codes"`
 	FpDetail      string    `gorm:"column:fp_detail"`
-	EffectiveTLDP string    `gorm:"column:effective_tld_p"` // read by SampleFingerprintForName
+	EffectiveTLDP string    `gorm:"column:effective_tldp"` // read by SampleFingerprintForName
 }
 
 func (realRow) TableName() string { return "log_entries" }

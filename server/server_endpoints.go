@@ -197,7 +197,7 @@ func (s *Server) Query(
 func createHTTPRouter(
 	cfg *config.Config, openAPIImpl api.StrictServerInterface, store *configstore.Store, swapper upstreamSwapper,
 	qlHub *querylog.Hub, blStats blocklistStatser,
-) *chi.Mux {
+) (*chi.Mux, io.Closer) {
 	router := chi.NewRouter()
 
 	api.RegisterOpenAPIEndpoints(router, openAPIImpl)
@@ -206,7 +206,7 @@ func createHTTPRouter(
 
 	registerBlockingUIEndpoints(router, store, blStats)
 
-	registerStatsUIEndpoints(router, cfg, qlHub, store)
+	statsAPI := registerStatsUIEndpoints(router, cfg, qlHub, store)
 
 	configureDebugHandler(router)
 
@@ -220,7 +220,7 @@ func createHTTPRouter(
 
 	metrics.Start(router, cfg.Prometheus)
 
-	return router
+	return router, statsAPI
 }
 
 func configureDocsHandler(router *chi.Mux) {

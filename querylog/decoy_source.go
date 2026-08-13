@@ -111,6 +111,21 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 		return nil, fmt.Errorf("can't open query log database for decoy source: %w", err)
 	}
 
+	// Serialize this handle onto a single connection, exactly like the writer
+	// (see newDatabaseWriter). This handle both reads (list/corpus/cohort samples,
+	// window-scan session models) AND writes (AddToCorpus, blocklist/decoy refresh,
+	// list_meta). An unbounded pool lets its own concurrent writers contend on the
+	// one WAL file and surface transient "database is locked" under load; one
+	// connection makes all of this handle's access queue in-process instead. Its
+	// single writer still coexists with the writer's connection via busy_timeout.
+	// Decoy sampling is low-frequency (noise cadence), so serializing costs nothing.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("can't access decoy source connection pool: %w", err)
+	}
+
+	sqlDB.SetMaxOpenConns(1)
+
 	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}); err != nil {
 		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
@@ -401,7 +416,7 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 	var row fpRow
 
 	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
-		WHERE decoy = 0 AND effective_tld_p = ?
+		WHERE decoy = 0 AND effective_tldp = ?
 		ORDER BY request_ts DESC LIMIT 1`, etldp).Scan(&row).Error
 	if err != nil {
 		return FpSample{}, err
@@ -772,7 +787,7 @@ func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
 // source pick.
 //
 // ponytail: one windowed full scan of log_entries per call (LEAD over the
-// timeline; effective_tld_p is unindexed). Fine at noise cadence over a 7-day
+// timeline; effective_tldp is unindexed). Fine at noise cadence over a 7-day
 // window; materialize a transitions table if it shows up hot.
 func (s *DecoySource) NextInSession(primaryDomain string) (string, error) {
 	if primaryDomain == "" {
@@ -788,11 +803,11 @@ func (s *DecoySource) NextInSession(primaryDomain string) (string, error) {
 	}
 
 	err := s.db.Raw(`SELECT nxt AS d, COUNT(*) AS c FROM (
-		SELECT effective_tld_p AS cur,
-		       LEAD(effective_tld_p) OVER w AS nxt,
+		SELECT effective_tldp AS cur,
+		       LEAD(effective_tldp) OVER w AS nxt,
 		       (julianday(LEAD(request_ts) OVER w) - julianday(request_ts))*86400 AS gap
 		FROM log_entries
-		WHERE decoy = 0 AND effective_tld_p <> '' AND request_ts >= ?
+		WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
 		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
 	)
 	WHERE cur = ? AND nxt IS NOT NULL AND nxt <> cur AND gap >= 0 AND gap <= ?
@@ -838,10 +853,10 @@ func (s *DecoySource) SessionSeed() (string, error) {
 	}
 
 	err := s.db.Raw(`SELECT cur AS d, COUNT(*) AS c FROM (
-		SELECT effective_tld_p AS cur,
+		SELECT effective_tldp AS cur,
 		       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
 		FROM log_entries
-		WHERE decoy = 0 AND effective_tld_p <> '' AND request_ts >= ?
+		WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
 		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
 	)
 	WHERE gap IS NULL OR gap > ?
@@ -884,7 +899,7 @@ func (s *DecoySource) SessionSeed() (string, error) {
 // Scans the recent window only, so a daily domain yields several samples while
 // the scan stays bounded.
 //
-// ponytail: median over an unindexed effective_tld_p scan; bounded by the
+// ponytail: median over an unindexed effective_tldp scan; bounded by the
 // window and one specific domain, so cheap in practice.
 func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 	etldp := effectiveTLDP(domain)
@@ -897,7 +912,7 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 	var ts []time.Time
 
 	err := s.db.Raw(`SELECT request_ts FROM log_entries
-		WHERE decoy = 0 AND effective_tld_p = ? AND request_ts >= ?
+		WHERE decoy = 0 AND effective_tldp = ? AND request_ts >= ?
 		ORDER BY request_ts ASC`, etldp, since).Scan(&ts).Error
 	if err != nil || len(ts) < 2 {
 		return 0, false

@@ -16,7 +16,10 @@ import (
 // registerStatsUIEndpoints mounts the dashboard stats / query explorer /
 // live-stream / system API under /api/ui. All data comes from the sqlite
 // query log; with any other query log target the endpoints respond 503.
-func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog.Hub, store *configstore.Store) {
+// registerStatsUIEndpoints wires the stats/noise/queries API and returns the
+// statsAPI so the server can Close its lazily-opened read-only reader on
+// shutdown/rebuild (otherwise each apply leaks one sqlite RO connection).
+func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog.Hub, store *configstore.Store) *statsAPI {
 	s := &statsAPI{qlCfg: cfg.QueryLog, hub: hub, store: store, start: time.Now()}
 
 	router.Route("/api/ui/stats", func(r chi.Router) {
@@ -40,6 +43,24 @@ func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog
 	router.Get("/api/ui/clients/{name}", s.clientDetail)
 	router.Get("/api/ui/privacy", s.getPrivacy)
 	router.Put("/api/ui/privacy", s.putPrivacy)
+
+	return s
+}
+
+// Close releases the lazily-opened read-only sqlite reader. Idempotent; safe on
+// a statsAPI that never opened one.
+func (s *statsAPI) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.reader == nil {
+		return nil
+	}
+
+	err := s.reader.Close()
+	s.reader = nil
+
+	return err
 }
 
 type statsAPI struct {

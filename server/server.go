@@ -273,7 +273,8 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		blStats = server.decoySource
 	}
 
-	httpRouter := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats)
+	httpRouter, statsCloser := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats)
+	server.closers = append(server.closers, statsCloser) // close the stats reader on Stop (else each apply leaks an RO conn)
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(http3PacketConns) > 0 {
