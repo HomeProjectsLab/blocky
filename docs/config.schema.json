@@ -1881,8 +1881,8 @@
         },
         "shadowBlockedQueries": {
           "type": "boolean",
-          "description": "ShadowBlockedQueries decouples the client answer from the wire query for blocked\ndomains: the client still gets the block response (ad-blocking intact), but the\nreal upstream query is also egressed asynchronously and its answer discarded, so\nreal page-load cohorts stay complete on the wire and dissolve the \"blocking\nresolver\" signature. Opt-in: it doubles upstream volume for blocked domains.",
-          "default": false
+          "description": "ShadowBlockedQueries decouples the client answer from the wire query for blocked\ndomains: the client still gets the block response (ad-blocking intact), but the\nreal upstream query is also egressed asynchronously and its answer discarded, so\nreal page-load cohorts stay complete on the wire and dissolve the \"blocking\nresolver\" signature. Default ON, but it only ACTIVATES when the decoy engine is\nalso enabled (privacy.decoy.enable) — that is what gives the egressed tracker\nqueries their decoy cover. Without the noise engine it stays inert, so a\nblocking-only setup never egresses blocked-domain queries uncovered.",
+          "default": true
         }
       },
       "additionalProperties": false,

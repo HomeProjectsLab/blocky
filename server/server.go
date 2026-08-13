@@ -575,7 +575,10 @@ func createQueryResolver(
 	// the Upstreams config already threaded to every upstream client (RFC 7830).
 	cfg.Upstreams.EDNSPadding = cfg.Privacy.EDNSPadding.Enable
 	cfg.Upstreams.QueryCaseRandomization = cfg.Privacy.QueryCaseRandomization
-	cfg.Blocking.ShadowBlockedQueries = cfg.Privacy.ShadowBlockedQueries
+	// Shadow completion is coherent only with the noise engine running (it gives
+	// the egressed tracker queries their decoy cover); without it, shadowing would
+	// leak blocked-domain queries uncovered. So default-on, but gated on decoy.
+	cfg.Blocking.ShadowBlockedQueries = cfg.Privacy.ShadowBlockedQueries && cfg.Privacy.Decoy.Enable
 
 	upstreamTree, utErr := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
 	blocking, blErr := resolver.NewBlockingResolver(ctx, cfg.Blocking, bootstrap)

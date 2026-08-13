@@ -23,8 +23,11 @@ type PrivacyConfig struct {
 	// domains: the client still gets the block response (ad-blocking intact), but the
 	// real upstream query is also egressed asynchronously and its answer discarded, so
 	// real page-load cohorts stay complete on the wire and dissolve the "blocking
-	// resolver" signature. Opt-in: it doubles upstream volume for blocked domains.
-	ShadowBlockedQueries bool `yaml:"shadowBlockedQueries" default:"false"`
+	// resolver" signature. Default ON, but it only ACTIVATES when the decoy engine is
+	// also enabled (privacy.decoy.enable) — that is what gives the egressed tracker
+	// queries their decoy cover. Without the noise engine it stays inert, so a
+	// blocking-only setup never egresses blocked-domain queries uncovered.
+	ShadowBlockedQueries bool `yaml:"shadowBlockedQueries" default:"true"`
 }
 
 // DecoyConfig configures the background noise/decoy query engine. Decoy
