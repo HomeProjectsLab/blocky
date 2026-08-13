@@ -1,36 +1,32 @@
 package cmd
 
 import (
-	"errors"
-	"os"
-
+	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/log"
 
 	"github.com/spf13/cobra"
 )
 
-const validateCmdName = "validate"
-
 // NewValidateCommand creates new command instance
 func NewValidateCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   validateCmdName,
+		Use:   "validate",
 		Args:  cobra.NoArgs,
-		Short: "Validates the configuration",
+		Short: "Validates the configuration stored in the config database",
 		RunE:  validateConfiguration,
 	}
 }
 
 func validateConfiguration(_ *cobra.Command, _ []string) error {
-	log.Log().Infof("Validating configuration file: %s", configPath)
+	log.Log().Infof("Validating configuration database in: %s", dbDir)
 
-	_, err := os.Stat(configPath)
-	if err != nil && errors.Is(err, os.ErrNotExist) {
-		return errors.New("configuration path does not exist")
-	}
-
-	err = initConfig()
+	store, err := configstore.Open(dbDir)
 	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	if _, err := store.LoadConfig(); err != nil {
 		return err
 	}
 

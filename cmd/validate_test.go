@@ -9,19 +9,20 @@ import (
 var _ = Describe("Validate command", func() {
 	var tmpDir *helpertest.TmpFolder
 	BeforeEach(func() {
-		tmpDir = helpertest.NewTmpFolder("config")
+		tmpDir = helpertest.NewTmpFolder("db")
 	})
-	When("Validate is called with not existing configuration file", func() {
-		It("should terminate with error", func() {
-			c := NewRootCommand()
-			c.SetArgs([]string{"validate", "--config", "/notexisting/path.yaml"})
 
-			Expect(c.Execute()).Should(HaveOccurred())
+	When("Validate is called on a fresh database directory", func() {
+		It("should seed the starter config and terminate without error", func() {
+			c := NewRootCommand()
+			c.SetArgs([]string{"validate", "--db-dir", tmpDir.Path})
+
+			Expect(c.Execute()).Should(Succeed())
 		})
 	})
 
-	When("Validate is called with existing valid configuration file", func() {
-		It("should terminate without error", func() {
+	When("Validate is called after an import", func() {
+		It("should validate the imported configuration", func() {
 			cfgFile := tmpDir.CreateStringFile("config.yaml",
 				"upstreams:",
 				"  groups:",
@@ -29,24 +30,12 @@ var _ = Describe("Validate command", func() {
 				"      - 1.1.1.1")
 
 			c := NewRootCommand()
-			c.SetArgs([]string{"validate", "--config", cfgFile.Path})
-
+			c.SetArgs([]string{"import", cfgFile.Path, "--db-dir", tmpDir.Path})
 			Expect(c.Execute()).Should(Succeed())
-		})
-	})
 
-	When("Validate is called with existing invalid configuration file", func() {
-		It("should terminate with error", func() {
-			cfgFile := tmpDir.CreateStringFile("config.yaml",
-				"upstreams:",
-				"  groups:",
-				"    default:",
-				"      - 1.broken file")
-
-			c := NewRootCommand()
-			c.SetArgs([]string{"validate", "--config", cfgFile.Path})
-
-			Expect(c.Execute()).Should(HaveOccurred())
+			c = NewRootCommand()
+			c.SetArgs([]string{"validate", "--db-dir", tmpDir.Path})
+			Expect(c.Execute()).Should(Succeed())
 		})
 	})
 })

@@ -17,7 +17,6 @@ func NewQueryCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		Short:             "performs DNS query",
 		RunE:              query,
-		PersistentPreRunE: initConfigPreRun,
 	}
 
 	c.Flags().StringP("type", "t", "A", "query type (A, AAAA, ...)")

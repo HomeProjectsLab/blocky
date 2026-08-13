@@ -743,6 +743,20 @@ func loadFromBytes(logger *logrus.Entry, data []byte, cfg *Config, sources []con
 	return nil
 }
 
+// ReadRawSource returns the raw merged YAML bytes for path (a single YAML
+// file or a directory of YAML files) without parsing them. Used by the
+// import command to persist the original YAML into the config store.
+func ReadRawSource(path string) ([]byte, error) {
+	fs, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("can't read config file(s): %w", err)
+	}
+
+	data, _, _, err := readConfigSource(logrus.NewEntry(log.Log()), path, fs)
+
+	return data, err
+}
+
 // readConfigSource reads the raw config bytes for path, which is either a
 // single YAML file or a directory of YAML files merged in walk order. For a
 // directory it logs the merge order (so failures still name the files), then

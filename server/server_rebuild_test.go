@@ -93,7 +93,7 @@ var _ = Describe("Server rebuild", func() {
 		for cycle := 1; cycle <= 2; cycle++ {
 			ctx, cancel := context.WithCancel(context.Background())
 
-			srv, err := NewServer(ctx, newRebuildConfig())
+			srv, err := NewServer(ctx, newRebuildConfig(), nil)
 			Expect(err).Should(Succeed(), "NewServer failed in cycle %d", cycle)
 
 			errChan := make(chan error, 10)

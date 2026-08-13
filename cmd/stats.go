@@ -30,7 +30,6 @@ func NewStatsCommand() *cobra.Command {
 		Args:              cobra.NoArgs,
 		Short:             "shows DNS statistics",
 		RunE:              stats,
-		PersistentPreRunE: initConfigPreRun,
 	}
 }
 

@@ -43,7 +43,7 @@ var _ = Describe("Client identity for queries answered at the head of the chain"
 
 		adapt(cfg)
 
-		srv, err := NewServer(ctx, cfg)
+		srv, err := NewServer(ctx, cfg, nil)
 		Expect(err).Should(Succeed())
 
 		return srv

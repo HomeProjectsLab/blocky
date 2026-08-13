@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/evt"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/server"
@@ -20,24 +21,24 @@ import (
 
 //nolint:gochecknoglobals
 var (
-	done              = make(chan bool, 1)
-	isConfigMandatory = true
-	signals           = make(chan os.Signal, 1)
+	signals = make(chan os.Signal, 1)
 
 	// raiseNetBindService is a seam so tests can stub the capability raise.
 	raiseNetBindService = util.RaiseNetBindService
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	errChanSize     = 10
+)
 
 func newServeCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:               "serve",
-		Args:              cobra.NoArgs,
-		Short:             "start blocky DNS server (default command)",
-		RunE:              startServer,
-		PersistentPreRunE: initConfigPreRun,
-		SilenceUsage:      true,
+		Use:          "serve",
+		Args:         cobra.NoArgs,
+		Short:        "start blocky DNS server (default command)",
+		RunE:         startServer,
+		SilenceUsage: true,
 	}
 }
 
@@ -80,58 +81,101 @@ func warnMissingPrivilegedPortCapability(ports config.Ports) {
 func startServer(_ *cobra.Command, _ []string) error {
 	printBanner()
 
-	cfg, err := config.LoadConfig(configPath, isConfigMandatory)
+	store, err := configstore.Open(dbDir)
 	if err != nil {
-		return fmt.Errorf("unable to load configuration: %w", err)
+		return fmt.Errorf("can't open config store: %w", err)
 	}
+	defer store.Close()
 
-	log.Configure(&cfg.Log)
+	return runSupervisor(store)
+}
 
-	warnMissingPrivilegedPortCapability(cfg.Ports)
-
+// runSupervisor runs the build/start/wait server cycle until a termination
+// signal arrives or the server fails fatally. Each ApplyRequested signal stops
+// the running server and rebuilds it from the store; when the new config can't
+// be applied, it rolls back to the last successfully applied one.
+func runSupervisor(store *configstore.Store) error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 
-	ctx, cancelFn := context.WithCancel(context.Background())
-	defer cancelFn()
+	var lastGood *config.Config
 
-	srv, err := server.NewServer(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("can't start server: %w", err)
-	}
+	for {
+		cfg, err := store.LoadConfig()
+		if err != nil {
+			if lastGood == nil {
+				return fmt.Errorf("unable to load configuration: %w", err)
+			}
 
-	const errChanSize = 10
-	errChan := make(chan error, errChanSize)
+			log.Log().Errorf("stored config is invalid, keeping the running config: %v", err)
+			cfg = lastGood
+		}
 
-	srv.Start(ctx, errChan)
+		log.Configure(&cfg.Log)
 
-	var terminationErr error
+		warnMissingPrivilegedPortCapability(cfg.Ports)
 
-	go func() {
+		srvCtx, cancelFn := context.WithCancel(context.Background())
+
+		srv, err := server.NewServer(srvCtx, cfg, store)
+		if err != nil {
+			if lastGood == nil || cfg == lastGood {
+				cancelFn()
+
+				return fmt.Errorf("can't start server: %w", err)
+			}
+
+			log.Log().Errorf("can't apply new config, rolling back to last applied config: %v", err)
+
+			cfg = lastGood
+
+			srv, err = server.NewServer(srvCtx, cfg, store)
+			if err != nil {
+				cancelFn()
+
+				return fmt.Errorf("can't start server with last applied config: %w", err)
+			}
+		}
+
+		lastGood = cfg
+
+		errChan := make(chan error, errChanSize)
+
+		srv.Start(srvCtx, errChan)
+		store.MarkApplied()
+
+		evt.Bus().Publish(evt.ApplicationStarted, util.Version, util.BuildTime)
+
 		select {
 		case <-signals:
 			log.Log().Infof("Terminating...")
 
 			// Cancel background operations (periodic refresh, etc.)
 			cancelFn()
+			stopServerGracefully(srv)
 
-			// Create timeout context for graceful shutdown
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			defer stopCancel()
-
-			util.LogOnError(stopCtx, "can't stop server: ", srv.Stop(stopCtx))
-			done <- true
+			return nil
 
 		case err := <-errChan:
 			log.Log().Error("server start failed: ", err)
-			terminationErr = err
-			done <- true
+			cancelFn()
+
+			return err
+
+		case <-store.ApplyRequested():
+			log.Log().Info("configuration change requested, restarting server")
+
+			cancelFn()
+			stopServerGracefully(srv)
 		}
-	}()
+	}
+}
 
-	evt.Bus().Publish(evt.ApplicationStarted, util.Version, util.BuildTime)
-	<-done
+// stopServerGracefully stops srv with the shutdown timeout, logging any error.
+func stopServerGracefully(srv *server.Server) {
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer stopCancel()
 
-	return terminationErr
+	util.LogOnError(stopCtx, "can't stop server: ", srv.Stop(stopCtx))
 }
 
 func printBanner() {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/0xERR0R/blocky/cache"
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/model"
@@ -54,6 +55,7 @@ type Server struct {
 	http3Server      *http3Server     // nil when disabled
 	http3PacketConns []net.PacketConn // one per address in ports.https
 	closers          []io.Closer
+	store            *configstore.Store // nil = config endpoints respond 503
 }
 
 func logger() *logrus.Entry {
@@ -114,7 +116,7 @@ func newTLSConfig(cfg *config.Config) (*tls.Config, error) {
 // NewServer creates new server instance with passed config
 //
 //nolint:funlen
-func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err error) {
+func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store) (server *Server, err error) {
 	var tlsCfg *tls.Config
 
 	if len(cfg.Ports.HTTPS) > 0 || len(cfg.Ports.TLS) > 0 {
@@ -174,6 +176,7 @@ func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err err
 		cfg:              cfg,
 		servers:          make(map[net.Listener]*httpServer),
 		http3PacketConns: http3PacketConns,
+		store:            store,
 	}
 
 	if redisResult.bridge != nil {
@@ -193,7 +196,7 @@ func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err err
 		return nil, fmt.Errorf("failed to create OpenAPI interface implementation: %w", err)
 	}
 
-	httpRouter := createHTTPRouter(cfg, openAPIImpl)
+	httpRouter := createHTTPRouter(cfg, openAPIImpl, store)
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(http3PacketConns) > 0 {

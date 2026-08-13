@@ -3,14 +3,11 @@ package cmd
 import (
 	"io"
 	"net/http"
-	"os"
 
 	"github.com/0xERR0R/blocky/log"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	. "github.com/0xERR0R/blocky/helpertest"
 )
 
 // Mock implementation of codeWithStatus interface for testing
@@ -28,7 +25,7 @@ func (m mockResponse) Status() string {
 }
 
 var _ = Describe("root command", func() {
-	When("Version command is called", func() {
+	When("Help command is called", func() {
 		log.Log().ExitFunc = nil
 		It("should execute without error", func() {
 			c := NewRootCommand()
@@ -36,87 +33,6 @@ var _ = Describe("root command", func() {
 			c.SetArgs([]string{"help"})
 			err := c.Execute()
 			Expect(err).Should(Succeed())
-		})
-	})
-
-	When("Config provided", func() {
-		var (
-			tmpDir  *TmpFolder
-			tmpFile *TmpFile
-		)
-
-		BeforeEach(func() {
-			configPath = defaultConfigPath
-
-			tmpDir = NewTmpFolder("RootCommand")
-			tmpFile = tmpDir.CreateStringFile("config",
-				"upstreams:",
-				"  groups:",
-				"    default:",
-				"      - 1.1.1.1",
-				"blocking:",
-				"  denylists:",
-				"    ads:",
-				"      - https://s3.amazonaws.com/lists.disconnect.me/simple_ad.txt",
-				"  clientGroupsBlock:",
-				"    default:",
-				"      - ads",
-				"port: 5333",
-			)
-		})
-
-		It("should accept old env var", func() {
-			os.Setenv(configFileEnvVarOld, tmpFile.Path)
-			DeferCleanup(func() { os.Unsetenv(configFileEnvVarOld) })
-
-			Expect(initConfig()).Should(Succeed())
-
-			Expect(configPath).Should(Equal(tmpFile.Path))
-		})
-
-		It("should accept new env var", func() {
-			os.Setenv(configFileEnvVar, tmpFile.Path)
-			DeferCleanup(func() { os.Unsetenv(configFileEnvVar) })
-
-			Expect(initConfig()).Should(Succeed())
-
-			Expect(configPath).Should(Equal(tmpFile.Path))
-		})
-
-		It("should handle config with HTTP port", func() {
-			configWithHTTP := tmpDir.CreateStringFile("config_with_http",
-				"upstreams:",
-				"  groups:",
-				"    default:",
-				"      - 1.1.1.1",
-				"ports:",
-				"  http:",
-				"    - 127.0.0.1:8080",
-			)
-
-			configPath = configWithHTTP.Path
-
-			Expect(initConfig()).Should(Succeed())
-			Expect(apiHost).Should(Equal("127.0.0.1"))
-			Expect(apiPort).Should(Equal(uint16(8080)))
-		})
-
-		It("should handle config with invalid HTTP port", func() {
-			configWithInvalidHTTP := tmpDir.CreateStringFile("config_with_invalid_http",
-				"upstreams:",
-				"  groups:",
-				"    default:",
-				"      - 1.1.1.1",
-				"ports:",
-				"  http:",
-				"    - 127.0.0.1:invalid",
-			)
-
-			configPath = configWithInvalidHTTP.Path
-
-			err := initConfig()
-			Expect(err).Should(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("can't convert port"))
 		})
 	})
 
@@ -165,7 +81,6 @@ var _ = Describe("root command", func() {
 	Describe("Command execution", func() {
 		BeforeEach(func() {
 			// Reset to default values before each test
-			configPath = defaultConfigPath
 			apiHost = defaultHost
 			apiPort = defaultPort
 		})
@@ -181,7 +96,7 @@ var _ = Describe("root command", func() {
 
 			expectedCmds := []string{
 				"refresh", "query", "version", "serve",
-				"blocking", "lists", "healthcheck", "cache", "validate",
+				"blocking", "lists", "healthcheck", "cache", "import", "validate",
 			}
 			for _, expected := range expectedCmds {
 				Expect(subCmdNames).Should(ContainElement(expected))
@@ -191,11 +106,10 @@ var _ = Describe("root command", func() {
 		It("should set flags correctly", func() {
 			cmd := NewRootCommand()
 
-			// Test config flag
-			configFlag := cmd.PersistentFlags().Lookup("config")
-			Expect(configFlag).ShouldNot(BeNil())
-			Expect(configFlag.Shorthand).Should(Equal("c"))
-			Expect(configFlag.DefValue).Should(Equal(defaultConfigPath))
+			// Test db-dir flag
+			dbDirFlag := cmd.PersistentFlags().Lookup("db-dir")
+			Expect(dbDirFlag).ShouldNot(BeNil())
+			Expect(dbDirFlag.DefValue).Should(Equal("."))
 
 			// Test apiHost flag
 			apiHostFlag := cmd.PersistentFlags().Lookup("apiHost")
@@ -206,6 +120,13 @@ var _ = Describe("root command", func() {
 			apiPortFlag := cmd.PersistentFlags().Lookup("apiPort")
 			Expect(apiPortFlag).ShouldNot(BeNil())
 			Expect(apiPortFlag.DefValue).Should(Equal("4000"))
+		})
+
+		It("should honor the db-dir env var for the flag default", func() {
+			GinkgoT().Setenv(dbDirEnvVar, "/some/dir")
+
+			cmd := NewRootCommand()
+			Expect(cmd.PersistentFlags().Lookup("db-dir").DefValue).Should(Equal("/some/dir"))
 		})
 	})
 })

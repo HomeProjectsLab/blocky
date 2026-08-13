@@ -6,27 +6,23 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/0xERR0R/blocky/api"
-	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/spf13/cobra"
 )
 
 //nolint:gochecknoglobals
 var (
-	configPath string
-	apiHost    string
-	apiPort    uint16
+	dbDir   string
+	apiHost string
+	apiPort uint16
 )
 
 const (
-	defaultPort         = 4000
-	defaultHost         = "localhost"
-	defaultConfigPath   = "./config.yml"
-	configFileEnvVar    = "BLOCKY_CONFIG_FILE"
-	configFileEnvVarOld = "CONFIG_FILE"
+	defaultPort = 4000
+	defaultHost = "localhost"
+	dbDirEnvVar = "BLOCKY_DB_DIR"
 )
 
 // NewRootCommand creates a new root cli command instance
@@ -38,16 +34,16 @@ func NewRootCommand() *cobra.Command {
 and ad-blocker for local network.
 
 Complete documentation is available at https://github.com/0xERR0R/blocky`,
-		PreRunE: initConfigPreRun,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return newServeCommand().RunE(cmd, args)
 		},
 		SilenceUsage: true,
 	}
 
-	c.PersistentFlags().StringVarP(&configPath, "config", "c", defaultConfigPath, "path to config file or folder")
-	c.PersistentFlags().StringVar(&apiHost, "apiHost", defaultHost, "host of blocky (API). Default overridden by config and CLI.") //nolint:lll
-	c.PersistentFlags().Uint16Var(&apiPort, "apiPort", defaultPort, "port of blocky (API). Default overridden by config and CLI.") //nolint:lll
+	c.PersistentFlags().StringVar(&dbDir, "db-dir", defaultDBDir(),
+		"directory containing blocky's config database (config.db), created if missing (env "+dbDirEnvVar+")")
+	c.PersistentFlags().StringVar(&apiHost, "apiHost", defaultHost, "host of blocky (API)")
+	c.PersistentFlags().Uint16Var(&apiPort, "apiPort", defaultPort, "port of blocky (API)")
 
 	c.AddCommand(newRefreshCommand(),
 		NewQueryCommand(),
@@ -58,9 +54,18 @@ Complete documentation is available at https://github.com/0xERR0R/blocky`,
 		NewHealthcheckCommand(),
 		newCacheCommand(),
 		NewStatsCommand(),
+		newImportCommand(),
 		NewValidateCommand())
 
 	return c
+}
+
+func defaultDBDir() string {
+	if val, present := os.LookupEnv(dbDirEnvVar); present {
+		return val
+	}
+
+	return "."
 }
 
 func apiURL() string {
@@ -75,48 +80,6 @@ func newAPIClient() (*api.ClientWithResponses, error) {
 	}
 
 	return client, nil
-}
-
-func initConfigPreRun(cmd *cobra.Command, args []string) error {
-	return initConfig()
-}
-
-func initConfig() error {
-	if configPath == defaultConfigPath {
-		val, present := os.LookupEnv(configFileEnvVar)
-		if present {
-			configPath = val
-		} else {
-			val, present = os.LookupEnv(configFileEnvVarOld)
-			if present {
-				configPath = val
-			}
-		}
-	}
-
-	cfg, err := config.LoadConfig(configPath, false)
-	if err != nil {
-		return fmt.Errorf("unable to load configuration file '%s': %w", configPath, err)
-	}
-
-	log.Configure(&cfg.Log)
-
-	if len(cfg.Ports.HTTP) != 0 {
-		split := strings.Split(cfg.Ports.HTTP[0], ":")
-
-		lastIdx := len(split) - 1
-
-		apiHost = strings.Join(split[:lastIdx], ":")
-
-		port, err := config.ConvertPort(split[lastIdx])
-		if err != nil {
-			return fmt.Errorf("can't convert port '%s' to number (1 - 65535): %w", split[lastIdx], err)
-		}
-
-		apiPort = port
-	}
-
-	return nil
 }
 
 // Execute starts the command

@@ -14,6 +14,7 @@ import (
 
 	"github.com/0xERR0R/blocky/api"
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/docs"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/model"
@@ -192,10 +193,12 @@ func (s *Server) Query(
 	return s.resolve(ctx, req)
 }
 
-func createHTTPRouter(cfg *config.Config, openAPIImpl api.StrictServerInterface) *chi.Mux {
+func createHTTPRouter(cfg *config.Config, openAPIImpl api.StrictServerInterface, store *configstore.Store) *chi.Mux {
 	router := chi.NewRouter()
 
 	api.RegisterOpenAPIEndpoints(router, openAPIImpl)
+
+	registerConfigUIEndpoints(router, store)
 
 	configureDebugHandler(router)
 

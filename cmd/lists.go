@@ -13,7 +13,6 @@ func NewListsCommand() *cobra.Command {
 	c := &cobra.Command{
 		Use:               "lists",
 		Short:             "lists operations",
-		PersistentPreRunE: initConfigPreRun,
 	}
 
 	c.AddCommand(newRefreshCommand())

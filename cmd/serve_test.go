@@ -2,12 +2,16 @@ package cmd
 
 import (
 	"net"
-	"net/http"
-	"os"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/helpertest"
+	"github.com/0xERR0R/blocky/log"
+
+	"github.com/sirupsen/logrus/hooks/test"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -16,113 +20,160 @@ const (
 	basePort = 5000
 )
 
+func minimalYAML(dnsPort string, extraLines ...string) string {
+	lines := []string{
+		"upstreams:",
+		"  groups:",
+		"    default:",
+		"      - 1.1.1.1",
+		"ports:",
+		"  dns: " + dnsPort,
+	}
+
+	return strings.Join(append(lines, extraLines...), "\n") + "\n"
+}
+
+func dialable(port string) func(g Gomega) {
+	return func(g Gomega) {
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
+		g.Expect(err).Should(Succeed())
+		defer conn.Close()
+	}
+}
+
 var _ = Describe("Serve command", func() {
 	var (
 		tmpDir *helpertest.TmpFolder
+		store  *configstore.Store
 		port   string
 	)
+
 	BeforeEach(func() {
 		port = helpertest.GetStringPort(basePort)
-		tmpDir = helpertest.NewTmpFolder("config")
+		tmpDir = helpertest.NewTmpFolder("db")
 
-		configPath = defaultConfigPath
+		var err error
+		store, err = configstore.Open(tmpDir.Path)
+		Expect(err).Should(Succeed())
+		DeferCleanup(store.Close)
+
+		Expect(store.SetRawYAML(minimalYAML(port))).Should(Succeed())
 	})
 
-	When("Serve command is called with valid config", func() {
+	When("startServer is called with a prepared config database", func() {
 		It("should start without error and terminate with signal", func() {
-			By("initialize config", func() {
-				cfgFile := tmpDir.CreateStringFile("config.yaml",
-					"upstreams:",
-					"  groups:",
-					"    default:",
-					"      - 1.1.1.1",
-					"ports:",
-					"  dns: "+port)
-
-				os.Setenv(configFileEnvVar, cfgFile.Path)
-				DeferCleanup(func() { os.Unsetenv(configFileEnvVar) })
-
-				Expect(initConfig()).Should(Succeed())
-			})
+			dbDir = tmpDir.Path
 
 			errChan := make(chan error)
-			By("start server", func() {
-				go func() {
-					// it is a blocking function, call async
-					errChan <- startServer(newServeCommand(), []string{})
-				}()
-			})
+			go func() {
+				// blocking function, call async
+				errChan <- startServer(newServeCommand(), []string{})
+			}()
 
 			By("check DNS port is open", func() {
-				Eventually(func(g Gomega) {
-					conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
-					g.Expect(err).Should(Succeed())
-					defer conn.Close()
-				}, "5s").Should(Succeed())
+				Eventually(dialable(port), "5s").Should(Succeed())
 			})
 
 			By("terminate with signal", func() {
 				signals <- syscall.SIGINT
 
-				// no errors
-				Eventually(errChan).Should(Receive(BeNil()))
+				Eventually(errChan, "15s").Should(Receive(BeNil()))
 			})
 		})
 	})
 
-	When("Serve command is called with valid config", func() {
-		It("should fail if server start fails", func() {
-			By("start http server on port "+port, func() {
-				go func(p string) {
-					Expect(http.ListenAndServe(":"+p, nil)).Should(Succeed())
-				}(port)
-			})
-			By("initialize config with blocked port "+port, func() {
-				cfgFile := tmpDir.CreateStringFile("config.yaml",
-					"upstreams:",
-					"  groups:",
-					"    default:",
-					"      - 1.1.1.1",
-					"ports:",
-					"  dns: "+port)
-
-				os.Setenv(configFileEnvVar, cfgFile.Path)
-				DeferCleanup(func() { os.Unsetenv(configFileEnvVar) })
-
-				Expect(initConfig()).Should(Succeed())
-			})
-
+	When("a config apply is requested", func() {
+		It("should restart the server with the new config", func() {
 			errChan := make(chan error)
-			By("start server", func() {
-				go func() {
-					// it is a blocking function, call async
-					errChan <- startServer(newServeCommand(), []string{})
-				}()
+			go func() {
+				errChan <- runSupervisor(store)
+			}()
+
+			Eventually(dialable(port), "5s").Should(Succeed())
+
+			newPort := helpertest.GetStringPort(basePort + 100)
+
+			By("apply new config with different DNS port", func() {
+				Expect(store.SetRawYAML(minimalYAML(newPort))).Should(Succeed())
+				store.RequestApply()
+			})
+
+			By("server serves the new port and released the old one", func() {
+				Eventually(dialable(newPort), "5s").Should(Succeed())
+				Eventually(dialable(port), "5s").ShouldNot(Succeed())
 			})
 
 			By("terminate with signal", func() {
-				var startError error
-				Eventually(errChan, "10s").Should(Receive(&startError))
-				Expect(startError).Should(MatchError(ContainSubstring("address already in use")))
+				signals <- syscall.SIGINT
+
+				Eventually(errChan, "15s").Should(Receive(BeNil()))
+			})
+		})
+
+		It("should roll back to the last applied config if the rebuild fails", func() {
+			loggerHook := test.NewGlobal()
+			log.Log().AddHook(loggerHook)
+			DeferCleanup(loggerHook.Reset)
+
+			errChan := make(chan error)
+			go func() {
+				errChan <- runSupervisor(store)
+			}()
+
+			Eventually(dialable(port), "5s").Should(Succeed())
+
+			blockedPort := helpertest.GetStringPort(basePort + 200)
+
+			By("occupy the HTTP port of the new config", func() {
+				ln, err := net.Listen("tcp", "127.0.0.1:"+blockedPort)
+				Expect(err).Should(Succeed())
+				DeferCleanup(ln.Close)
+			})
+
+			By("apply config whose HTTP listener can't be created", func() {
+				Expect(store.SetRawYAML(minimalYAML(port,
+					"  http: 127.0.0.1:"+blockedPort))).Should(Succeed())
+				store.RequestApply()
+			})
+
+			By("supervisor rolls back and keeps serving the old config", func() {
+				Eventually(func() []string {
+					msgs := make([]string, 0, len(loggerHook.AllEntries()))
+					for _, entry := range loggerHook.AllEntries() {
+						msgs = append(msgs, entry.Message)
+					}
+
+					return msgs
+				}, "10s").Should(ContainElement(ContainSubstring("rolling back")))
+
+				Eventually(dialable(port), "5s").Should(Succeed())
+				Consistently(errChan, "200ms").ShouldNot(Receive())
+			})
+
+			By("terminate with signal", func() {
+				signals <- syscall.SIGINT
+
+				Eventually(errChan, "15s").Should(Receive(BeNil()))
 			})
 		})
 	})
 
-	When("Serve command is called without config", func() {
-		It("should fail to start and report error", func() {
-			errChan := make(chan error)
-			By("start server", func() {
-				go func() {
-					// it is a blocking function, call async
-					errChan <- startServer(newServeCommand(), []string{})
-				}()
+	When("the DNS port is already in use", func() {
+		It("should fail to start and report the error", func() {
+			By("occupy the DNS port", func() {
+				ln, err := net.Listen("tcp", ":"+port)
+				Expect(err).Should(Succeed())
+				DeferCleanup(ln.Close)
 			})
 
-			By("server should terminate with error", func() {
-				var startError error
-				Eventually(errChan).Should(Receive(&startError))
-				Expect(startError).Should(MatchError(ContainSubstring("unable to load configuration")))
-			})
+			errChan := make(chan error)
+			go func() {
+				errChan <- runSupervisor(store)
+			}()
+
+			var startError error
+			Eventually(errChan, "10s").Should(Receive(&startError))
+			Expect(startError).Should(MatchError(ContainSubstring("address already in use")))
 		})
 	})
 })
