@@ -14,7 +14,8 @@ var _ = Describe("Privacy config", func() {
 			p := cfg.Privacy
 			Expect(p.Decoy.Enable).Should(BeFalse())
 			Expect(p.Decoy.QueriesPerMinute).Should(Equal(float64(4)))
-			Expect(p.Decoy.ReplayWeight).Should(Equal(uint(10)))
+			Expect(p.Decoy.ReplayWeight).Should(Equal(uint(15)))
+			Expect(p.Decoy.CorpusWeight).Should(Equal(uint(5)))
 			Expect(p.Decoy.ListWeight).Should(Equal(uint(1)))
 			Expect(p.Decoy.ActiveHoursStart).Should(Equal(0))
 			Expect(p.Decoy.ActiveHoursEnd).Should(Equal(24))
@@ -25,6 +26,10 @@ var _ = Describe("Privacy config", func() {
 			Expect(p.Decoy.SplitUpstream).Should(BeTrue())
 			Expect(p.Decoy.MissChaffPct).Should(Equal(uint(15)))
 			Expect(p.Decoy.ClusterPct).Should(Equal(uint(20)))
+			Expect(p.Decoy.ShadowTTL).Should(BeTrue())
+			Expect(p.Decoy.DualStackPct).Should(Equal(uint(55)))
+			Expect(p.Decoy.OffHoursFloorQPM).Should(Equal(0.5))
+			Expect(p.Decoy.ActiveHoursEdgeJitterMin).Should(Equal(30))
 			Expect(p.TTLJitter.Enable).Should(BeFalse())
 			Expect(p.TTLJitter.PercentPct).Should(Equal(uint(10)))
 			Expect(p.EDNSPadding.Enable).Should(BeFalse())
@@ -70,17 +75,19 @@ var _ = Describe("Privacy config", func() {
 			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("must be <")))
 		})
 
-		It("rejects both weights zero when decoy enabled", func() {
+		It("rejects all weights zero when decoy enabled", func() {
 			p.Decoy.Enable = true
 			p.Decoy.ReplayWeight = 0
+			p.Decoy.CorpusWeight = 0
 			p.Decoy.ListWeight = 0
-			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("must not both be zero")))
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("must not all be zero")))
 		})
 
 		It("ignores decoy misconfig when decoy disabled", func() {
 			p.Decoy.Enable = false
 			p.Decoy.ActiveHoursStart = 99
 			p.Decoy.ReplayWeight = 0
+			p.Decoy.CorpusWeight = 0
 			p.Decoy.ListWeight = 0
 			Expect(p.validate(nil)).Should(Succeed())
 		})

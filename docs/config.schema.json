@@ -167,6 +167,18 @@
           },
           "type": "object",
           "description": "Per-group settings overriding the global strategy."
+        },
+        "domainShard": {
+          "properties": {
+            "rotateHours": {
+              "type": "integer",
+              "description": "Hours between shard-salt rotations. The domain-\u003eupstream mapping is stable\nwithin a rotation window and moves across windows, so no single upstream\nkeeps a permanent stable slice of the user's domains. 0 disables rotation\n(a permanent, fingerprintable mapping). Trade-off: rotation spreads a\ndomain's history across upstreams over time but loses upstream cache\nlocality at each window boundary.",
+              "default": 24
+            }
+          },
+          "additionalProperties": false,
+          "type": "object",
+          "description": "DomainShard holds settings for the domain_shard strategy."
         }
       },
       "additionalProperties": false,
@@ -1733,17 +1745,22 @@
             },
             "replayWeight": {
               "type": "integer",
-              "description": "real-query replay pool weight",
-              "default": 10
+              "description": "Source-weighted noise repartition (pick source by weight, then a domain\nwithin it — the list's ~1.8M count never affects source odds). Large spread\nso the user's own domains dominate: replay+corpus (visited) : list ≈ 20:1.\nCompanions are a separate, higher tier — triggered per real query\n(companionPct), so realistic page-load bursts dominate the noise overall.",
+              "default": 15
+            },
+            "corpusWeight": {
+              "type": "integer",
+              "description": "persistent all-time visited-domains corpus",
+              "default": 5
             },
             "listWeight": {
               "type": "integer",
-              "description": "Tranco 1M static list weight",
+              "description": "Tranco 1M public static list (thin breadth layer)",
               "default": 1
             },
             "activeHoursStart": {
               "type": "integer",
-              "description": "0-23; noise only within [start,end)",
+              "description": "0-23; full rate within [start,end), floor rate outside",
               "default": 0
             },
             "activeHoursEnd": {
@@ -1794,6 +1811,26 @@
               "type": "integer",
               "description": "% of real queries that trigger a browse-style companion cluster derived from that domain",
               "default": 40
+            },
+            "shadowTTL": {
+              "type": "boolean",
+              "description": "Wire-egress hardening.",
+              "default": true
+            },
+            "dualStackPct": {
+              "type": "integer",
+              "description": "% of A/AAAA decoys that also emit the sibling record (browser dual-stack)",
+              "default": 55
+            },
+            "offHoursFloorQPM": {
+              "type": "number",
+              "description": "always-on Poisson floor rate outside active hours (never gate fully to zero)",
+              "default": 0.5
+            },
+            "activeHoursEdgeJitterMin": {
+              "type": "integer",
+              "description": "± minutes of per-day jitter on the active-hours window edges",
+              "default": 30
             }
           },
           "additionalProperties": false,

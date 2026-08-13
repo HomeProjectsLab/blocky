@@ -158,8 +158,9 @@ func databaseMigration(db *gorm.DB, dbType config.QueryLogType, logRetentionDays
 		// acts as the primary key, so unlike the other targets no extra id column is
 		// added here (and SQLite cannot ALTER TABLE ... ADD a PRIMARY KEY column).
 
-		// sqlite additionally maintains the hourly aggregate tables for the UI stats API
-		if err := db.AutoMigrate(&aggHourly{}, &aggDomainHourly{}); err != nil {
+		// sqlite additionally maintains the hourly aggregate tables for the UI stats
+		// API and the persistent visited-domains noise corpus (decoy source, T3).
+		if err := db.AutoMigrate(&aggHourly{}, &aggDomainHourly{}, &noiseCorpus{}); err != nil {
 			return fmt.Errorf("failed to auto-migrate aggregate tables for querylog: %w", err)
 		}
 
@@ -324,12 +325,22 @@ func (d *DatabaseWriter) doDBWrite() error {
 				}
 
 				if d.aggregate {
-					return upsertAggregates(tx, batch)
+					if aggErr := upsertAggregates(tx, batch); aggErr != nil {
+						return aggErr
+					}
+
+					// persistent visited-domains corpus (T3) rides the same tx
+					return upsertNoiseCorpus(tx, batch)
 				}
 
 				return nil
 			})
 			err = multierror.Append(err, txErr)
+		}
+
+		// LRU-cap the persistent noise corpus once per flush (sqlite-only).
+		if d.aggregate {
+			err = multierror.Append(err, pruneNoiseCorpus(d.db))
 		}
 
 		// clear the slice with pending entries

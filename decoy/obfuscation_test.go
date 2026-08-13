@@ -22,13 +22,14 @@ import (
 
 // fpRow mirrors the log_entries columns SampleRealFingerprint reads.
 type fpRow struct {
-	RequestTS    time.Time `gorm:"column:request_ts"`
-	QuestionName string    `gorm:"column:question_name"`
-	QuestionType string    `gorm:"column:question_type"`
-	Decoy        bool      `gorm:"column:decoy"`
-	EDNSUDPSize  uint16    `gorm:"column:edns_udp_size"`
-	EDNSOptCodes string    `gorm:"column:edns_opt_codes"`
-	FpDetail     string    `gorm:"column:fp_detail"`
+	RequestTS     time.Time `gorm:"column:request_ts"`
+	QuestionName  string    `gorm:"column:question_name"`
+	QuestionType  string    `gorm:"column:question_type"`
+	Decoy         bool      `gorm:"column:decoy"`
+	EDNSUDPSize   uint16    `gorm:"column:edns_udp_size"`
+	EDNSOptCodes  string    `gorm:"column:edns_opt_codes"`
+	FpDetail      string    `gorm:"column:fp_detail"`
+	EffectiveTLDP string    `gorm:"column:effective_tld_p"` // read by SampleFingerprintForName
 }
 
 func (fpRow) TableName() string { return "log_entries" }

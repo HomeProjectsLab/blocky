@@ -23,13 +23,14 @@ import (
 )
 
 type realRow struct {
-	RequestTS    time.Time `gorm:"column:request_ts"`
-	QuestionName string    `gorm:"column:question_name"`
-	QuestionType string    `gorm:"column:question_type"`
-	Decoy        bool      `gorm:"column:decoy"`
-	EDNSUDPSize  uint16    `gorm:"column:edns_udp_size"`
-	EDNSOptCodes string    `gorm:"column:edns_opt_codes"`
-	FpDetail     string    `gorm:"column:fp_detail"`
+	RequestTS     time.Time `gorm:"column:request_ts"`
+	QuestionName  string    `gorm:"column:question_name"`
+	QuestionType  string    `gorm:"column:question_type"`
+	Decoy         bool      `gorm:"column:decoy"`
+	EDNSUDPSize   uint16    `gorm:"column:edns_udp_size"`
+	EDNSOptCodes  string    `gorm:"column:edns_opt_codes"`
+	FpDetail      string    `gorm:"column:fp_detail"`
+	EffectiveTLDP string    `gorm:"column:effective_tld_p"` // read by SampleFingerprintForName
 }
 
 func (realRow) TableName() string { return "log_entries" }
@@ -106,6 +107,7 @@ var _ = Describe("Engine", func() {
 			Expect(e).Should(Succeed())
 
 			cfg.ReplayWeight = 10
+			cfg.CorpusWeight = 0 // isolate replay vs list (corpus is empty here anyway)
 			cfg.ListWeight = 1
 			eng := NewEngine(cfg, src, nil)
 
@@ -156,6 +158,8 @@ var _ = Describe("Engine", func() {
 
 			cfg.MissChaffPct = 0 // keep this test 1:1 (fan-out toggles have their own tests)
 			cfg.ClusterPct = 0
+			cfg.DualStackPct = 0  // no A+AAAA pairing fan-out either
+			cfg.ShadowTTL = false // same domain repeated 20x would otherwise self-suppress
 
 			var captured []*model.Request
 			eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {
@@ -173,7 +177,8 @@ var _ = Describe("Engine", func() {
 				Expect(req.Bypass).Should(BeTrue())
 				Expect(req.Decoy).Should(BeTrue())
 				Expect(req.Req.Question).ShouldNot(BeEmpty())
-				Expect(req.Req.Question[0].Qtype).Should(BeElementOf(dns.TypeA, dns.TypeAAAA))
+				Expect(req.Req.Question[0].Qtype).Should(
+					BeElementOf(dns.TypeA, dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB))
 			}
 		})
 	})
@@ -189,6 +194,7 @@ var _ = Describe("Engine", func() {
 		It("skips outside the configured window", func() {
 			cfg.ActiveHoursStart = 9
 			cfg.ActiveHoursEnd = 17
+			cfg.ActiveHoursEdgeJitterMin = 0 // deterministic boundaries for this assertion
 			eng := NewEngine(cfg, nil, nil)
 
 			at := func(h int) time.Time { return time.Date(2026, 1, 1, h, 0, 0, 0, time.UTC) }

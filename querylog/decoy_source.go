@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/0xERR0R/blocky/log"
@@ -26,6 +29,17 @@ const decoyReplayWindow = 7 * 24 * time.Hour
 // decoySeedBatch is the insert batch size used when seeding decoy_domains, so a
 // 1M-row list never materializes as a single in-RAM slice or one giant INSERT.
 const decoySeedBatch = 2000
+
+// noiseCorpusCap bounds the persistent visited-domains corpus (LRU by last_seen).
+// ~100k domains is well beyond any household's real footprint yet keeps the table
+// small (a few MB) and COUNT/prune cheap. A var (not const) only so the prune test
+// can lower it; not config — no knob until someone actually needs to tune it.
+var noiseCorpusCap int64 = 100_000
+
+// blockResampleTries bounds the reject-and-resample loop when a sampled decoy
+// domain turns out to be blocked: after this many blocked draws we give up and
+// return "" rather than ever emitting a domain the box would itself block.
+const blockResampleTries = 8
 
 // DecoySource is a read-write handle on the query-log sqlite database used by
 // the decoy engine. It co-locates two noise sources on one connection: the
@@ -76,7 +90,7 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 		return nil, fmt.Errorf("can't open query log database for decoy source: %w", err)
 	}
 
-	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}); err != nil {
+	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}); err != nil {
 		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
 
@@ -160,15 +174,45 @@ func (s *DecoySource) SeedIfEmpty(r io.Reader) (int, error) {
 	return inserted, s.loadMaxRowid()
 }
 
-// SampleList returns a random domain from the static list by picking a random
-// rowid and taking the first row at or after it (gap-tolerant). Empty string
-// when the list is not seeded.
+// SampleList returns a domain from the static Tranco list, biased toward popular
+// (head) ranks and never returning a domain the box would itself block.
+//
+// Distribution: rows are inserted in Tranco rank order, so rowid == rank. We draw
+// rowid = floor(max^U), U~Uniform[0,1), giving density P(rowid=r) ∝ 1/r (Zipf,
+// s≈1) — a realistic web-popularity shape where head domains recur often but the
+// long tail still surfaces, instead of the old uniform draw that made rank 1 and
+// rank 1,000,000 equally likely. O(1): one uniform draw, one pow, one indexed
+// gap-tolerant row fetch.
+//
+// Blocked domains (present in blocklist_domains) are rejected and resampled up to
+// blockResampleTries times; on exhaustion returns "". Empty string also when the
+// list is not seeded.
 func (s *DecoySource) SampleList() (string, error) {
+	for i := 0; i < blockResampleTries; i++ {
+		domain, err := s.sampleListOnce()
+		if err != nil || domain == "" {
+			return domain, err
+		}
+
+		blocked, err := s.IsBlockedDomain(domain)
+		if err != nil {
+			return "", err
+		}
+
+		if !blocked {
+			return domain, nil
+		}
+	}
+
+	return "", nil
+}
+
+func (s *DecoySource) sampleListOnce() (string, error) {
 	s.mu.Lock()
 	max := s.maxRowid
 	k := int64(0)
 	if max > 0 {
-		k = s.rnd.Int63n(max) + 1
+		k = zipfRowid(s.rnd.Float64(), max)
 	}
 	s.mu.Unlock()
 
@@ -180,6 +224,46 @@ func (s *DecoySource) SampleList() (string, error) {
 	err := s.db.Raw("SELECT domain FROM decoy_domains WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&domain).Error
 
 	return domain, err
+}
+
+// zipfRowid maps a uniform draw u in [0,1) to a rowid in [1,max] with density
+// proportional to 1/rowid (Zipf, s≈1): rowid = floor(max^u) has CDF u, so lower
+// (more popular) rowids are drawn far more often while the tail stays reachable.
+func zipfRowid(u float64, max int64) int64 {
+	k := int64(math.Pow(float64(max), u))
+	if k < 1 {
+		k = 1
+	}
+
+	if k > max {
+		k = max
+	}
+
+	return k
+}
+
+// IsBlockedDomain reports whether domain is in the active denylist corpus
+// (blocklist_domains, which holds only the enabled categories), via an exact
+// indexed lookup on the domain column (idx_blocklist_domain). A domain the box
+// would BLOCK must never be one it EMITS as chaff.
+//
+// ponytail: exact match only. It does not catch a decoy that is a SUBDOMAIN of a
+// blocked parent, nor manual denylist_entry rows (those live in the separate
+// configstore DB — a cross-DB check isn't worth a second connection here). Upgrade
+// to a parent-walk / eTLD+1 check if subdomain leakage ever matters.
+func (s *DecoySource) IsBlockedDomain(domain string) (bool, error) {
+	if domain == "" {
+		return false, nil
+	}
+
+	var one int
+
+	err := s.db.Raw("SELECT 1 FROM blocklist_domains WHERE domain = ? LIMIT 1", domain).Scan(&one).Error
+	if err != nil {
+		return false, err
+	}
+
+	return one == 1, nil
 }
 
 // HourlyRealCounts returns real (non-decoy) query counts bucketed by UTC
@@ -221,35 +305,24 @@ type FpSample struct {
 	Mixed0x20    bool     // real qname carried mixed (0x20-randomized) case
 }
 
-// SampleRealFingerprint returns the wire shape of one random recent real query
-// so decoys can be stamped to match the real client-software distribution
-// (otherwise every synthetic query looks like the resolver's default). Zero
-// value (HadEDNS0 false) at cold start — caller then leaves the plain query.
-func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
-	since := time.Now().Add(-decoyReplayWindow)
+// fpRow is the set of log_entries columns that reconstruct a wire fingerprint.
+type fpRow struct {
+	QuestionType string `gorm:"column:question_type"`
+	EDNSUDPSize  uint16 `gorm:"column:edns_udp_size"`
+	EDNSOptCodes string `gorm:"column:edns_opt_codes"`
+	FpDetail     string `gorm:"column:fp_detail"`
+}
 
-	var row struct {
-		QuestionType string `gorm:"column:question_type"`
-		EDNSUDPSize  uint16 `gorm:"column:edns_udp_size"`
-		EDNSOptCodes string `gorm:"column:edns_opt_codes"`
-		FpDetail     string `gorm:"column:fp_detail"`
-	}
-
-	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
-		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
-		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
-	if err != nil {
-		return FpSample{}, err
-	}
-
+// toFpSample maps the stored columns + fp_detail JSON blob into an FpSample.
+func (r fpRow) toFpSample() FpSample {
 	fp := FpSample{
-		Qtype:        row.QuestionType,
-		EDNSUDPSize:  row.EDNSUDPSize,
-		EDNSOptCodes: parseOptCodes(row.EDNSOptCodes),
+		Qtype:        r.QuestionType,
+		EDNSUDPSize:  r.EDNSUDPSize,
+		EDNSOptCodes: parseOptCodes(r.EDNSOptCodes),
 	}
 
 	// DO/HadEDNS0/qclass/cookie/0x20 live inside the fp_detail JSON blob.
-	if row.FpDetail != "" {
+	if r.FpDetail != "" {
 		var d struct {
 			QClass    uint16 `json:"qclass"`
 			DO        bool   `json:"do"`
@@ -258,7 +331,7 @@ func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
 			Mixed0x20 bool   `json:"mixed0x20"`
 		}
 
-		if json.Unmarshal([]byte(row.FpDetail), &d) == nil {
+		if json.Unmarshal([]byte(r.FpDetail), &d) == nil {
 			fp.QClass = d.QClass
 			fp.DO = d.DO
 			fp.HadEDNS0 = d.HadEDNS0
@@ -267,7 +340,67 @@ func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
 		}
 	}
 
-	return fp, nil
+	return fp
+}
+
+// SampleRealFingerprint returns the wire shape of one random recent real query
+// so decoys can be stamped to match the real client-software distribution
+// (otherwise every synthetic query looks like the resolver's default). Zero
+// value (HadEDNS0 false) at cold start — caller then leaves the plain query.
+// Use this for list/corpus domains that have no real history of their own; use
+// SampleFingerprintForName when replaying a name the box has actually resolved.
+func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var row fpRow
+
+	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
+		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
+	if err != nil {
+		return FpSample{}, err
+	}
+
+	return row.toFpSample(), nil
+}
+
+// SampleFingerprintForName returns the wire fingerprint most recently observed
+// for name's eTLD+1, so a given decoy domain presents a STABLE, plausible OPT
+// shape across re-emissions — a domain whose OPT shape flickers between
+// appearances is itself a tell. Falls back to SampleRealFingerprint (a random
+// recent real fp) when this box has never resolved that eTLD+1, e.g. a Tranco or
+// corpus domain that was never a real query here. No time window: a stable shape
+// for a domain visited months ago still beats an unrelated random one.
+func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
+	etldp := effectiveTLDP(name)
+	if etldp == "" {
+		return s.SampleRealFingerprint()
+	}
+
+	var row fpRow
+
+	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+		WHERE decoy = 0 AND effective_tld_p = ?
+		ORDER BY request_ts DESC LIMIT 1`, etldp).Scan(&row).Error
+	if err != nil {
+		return FpSample{}, err
+	}
+
+	if row.QuestionType == "" { // no real history for this eTLD+1
+		return s.SampleRealFingerprint()
+	}
+
+	return row.toFpSample(), nil
+}
+
+// effectiveTLDP returns name's registrable domain (eTLD+1), or "" if it has none.
+func effectiveTLDP(name string) string {
+	e, err := publicsuffix.EffectiveTLDPlusOne(strings.TrimSuffix(name, "."))
+	if err != nil {
+		return ""
+	}
+
+	return e
 }
 
 // parseOptCodes turns the stored "10,8,12" wire-order column into codes. Bad
@@ -290,14 +423,178 @@ func parseOptCodes(s string) []uint16 {
 }
 
 // SampleRecentReal returns up to limit real (non-decoy) queries sampled at
-// random from the recent window. Empty slice at cold start (no history yet).
+// random from the recent window, excluding any name the box would itself block
+// (set-based NOT EXISTS against blocklist_domains, so no resample loop is needed).
+// Empty slice at cold start (no history yet).
 func (s *DecoySource) SampleRecentReal(limit int) ([]RealQuery, error) {
 	since := time.Now().Add(-decoyReplayWindow)
 
 	var out []RealQuery
 	err := s.db.Raw(`SELECT question_name, question_type FROM log_entries
 		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
+		AND NOT EXISTS (SELECT 1 FROM blocklist_domains b WHERE b.domain = log_entries.question_name)
 		ORDER BY RANDOM() LIMIT ?`, since, limit).Scan(&out).Error
 
 	return out, err
+}
+
+// --- persistent visited-domains noise corpus (T3) ---------------------------
+
+// noiseCorpus is the PER-INSTANCE, NEVER-EXPORTED durable record of every domain
+// this box's own clients have ever resolved (real, non-blocked queries). Unlike
+// the 7-day log window that SampleRecentReal reads, a domain visited once stays
+// available as chaff forever, so a personal/rare domain (bank, *.lan, internal
+// SSO) can't be unmasked by an observer who simply notes it stopped appearing.
+// LRU-capped at noiseCorpusCap by last_seen.
+//
+// PRIVACY: this table is a fingerprint of the household's browsing history. It is
+// per-instance state and MUST NEVER be exported, synced, or shared off the box.
+type noiseCorpus struct {
+	Domain    string    `gorm:"column:domain;primaryKey"`
+	FirstSeen time.Time `gorm:"column:first_seen"`
+	LastSeen  time.Time `gorm:"column:last_seen;index"`
+	Hits      int64     `gorm:"column:hits"`
+}
+
+func (noiseCorpus) TableName() string { return "noise_corpus" }
+
+// upsertNoiseCorpus folds a raw batch into noise_corpus inside tx: every real
+// (non-decoy), non-blocked, non-empty question_name bumps hits and last_seen and
+// records first_seen once. Blocked rows (ResponseType == "BLOCKED") are skipped so
+// the box never learns to emit what it blocks. sqlite-only; called from
+// DatabaseWriter.doDBWrite in the same transaction as the raw insert + aggregates.
+func upsertNoiseCorpus(tx *gorm.DB, entries []*logEntry) error {
+	agg := map[string]*noiseCorpus{}
+
+	for _, e := range entries {
+		if e.Decoy || e.ResponseType == "BLOCKED" || e.QuestionName == "" {
+			continue
+		}
+
+		c := agg[e.QuestionName]
+		if c == nil {
+			c = &noiseCorpus{Domain: e.QuestionName, FirstSeen: e.RequestTS, LastSeen: e.RequestTS}
+			agg[e.QuestionName] = c
+		}
+
+		c.Hits++
+
+		if e.RequestTS.Before(c.FirstSeen) {
+			c.FirstSeen = e.RequestTS
+		}
+
+		if e.RequestTS.After(c.LastSeen) {
+			c.LastSeen = e.RequestTS
+		}
+	}
+
+	if len(agg) == 0 {
+		return nil
+	}
+
+	rows := make([]*noiseCorpus, 0, len(agg))
+	for _, c := range agg {
+		rows = append(rows, c)
+	}
+
+	// first_seen is deliberately not in DoUpdates: keep the earliest observation.
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "domain"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"hits":      gorm.Expr("hits + excluded.hits"),
+			"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+		}),
+	}).Create(&rows).Error
+}
+
+// pruneNoiseCorpus enforces the LRU cap: when the corpus exceeds noiseCorpusCap it
+// deletes the oldest-by-last_seen rows down to the cap. Called once per flush from
+// doDBWrite (not per batch).
+//
+// ponytail: naive COUNT-per-flush; at the 100k cap it is a few ms on the write
+// connection. Maintain a running counter if flush latency ever shows up.
+func pruneNoiseCorpus(tx *gorm.DB) error {
+	var n int64
+	if err := tx.Raw("SELECT COUNT(*) FROM noise_corpus").Scan(&n).Error; err != nil {
+		return err
+	}
+
+	if n <= noiseCorpusCap {
+		return nil
+	}
+
+	return tx.Exec(`DELETE FROM noise_corpus WHERE domain IN (
+		SELECT domain FROM noise_corpus ORDER BY last_seen ASC LIMIT ?)`, n-noiseCorpusCap).Error
+}
+
+// SampleCorpus samples a domain from the persistent visited-domains corpus,
+// mildly biased toward heavy hitters (best-of-two by hits: two uniform
+// random-rowid draws, higher-hits wins) so popular personal domains recur more
+// often without dominating. Rejects blocked domains (resample up to
+// blockResampleTries). Empty string when the corpus is empty. Cheap: O(1) indexed
+// lookups per draw.
+//
+// PER-INSTANCE ONLY — this samples the box's own browsing history; never shared.
+func (s *DecoySource) SampleCorpus() (string, error) {
+	for i := 0; i < blockResampleTries; i++ {
+		domain, err := s.sampleCorpusOnce()
+		if err != nil || domain == "" {
+			return domain, err
+		}
+
+		blocked, err := s.IsBlockedDomain(domain)
+		if err != nil {
+			return "", err
+		}
+
+		if !blocked {
+			return domain, nil
+		}
+	}
+
+	return "", nil
+}
+
+func (s *DecoySource) sampleCorpusOnce() (string, error) {
+	var max int64
+	if err := s.db.Raw("SELECT COALESCE(MAX(rowid),0) FROM noise_corpus").Scan(&max).Error; err != nil {
+		return "", err
+	}
+
+	if max == 0 {
+		return "", nil
+	}
+
+	aDomain, aHits, err := s.corpusRowAt(max)
+	if err != nil {
+		return "", err
+	}
+
+	bDomain, bHits, err := s.corpusRowAt(max)
+	if err != nil {
+		return "", err
+	}
+
+	if bHits > aHits {
+		return bDomain, nil
+	}
+
+	return aDomain, nil
+}
+
+// corpusRowAt draws one random rowid in [1,max] and returns the first row at or
+// after it (gap-tolerant across LRU-pruned holes).
+func (s *DecoySource) corpusRowAt(max int64) (string, int64, error) {
+	s.mu.Lock()
+	k := s.rnd.Int63n(max) + 1
+	s.mu.Unlock()
+
+	var row struct {
+		Domain string `gorm:"column:domain"`
+		Hits   int64  `gorm:"column:hits"`
+	}
+
+	err := s.db.Raw("SELECT domain, hits FROM noise_corpus WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&row).Error
+
+	return row.Domain, row.Hits, err
 }

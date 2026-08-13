@@ -56,6 +56,7 @@ var _ = Describe("Decoy fingerprint on the wire", func() {
 		cfg.ClusterPct = 0       // no fan-out
 		cfg.ReplayMutate = false // don't perturb the replayed query
 		cfg.ReplayWeight = 1
+		cfg.CorpusWeight = 0
 		cfg.ListWeight = 0
 
 		received = nil
@@ -101,7 +102,8 @@ var _ = Describe("Decoy fingerprint on the wire", func() {
 		// 4096 >= the upstream UDP buffer floor, so no normalization masks it.
 		src := newSourceDB([]realRow{{
 			RequestTS: time.Now(), QuestionName: "target.example", QuestionType: "A",
-			EDNSUDPSize: 4096, EDNSOptCodes: "10,3",
+			EffectiveTLDP: "target.example",
+			EDNSUDPSize:   4096, EDNSOptCodes: "10,3",
 			FpDetail: `{"qclass":1,"do":true,"hadEdns0":true,"hasCookie":true,"mixed0x20":true}`,
 		}})
 

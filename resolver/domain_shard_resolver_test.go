@@ -111,6 +111,51 @@ var _ = Describe("DomainShardResolver", Label("domainShardResolver"), func() {
 		})
 	})
 
+	Describe("salt rotation", func() {
+		domains := func() []string {
+			out := make([]string, 200)
+			for i := range out {
+				out[i] = fmt.Sprintf("domain%d.com", i)
+			}
+
+			return out
+		}
+
+		It("maps a domain consistently within a period (same salt)", func() {
+			for _, d := range domains() {
+				Expect(shardIndex(42, d, 4)).Should(Equal(shardIndex(42, d, 4)))
+			}
+		})
+
+		It("moves some domains when the salt changes", func() {
+			moved := 0
+
+			for _, d := range domains() {
+				if shardIndex(1, d, 4) != shardIndex(2, d, 4) {
+					moved++
+				}
+			}
+
+			// most domains should land elsewhere after a rotation
+			Expect(moved).Should(BeNumerically(">", len(domains())/2))
+		})
+
+		It("keeps the N-upstream distribution balanced after rotation", func() {
+			const n = 4
+
+			for _, salt := range []uint64{0, 1, 7, 99} {
+				counts := make([]int, n)
+				for _, d := range domains() {
+					counts[shardIndex(salt, d, n)]++
+				}
+
+				for _, c := range counts {
+					Expect(c).Should(BeNumerically(">", 0))
+				}
+			}
+		})
+	})
+
 	Describe("failover", func() {
 		BeforeEach(func() {
 			startMocks(1)

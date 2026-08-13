@@ -27,9 +27,15 @@ type PrivacyConfig struct {
 type DecoyConfig struct {
 	Enable           bool    `yaml:"enable" default:"false"`
 	QueriesPerMinute float64 `yaml:"queriesPerMinute" default:"4"`
-	ReplayWeight     uint    `yaml:"replayWeight" default:"10"`    // real-query replay pool weight
-	ListWeight       uint    `yaml:"listWeight" default:"1"`       // Tranco 1M static list weight
-	ActiveHoursStart int     `yaml:"activeHoursStart" default:"0"` // 0-23; noise only within [start,end)
+	// Source-weighted noise repartition (pick source by weight, then a domain
+	// within it — the list's ~1.8M count never affects source odds). Large spread
+	// so the user's own domains dominate: replay+corpus (visited) : list ≈ 20:1.
+	// Companions are a separate, higher tier — triggered per real query
+	// (companionPct), so realistic page-load bursts dominate the noise overall.
+	ReplayWeight uint `yaml:"replayWeight" default:"15"` // recent-real replay pool (7-day window)
+	CorpusWeight uint `yaml:"corpusWeight" default:"5"`  // persistent all-time visited-domains corpus
+	ListWeight   uint `yaml:"listWeight" default:"1"`    // Tranco 1M public static list (thin breadth layer)
+	ActiveHoursStart int     `yaml:"activeHoursStart" default:"0"` // 0-23; full rate within [start,end), floor rate outside
 	ActiveHoursEnd   int     `yaml:"activeHoursEnd" default:"24"`  // 1-24
 	RefreshURL       string  `yaml:"refreshURL"`                   // optional live list source; empty = embedded
 
@@ -44,6 +50,12 @@ type DecoyConfig struct {
 	// Reactive obfuscation: track live real traffic instead of the 7-day historical shape.
 	ReactiveVolume bool `yaml:"reactiveVolume" default:"true"` // rate tracks live recent real QPS (± jitter); historical diurnal is the cold-start fallback
 	CompanionPct   uint `yaml:"companionPct" default:"40"`     // % of real queries that trigger a browse-style companion cluster derived from that domain
+
+	// Wire-egress hardening.
+	ShadowTTL                bool    `yaml:"shadowTTL" default:"true"`              // suppress re-emitting a decoy (name,qtype) within its own observed answer TTL
+	DualStackPct             uint    `yaml:"dualStackPct" default:"55"`             // % of A/AAAA decoys that also emit the sibling record (browser dual-stack)
+	OffHoursFloorQPM         float64 `yaml:"offHoursFloorQPM" default:"0.5"`        // always-on Poisson floor rate outside active hours (never gate fully to zero)
+	ActiveHoursEdgeJitterMin int     `yaml:"activeHoursEdgeJitterMin" default:"30"` // ± minutes of per-day jitter on the active-hours window edges
 }
 
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.
@@ -83,8 +95,20 @@ func (c *DecoyConfig) validate() error {
 			c.ActiveHoursStart, c.ActiveHoursEnd)
 	}
 
-	if c.ReplayWeight == 0 && c.ListWeight == 0 {
-		return fmt.Errorf("privacy.decoy: replayWeight and listWeight must not both be zero when enabled")
+	if c.ReplayWeight == 0 && c.CorpusWeight == 0 && c.ListWeight == 0 {
+		return fmt.Errorf("privacy.decoy: replayWeight, corpusWeight and listWeight must not all be zero when enabled")
+	}
+
+	if c.DualStackPct > 100 {
+		return fmt.Errorf("privacy.decoy: dualStackPct (%d) must be in [0, 100]", c.DualStackPct)
+	}
+
+	if c.OffHoursFloorQPM < 0 {
+		return fmt.Errorf("privacy.decoy: offHoursFloorQPM (%.2f) must be >= 0", c.OffHoursFloorQPM)
+	}
+
+	if c.ActiveHoursEdgeJitterMin < 0 || c.ActiveHoursEdgeJitterMin > 720 {
+		return fmt.Errorf("privacy.decoy: activeHoursEdgeJitterMin (%d) must be in [0, 720]", c.ActiveHoursEdgeJitterMin)
 	}
 
 	if c.MissChaffPct > 100 {

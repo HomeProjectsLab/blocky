@@ -33,12 +33,25 @@ type Upstreams struct {
 	QUIC QUICConfig `yaml:"quic"`
 	// Per-group settings overriding the global strategy.
 	GroupConfig map[string]UpstreamGroupConfig `yaml:"groupConfig"`
+	// DomainShard holds settings for the domain_shard strategy.
+	DomainShard DomainShardConfig `yaml:"domainShard"`
 	// EDNSPadding pads outgoing queries on encrypted transports (DoT/DoH/DoQ) to a block
 	// boundary (RFC 7830). Runtime-derived from privacy.ednsPadding, not user-set here.
 	EDNSPadding bool `yaml:"-"`
 	// QueryCaseRandomization applies DNS 0x20 case randomization to outgoing forwarded
 	// queries. Runtime-derived from privacy.queryCaseRandomization, not user-set here.
 	QueryCaseRandomization bool `yaml:"-"`
+}
+
+// DomainShardConfig holds settings for the domain_shard strategy.
+type DomainShardConfig struct {
+	// Hours between shard-salt rotations. The domain->upstream mapping is stable
+	// within a rotation window and moves across windows, so no single upstream
+	// keeps a permanent stable slice of the user's domains. 0 disables rotation
+	// (a permanent, fingerprintable mapping). Trade-off: rotation spreads a
+	// domain's history across upstreams over time but loses upstream cache
+	// locality at each window boundary.
+	RotateHours uint `yaml:"rotateHours" default:"24"`
 }
 
 // UpstreamGroupConfig holds per-group settings overriding the global ones.

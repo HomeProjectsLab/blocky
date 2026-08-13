@@ -2,11 +2,13 @@ package resolver
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/model"
@@ -68,6 +70,36 @@ func shardKey(qName string) string {
 	return domain
 }
 
+// shardSalt returns the current rotation salt: the number of whole rotation
+// windows since the epoch. It is constant within a window and increments across
+// windows, so the mapping is deterministic per-window yet drifts over time.
+//
+// Derived purely from the clock, so there is no shared mutable salt to swap and
+// the "atomic salt" is inherently lock-free — no rotation goroutine needed.
+// ponytail: clock-derived salt instead of a background atomic swap; add a timer
+// only if rotation must fire on some signal other than wall-clock windows.
+func (r *DomainShardResolver) shardSalt() uint64 {
+	hours := r.cfg.DomainShard.RotateHours
+	if hours == 0 { // rotation disabled -> stable mapping
+		return 0
+	}
+
+	return uint64(time.Now().Unix()) / (uint64(hours) * 3600)
+}
+
+// shardIndex maps a shard key to an upstream index, mixing the rotation salt into
+// the hash so the same key lands on a different upstream once the salt rotates.
+func shardIndex(salt uint64, key string, n int) uint64 {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], salt)
+
+	h := fnv.New64a()
+	_, _ = h.Write(buf[:])
+	_, _ = h.Write([]byte(key))
+
+	return h.Sum64() % uint64(n)
+}
+
 // Resolve delegates the request to the upstream the query's eTLD+1 hashes to,
 // walking the ring to the next upstream on failure.
 func (r *DomainShardResolver) Resolve(ctx context.Context, request *model.Request) (*model.Response, error) {
@@ -75,9 +107,7 @@ func (r *DomainShardResolver) Resolve(ctx context.Context, request *model.Reques
 
 	resolvers := *r.resolvers.Load()
 
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(shardKey(request.Req.Question[0].Name)))
-	start := h.Sum64() % uint64(len(resolvers))
+	start := shardIndex(r.shardSalt(), shardKey(request.Req.Question[0].Name), len(resolvers))
 
 	errs := make([]error, 0, len(resolvers))
 
