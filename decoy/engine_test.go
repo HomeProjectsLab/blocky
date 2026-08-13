@@ -4,8 +4,10 @@ package decoy
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -200,6 +202,187 @@ var _ = Describe("Engine", func() {
 		It("returns a positive randomized duration", func() {
 			eng := NewEngine(cfg, nil, nil)
 			Expect(eng.nextInterval()).Should(BeNumerically(">", time.Duration(0)))
+		})
+	})
+
+	// feedReal marshals a real (or decoy) query-log event as the Hub does and
+	// pushes it through the engine's tap, exactly like the live subscription.
+	feedReal := func(eng *Engine, ctx context.Context, question string, decoy bool) {
+		data, e := json.Marshal(querylog.QueryItem{Question: question, Qtype: "A", Decoy: decoy})
+		Expect(e).Should(Succeed())
+		eng.tap(ctx, data)
+	}
+
+	Describe("rolling real-QPS counter", func() {
+		It("counts real events in the window and ignores decoy-flagged ones", func() {
+			eng := NewEngine(cfg, newSourceDB(nil), nil)
+			eng.cfg.CompanionPct = 0 // isolate the counter from companion side effects
+
+			base := time.Now()
+			eng.now = func() time.Time { return base }
+
+			for i := 0; i < 5; i++ {
+				feedReal(eng, context.Background(), "real.example", false)
+			}
+			// decoy-flagged events must not count (feedback guard)
+			for i := 0; i < 3; i++ {
+				feedReal(eng, context.Background(), "decoy.example", true)
+			}
+
+			Expect(eng.recentRealCount()).Should(Equal(5))
+		})
+
+		It("ages events out of the window", func() {
+			eng := NewEngine(cfg, newSourceDB(nil), nil)
+			eng.cfg.CompanionPct = 0
+
+			t := time.Now()
+			eng.now = func() time.Time { return t }
+
+			feedReal(eng, context.Background(), "old.example", false)
+			Expect(eng.recentRealCount()).Should(Equal(1))
+
+			// jump past the window; the old event must fall out
+			t = t.Add(realWindow + time.Second)
+			Expect(eng.recentRealCount()).Should(Equal(0))
+		})
+	})
+
+	Describe("reactive rate", func() {
+		It("emits faster under live load than when quiet, and varies", func() {
+			eng := NewEngine(cfg, newSourceDB(nil), nil)
+			eng.cfg.ReactiveVolume = true
+			eng.cfg.CompanionPct = 0 // isolate rate from companion side effects
+			eng.cfg.DiurnalShaping = false
+			eng.cfg.QueriesPerMinute = 4
+
+			base := time.Now()
+			eng.now = func() time.Time { return base }
+
+			// quiet: no live events → cold-start fallback (base rate)
+			quietQPM := eng.effectiveQPM()
+			Expect(quietQPM).Should(Equal(4.0))
+
+			// busy: many real events in the window → much higher rate
+			for i := 0; i < 120; i++ {
+				feedReal(eng, context.Background(), "real.example", false)
+			}
+
+			seen := map[float64]struct{}{}
+			for i := 0; i < 30; i++ {
+				n, qpm := eng.reactiveQPM()
+				Expect(n).Should(Equal(120))
+				// 120 real queries in a 60s window ≈ 120 QPM ± jitter, well above quiet
+				Expect(qpm).Should(BeNumerically(">", 100))
+				seen[qpm] = struct{}{}
+			}
+			// the ± random jitter term should produce more than one value
+			Expect(len(seen)).Should(BeNumerically(">", 1))
+		})
+
+		It("falls back to the diurnal/base path at cold start", func() {
+			eng := NewEngine(cfg, newSourceDB(nil), nil)
+			eng.cfg.ReactiveVolume = true
+			eng.cfg.QueriesPerMinute = 4
+			eng.cfg.DiurnalShaping = false
+
+			// no live events (< minLiveEvents) → effectiveQPM uses the base rate
+			Expect(eng.effectiveQPM()).Should(Equal(4.0))
+		})
+	})
+
+	Describe("browse-triggered companions", func() {
+		newCapturingEngine := func() (*Engine, func() []*model.Request) {
+			src := newSourceDB(nil)
+			_, e := src.SeedIfEmpty(strings.NewReader("poolnoise.example\n"))
+			Expect(e).Should(Succeed())
+
+			var mu sync.Mutex
+			var captured []*model.Request
+			eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {
+				mu.Lock()
+				captured = append(captured, req)
+				mu.Unlock()
+
+				return &model.Response{Res: new(dns.Msg)}, nil
+			})
+
+			return eng, func() []*model.Request {
+				mu.Lock()
+				defer mu.Unlock()
+
+				return append([]*model.Request(nil), captured...)
+			}
+		}
+
+		It("derives www.<eTLD+1> and a capped burst from the domain", func() {
+			eng, _ := newCapturingEngine()
+
+			for i := 0; i < 20; i++ {
+				burst := eng.companionsFor("sub.example.com")
+				Expect(len(burst)).Should(BeNumerically(">=", 2))
+				Expect(len(burst)).Should(BeNumerically("<=", 4))
+
+				names := make([]string, len(burst))
+				for j, q := range burst {
+					names[j] = q.name
+				}
+				Expect(names).Should(ContainElement("www.example.com")) // eTLD+1, not sub.
+			}
+		})
+
+		It("fires a burst of Bypass+Decoy companions for a real query (pct=100)", func() {
+			eng, snapshot := newCapturingEngine()
+			eng.cfg.CompanionPct = 100
+
+			feedReal(eng, context.Background(), "example.com", false)
+
+			Eventually(snapshot, "3s", "20ms").Should(Not(BeEmpty()))
+			Eventually(func() bool {
+				reqs := snapshot()
+				for _, r := range reqs {
+					q := r.Req.Question[0].Name
+					if q == "www.example.com." {
+						return true
+					}
+				}
+
+				return false
+			}, "3s", "20ms").Should(BeTrue())
+
+			for _, r := range snapshot() {
+				Expect(r.Bypass).Should(BeTrue())
+				Expect(r.Decoy).Should(BeTrue())
+			}
+		})
+
+		It("fires nothing for a decoy-flagged event (feedback guard)", func() {
+			eng, snapshot := newCapturingEngine()
+			eng.cfg.CompanionPct = 100
+
+			feedReal(eng, context.Background(), "example.com", true) // decoy=true
+
+			Consistently(snapshot, "300ms", "20ms").Should(BeEmpty())
+			Expect(eng.recentRealCount()).Should(Equal(0)) // also not counted
+		})
+
+		It("fires nothing when CompanionPct is 0", func() {
+			eng, snapshot := newCapturingEngine()
+			eng.cfg.CompanionPct = 0
+
+			feedReal(eng, context.Background(), "example.com", false)
+
+			Consistently(snapshot, "300ms", "20ms").Should(BeEmpty())
+		})
+
+		It("bounds the randomized companion delay", func() {
+			eng, _ := newCapturingEngine()
+
+			for i := 0; i < 100; i++ {
+				d := eng.companionDelay()
+				Expect(d).Should(BeNumerically(">=", companionDelayMinMs*time.Millisecond))
+				Expect(d).Should(BeNumerically("<", (companionDelayMinMs+companionDelaySpreadMs)*time.Millisecond))
+			}
 		})
 	})
 })

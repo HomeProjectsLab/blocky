@@ -3,14 +3,18 @@ package decoy
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"math/rand"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/log"
@@ -18,6 +22,25 @@ import (
 	"github.com/0xERR0R/blocky/model"
 	"github.com/0xERR0R/blocky/querylog"
 	"github.com/0xERR0R/blocky/util"
+)
+
+// Reactive-obfuscation tuning (technique 1 live-volume + technique 6 companions).
+const (
+	// realWindow is the rolling window over which live real QPS is measured.
+	realWindow = 60 * time.Second
+	// reactiveJitterQPM is the ± masking term (queries/min) added to the live
+	// rate each interval, so the decoy rate never exactly equals the real rate.
+	reactiveJitterQPM = 3
+	// minLiveEvents is how many real queries must sit in the window before the
+	// live rate is trusted; below it we fall back to the historical diurnal path.
+	minLiveEvents = 2
+	// minReactiveQPM floors the reactive rate so a lull with a little live signal
+	// still emits some cover and the interval never explodes.
+	minReactiveQPM = 0.5
+	// companionDelayMinMs/SpreadMs bound the randomized inter-companion delay,
+	// mimicking sub-resource timing of a page load (tens to hundreds of ms).
+	companionDelayMinMs    = 40
+	companionDelaySpreadMs = 300
 )
 
 //nolint:gochecknoglobals
@@ -56,9 +79,13 @@ type Engine struct {
 	cfg     config.DecoyConfig
 	source  *querylog.DecoySource
 	resolve ResolveFunc
+	hub     *querylog.Hub // live real-query tap; nil (non-sqlite) → historical fallback
 	logger  *logrus.Entry
 	rnd     *rand.Rand
 	now     func() time.Time // injectable for tests
+
+	realMu    sync.Mutex  // guards realTimes (tap goroutine writes, emit loop reads)
+	realTimes []time.Time // timestamps of recent real queries within realWindow
 }
 
 func NewEngine(cfg config.DecoyConfig, source *querylog.DecoySource, resolve ResolveFunc) *Engine {
@@ -71,6 +98,11 @@ func NewEngine(cfg config.DecoyConfig, source *querylog.DecoySource, resolve Res
 		now:     time.Now,
 	}
 }
+
+// SetHub wires the live query-log tap so the engine can react to real traffic
+// (live-volume tracking + browse-triggered companions). A nil hub (non-sqlite
+// query log) leaves the engine on the historical diurnal + timer-cluster path.
+func (e *Engine) SetHub(h *querylog.Hub) { e.hub = h }
 
 // Seed loads the embedded list into the source if the table is empty.
 func (e *Engine) Seed() error {
@@ -105,6 +137,13 @@ func (e *Engine) Run(ctx context.Context) {
 	e.logger.Infof("decoy engine started (%.1f queries/min, active %02d:00-%02d:00)",
 		e.cfg.QueriesPerMinute, e.cfg.ActiveHoursStart, e.cfg.ActiveHoursEnd)
 
+	if e.hub != nil {
+		ch, unsub := e.hub.Subscribe()
+		defer unsub()
+
+		go e.tapLoop(ctx, ch)
+	}
+
 	timer := time.NewTimer(e.nextInterval())
 	defer timer.Stop()
 
@@ -122,15 +161,10 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-// nextInterval draws an exponential inter-arrival time for the configured rate,
-// scaled by the diurnal shape factor so the noise floor tracks real activity.
+// nextInterval draws an exponential inter-arrival time (Poisson process) for the
+// current effective rate.
 func (e *Engine) nextInterval() time.Duration {
-	qpm := e.cfg.QueriesPerMinute
-	if qpm <= 0 {
-		qpm = 1
-	}
-
-	qpm *= e.diurnalFactor()
+	qpm := e.effectiveQPM()
 	if qpm < 0.01 { //nolint:mnd // floor so meanSeconds never explodes
 		qpm = 0.01
 	}
@@ -138,6 +172,117 @@ func (e *Engine) nextInterval() time.Duration {
 	meanSeconds := 60.0 / qpm
 
 	return time.Duration(e.rnd.ExpFloat64() * meanSeconds * float64(time.Second))
+}
+
+// effectiveQPM is the decoy rate for the next interval. With ReactiveVolume on
+// and enough live signal it tracks the recent real QPS ± a random masking term
+// (see reactiveQPM); otherwise it uses the configured base scaled by the 7-day
+// historical diurnal shape (the cold-start / quiet fallback, today's behaviour).
+//
+// ponytail: reactive volume inherently leaks the real activity LEVEL to an
+// on-path observer — the decoy rate rises and falls with real QPS. That is the
+// deliberate trade: we hide WHICH queries are real, not THAT the box is busy.
+// Known design bound; hiding the level too would need constant-rate cover
+// traffic (a fixed bandwidth cost we chose not to pay on a home box).
+func (e *Engine) effectiveQPM() float64 {
+	base := e.cfg.QueriesPerMinute
+	if base <= 0 {
+		base = 1
+	}
+
+	if e.cfg.ReactiveVolume {
+		if n, qpm := e.reactiveQPM(); n >= minLiveEvents {
+			return qpm
+		}
+	}
+
+	return base * e.diurnalFactor()
+}
+
+// reactiveQPM returns (live real-query count in the window, target decoy QPM).
+// The target is the live real rate plus a per-interval ± random(reactiveJitterQPM)
+// queries/min term — an additive mask so the decoy rate is never exactly the real
+// rate — floored at minReactiveQPM.
+func (e *Engine) reactiveQPM() (int, float64) {
+	n := e.recentRealCount()
+
+	realQPM := float64(n) / realWindow.Seconds() * 60.0
+
+	jitter := float64(e.rnd.Intn(2*reactiveJitterQPM+1) - reactiveJitterQPM) //nolint:gosec // noise, not crypto
+
+	qpm := realQPM + jitter
+	if qpm < minReactiveQPM {
+		qpm = minReactiveQPM
+	}
+
+	return n, qpm
+}
+
+// tapLoop consumes the marshalled QueryItem stream and reacts to each real query.
+func (e *Engine) tapLoop(ctx context.Context, ch <-chan []byte) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data := <-ch:
+			e.tap(ctx, data)
+		}
+	}
+}
+
+// tap reacts to one query-log event: it counts real queries toward the live-QPS
+// window and may fire a companion cluster. Decoy-flagged events (our own decoys
+// and companions carry Decoy=true) are dropped here — the feedback guard that
+// stops companions-of-companions and keeps the real-QPS counter honest.
+func (e *Engine) tap(ctx context.Context, data []byte) {
+	var item struct {
+		Decoy    bool   `json:"decoy"`
+		Question string `json:"question"`
+		Qtype    string `json:"qtype"`
+	}
+
+	if json.Unmarshal(data, &item) != nil {
+		return
+	}
+
+	if item.Decoy || item.Question == "" {
+		return // feedback guard + ignore empty-question rows
+	}
+
+	e.recordReal()
+	e.maybeCompanion(ctx, item.Question)
+}
+
+// recordReal stamps a real query into the rolling window.
+func (e *Engine) recordReal() {
+	e.realMu.Lock()
+	e.realTimes = append(e.realTimes, e.now())
+	e.pruneRealLocked()
+	e.realMu.Unlock()
+}
+
+// recentRealCount prunes aged entries and returns how many real queries fall in
+// the last realWindow.
+func (e *Engine) recentRealCount() int {
+	e.realMu.Lock()
+	e.pruneRealLocked()
+	n := len(e.realTimes)
+	e.realMu.Unlock()
+
+	return n
+}
+
+// pruneRealLocked drops timestamps older than the window. realTimes is appended
+// in now() order so the aged entries are a contiguous prefix.
+func (e *Engine) pruneRealLocked() {
+	cutoff := e.now().Add(-realWindow)
+
+	i := 0
+	for i < len(e.realTimes) && e.realTimes[i].Before(cutoff) {
+		i++
+	}
+
+	e.realTimes = e.realTimes[i:]
 }
 
 // diurnalFactor (technique 1) scales the base rate by how busy the current hour
@@ -391,8 +536,87 @@ func (e *Engine) mutate(q decoyQuery) decoyQuery {
 	return q
 }
 
-// clusterOf (technique 6) expands one query into a small capped burst of related
-// lookups: the domain, its www + AAAA, and maybe a common third-party companion.
+// maybeCompanion (technique 6, reactive) is the PRIMARY companion source: when a
+// real query resolves, with probability CompanionPct it fires a browse-style
+// cluster derived from that domain, after randomized sub-resource delays. The
+// timer-driven clusterOf (ClusterPct) stays as a low-probability secondary for
+// the quiet/no-live-tap path. Runs the burst in its own goroutine so the tap
+// loop is never blocked by the inter-companion sleeps.
+func (e *Engine) maybeCompanion(ctx context.Context, domain string) {
+	if !e.rndPct(e.cfg.CompanionPct) {
+		return
+	}
+
+	companions := e.companionsFor(domain)
+	if len(companions) == 0 {
+		return
+	}
+
+	go e.emitBurst(ctx, companions)
+}
+
+// emitBurst resolves each companion after a randomized, bounded delay so the
+// cluster arrives spread out like a page's sub-resource lookups.
+func (e *Engine) emitBurst(ctx context.Context, qs []decoyQuery) {
+	for _, q := range qs {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(e.companionDelay()):
+		}
+
+		e.resolveOne(ctx, q)
+	}
+}
+
+// companionDelay returns a randomized inter-companion delay in
+// [companionDelayMinMs, companionDelayMinMs+companionDelaySpreadMs) ms.
+func (e *Engine) companionDelay() time.Duration {
+	ms := companionDelayMinMs + e.rnd.Intn(companionDelaySpreadMs)
+
+	return time.Duration(ms) * time.Millisecond
+}
+
+// companionsFor derives a realistic browse cluster from a real domain: www.<eTLD+1>,
+// the AAAA of the queried base, one or two common CDN/analytics/font siblings, and
+// one random noise-pool domain. Capped to a 2..4 burst (www + base AAAA always
+// survive the cap, so the first-party pair is always present).
+func (e *Engine) companionsFor(domain string) []decoyQuery {
+	base := strings.TrimSuffix(domain, ".")
+	if base == "" {
+		return nil
+	}
+
+	reg, err := publicsuffix.EffectiveTLDPlusOne(base)
+	if err != nil || reg == "" {
+		reg = base // unlisted/odd suffix — fall back to the raw name
+	}
+
+	out := []decoyQuery{
+		{name: "www." + reg, qtype: dns.TypeA},
+		{name: base, qtype: dns.TypeAAAA},
+	}
+
+	for i, k := 0, 1+e.rnd.Intn(2); i < k; i++ { //nolint:mnd // 1..2 third-party siblings
+		out = append(out, decoyQuery{name: clusterCompanions[e.rnd.Intn(len(clusterCompanions))], qtype: dns.TypeA})
+	}
+
+	if d, err := e.source.SampleList(); err == nil && d != "" {
+		out = append(out, decoyQuery{name: d, qtype: e.randListQtype()})
+	}
+
+	n := 2 + e.rnd.Intn(3) //nolint:mnd // burst size 2..4, capped
+	if n > len(out) {
+		n = len(out)
+	}
+
+	return out[:n]
+}
+
+// clusterOf (technique 6, timer secondary) expands one query into a small capped
+// burst of related lookups: the domain, its www + AAAA, and maybe a common
+// third-party companion. Superseded as the primary companion source by
+// maybeCompanion (browse-triggered); kept for the quiet / no-live-tap path.
 func (e *Engine) clusterOf(q decoyQuery) []decoyQuery {
 	candidates := []decoyQuery{
 		q,

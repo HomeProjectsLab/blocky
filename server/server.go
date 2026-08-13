@@ -734,6 +734,9 @@ func (s *Server) setupDecoyEngine(cfg *config.Config) error {
 
 	if needDecoy {
 		s.decoyEngine = decoy.NewEngine(cfg.Privacy.Decoy, s.decoySource, s.resolve)
+		// Live real-query tap (reactive volume + browse-triggered companions).
+		// Nil in non-sqlite mode, but the decoy engine only runs in sqlite mode.
+		s.decoyEngine.SetHub(s.qlHub)
 	}
 
 	if needUpdater {

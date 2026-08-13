@@ -39,7 +39,11 @@ type DecoyConfig struct {
 	FingerprintMatch bool `yaml:"fingerprintMatch" default:"true"` // stamp EDNS shape sampled from real clients
 	SplitUpstream    bool `yaml:"splitUpstream" default:"true"`    // vary decoy client identity to diverge group routing
 	MissChaffPct     uint `yaml:"missChaffPct" default:"15"`       // % of decoys that are likely-NXDOMAIN random labels
-	ClusterPct       uint `yaml:"clusterPct" default:"20"`         // % of emissions that fire a small related burst
+	ClusterPct       uint `yaml:"clusterPct" default:"20"`         // % of timer emissions that fire a small related burst (secondary to CompanionPct)
+
+	// Reactive obfuscation: track live real traffic instead of the 7-day historical shape.
+	ReactiveVolume bool `yaml:"reactiveVolume" default:"true"` // rate tracks live recent real QPS (± jitter); historical diurnal is the cold-start fallback
+	CompanionPct   uint `yaml:"companionPct" default:"40"`     // % of real queries that trigger a browse-style companion cluster derived from that domain
 }
 
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.
@@ -89,6 +93,10 @@ func (c *DecoyConfig) validate() error {
 
 	if c.ClusterPct > 100 {
 		return fmt.Errorf("privacy.decoy: clusterPct (%d) must be in [0, 100]", c.ClusterPct)
+	}
+
+	if c.CompanionPct > 100 {
+		return fmt.Errorf("privacy.decoy: companionPct (%d) must be in [0, 100]", c.CompanionPct)
 	}
 
 	return nil

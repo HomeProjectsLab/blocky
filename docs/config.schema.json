@@ -1782,8 +1782,18 @@
             },
             "clusterPct": {
               "type": "integer",
-              "description": "% of emissions that fire a small related burst",
+              "description": "% of timer emissions that fire a small related burst (secondary to CompanionPct)",
               "default": 20
+            },
+            "reactiveVolume": {
+              "type": "boolean",
+              "description": "Reactive obfuscation: track live real traffic instead of the 7-day historical shape.",
+              "default": true
+            },
+            "companionPct": {
+              "type": "integer",
+              "description": "% of real queries that trigger a browse-style companion cluster derived from that domain",
+              "default": 40
             }
           },
           "additionalProperties": false,
