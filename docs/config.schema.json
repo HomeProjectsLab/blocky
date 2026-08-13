@@ -1837,15 +1837,49 @@
               "description": "Compensating persona cover (#8): TOTAL egress tracks a household diurnal\ntarget curve, so decoy_rate(t) = max(0, targetCurve(t) − recentRealQPM).\nThis hides the activity LEVEL (not just which queries are real) without\ndelaying real queries — the box always looks like a generic household on\nthe wire. When off, the engine falls back to the reactive/diurnal path.\n\nResidual: real usage ABOVE the peak ceiling still spikes total egress — the\ncurve hides level only up to targetQpmPeak, by design (a truly constant\nmax-rate cover would cost fixed bandwidth we don't pay on a home box).",
               "default": true
             },
+            "personaProfile": {
+              "type": "string",
+              "description": "PersonaProfile selects the persona-curve preset the compensating cover aims\nfor: \"home\" (peak/trough 40/6), \"enterprise\" (300/60, office-diurnal over a\n24/7 IoT floor), or \"auto\" (home baseline; the engine may escalate toward the\nenterprise curve from observed client classes). The explicit TargetQPM* fields\nstill override the preset (see EffectivePersonaCurve). \"auto\" is the default so\na home box behaves exactly as before this field existed.",
+              "default": "auto"
+            },
             "targetQpmPeak": {
               "type": "number",
-              "description": "busy-hour target total egress (queries/min)",
+              "description": "busy-hour target total egress (queries/min); the shipped home default",
               "default": 40
             },
             "targetQpmTrough": {
               "type": "number",
-              "description": "pre-dawn quiet target total egress (queries/min)",
+              "description": "pre-dawn quiet target total egress (queries/min); the shipped home default",
               "default": 6
+            },
+            "deviceClass": {
+              "properties": {
+                "enable": {
+                  "type": "boolean",
+                  "description": "Enable turns on classification + per-class shaping. Off = every client gets\nthe browsing-shaped cover (pre-device-class behaviour).",
+                  "default": true
+                },
+                "vendorTelemetry": {
+                  "type": "boolean",
+                  "description": "VendorTelemetry emits vendor-telemetry chaff (fixed beacon endpoints) for\niot/server-classed clients instead of browse companions.",
+                  "default": true
+                },
+                "vendorFamilies": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "VendorFamilies names which telemetry families to draw beacon domains from\n(e.g. \"apple\", \"google\", \"amazon\", \"microsoft\", \"samsung\", \"tuya\", \"sonos\").\nEmpty = the engine's built-in default family set."
+                },
+                "phantomDevicesPct": {
+                  "type": "integer",
+                  "description": "PhantomDevicesPct is the share of vendor-telemetry chaff drawn from families\nNOT present in the real fleet, to obscure true fleet size and vendor mix.\n0 = only mirror observed vendors.",
+                  "default": 20
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "description": "Device-class awareness: classify each client from its real DNS behavior\n(iot / workstation / server / unknown) and shape its cover accordingly."
             },
             "chatterPct": {
               "type": "integer",

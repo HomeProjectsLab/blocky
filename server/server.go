@@ -269,11 +269,15 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 	}
 
 	var blStats blocklistStatser
+
+	var classifier clientClassifier
+
 	if server.decoySource != nil {
 		blStats = server.decoySource
+		classifier = server.decoySource
 	}
 
-	httpRouter, statsCloser := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats)
+	httpRouter, statsCloser := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats, classifier)
 	server.closers = append(server.closers, statsCloser) // close the stats reader on Stop (else each apply leaks an RO conn)
 	server.registerDoHEndpoints(httpRouter, cfg)
 

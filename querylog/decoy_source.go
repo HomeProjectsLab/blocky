@@ -126,7 +126,7 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}); err != nil {
+	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{}); err != nil {
 		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
 
@@ -939,6 +939,304 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 	sort.Slice(deltas, func(i, j int) bool { return deltas[i] < deltas[j] })
 
 	return deltas[len(deltas)/2], true // lower-median; noise cadence, not statistics
+}
+
+// --- device-class classification (cached) -----------------------------------
+
+// Device classes a client can be assigned. "unknown" covers too-little-data.
+const (
+	ClassIoT         = "iot"
+	ClassWorkstation = "workstation"
+	ClassServer      = "server"
+	ClassUnknown     = "unknown"
+)
+
+// validClass reports whether c is an assignable device class (empty = clear override).
+func validClass(c string) bool {
+	switch c {
+	case ClassIoT, ClassWorkstation, ClassServer, ClassUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Classification thresholds. Heuristic; tuned for a mixed edge/office/IoT fleet.
+// A client with fewer than classMinSamples real queries in the window is "unknown"
+// (not enough behaviour to judge). "server" wins on a high share of registry/
+// update/monitoring hits. "iot" is few distinct eTLD+1s + low qtype diversity +
+// regular (low-burstiness) inter-arrivals — a beacon, not a browser. Everything
+// else with real breadth is "workstation".
+const (
+	classMinSamples    = 20   // below this many real queries → unknown
+	classServerShare   = 0.30 // ≥ this share of server-ish hits → server
+	classIoTMaxDomains = 8    // iot: at most this many distinct eTLD+1
+	classIoTMaxQtypes  = 3    // iot: at most this many distinct qtypes
+	classIoTMaxCoV     = 2.0  // iot: inter-arrival coeff. of variation ≤ this (regular/periodic)
+)
+
+// serverEtldps is the small embedded "server-ish" registrable-domain set: container
+// registries, OS package mirrors, and update/monitoring backends. A client whose
+// traffic is dominated by these is a server, not a workstation. Kept deliberately
+// tiny — a heuristic seed, not an exhaustive list.
+var serverEtldps = []string{
+	"docker.io", "ghcr.io", "quay.io", "gcr.io", "k8s.io", "docker.com",
+	"debian.org", "ubuntu.com", "archlinux.org", "fedoraproject.org", "centos.org",
+	"pypi.org", "npmjs.org", "npmjs.com", "rubygems.org", "crates.io", "golang.org",
+	"githubusercontent.com", "github.com", "grafana.com", "prometheus.io",
+	"cloudflare.com", "letsencrypt.org", "ntp.org",
+}
+
+// serverNameLikes are substring patterns in question_name that flag server-ish
+// package/update traffic regardless of eTLD+1. Deliberately NOT "telemetry" or
+// "metrics" — those are exactly what IoT devices beacon, so matching them would
+// misclassify IoT as server. Server = package registries / OS mirrors / updates.
+var serverNameLikes = []string{"registry", "apt.", "mirror", "-update", "update."}
+
+// clientClass is the cached per-client classification. `class` is the auto result;
+// `override` (when non-empty) is a UI-set manual class that wins over auto.
+// Recomputed by RefreshClientClasses; read cheaply by ClientClass.
+type clientClass struct {
+	Client    string    `gorm:"column:client;primaryKey"`
+	Class     string    `gorm:"column:class"`
+	Override  string    `gorm:"column:override"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
+func (clientClass) TableName() string { return "client_class" }
+
+// ClientClassInfo is one row of ListClientClasses: the auto class, any override,
+// and the Effective class the engine actually uses (override if set, else auto).
+type ClientClassInfo struct {
+	Client    string
+	Class     string // auto-computed
+	Override  string // manual, "" if none
+	Effective string // override if non-empty, else Class
+	UpdatedAt time.Time
+}
+
+// classFeatures is the per-client aggregate the classifier scores.
+type classFeatures struct {
+	Client     string  `gorm:"column:c"`
+	N          int64   `gorm:"column:n"`
+	Domains    int64   `gorm:"column:domains"`
+	Qtypes     int64   `gorm:"column:qtypes"`
+	ServerHits int64   `gorm:"column:serverhits"`
+	MeanGap    float64 `gorm:"column:meangap"`
+	MeanGap2   float64 `gorm:"column:meangap2"`
+}
+
+// classify scores one client's features into a device class.
+func (f classFeatures) classify() string {
+	if f.N < classMinSamples {
+		return ClassUnknown
+	}
+
+	if float64(f.ServerHits)/float64(f.N) >= classServerShare {
+		return ClassServer
+	}
+
+	// Inter-arrival coefficient of variation: low = regular/periodic (beacon).
+	// Var = E[g²] − E[g]²; CoV = sqrt(Var)/mean. Guard tiny/zero mean.
+	cov := math.MaxFloat64
+	if f.MeanGap > 0 {
+		v := f.MeanGap2 - f.MeanGap*f.MeanGap
+		if v < 0 {
+			v = 0
+		}
+
+		cov = math.Sqrt(v) / f.MeanGap
+	}
+
+	if f.Domains <= classIoTMaxDomains && f.Qtypes <= classIoTMaxQtypes && cov <= classIoTMaxCoV {
+		return ClassIoT
+	}
+
+	return ClassWorkstation
+}
+
+// serverHitExpr builds the SQL boolean (1/0-summable) that flags a server-ish row,
+// matching effective_tldp against serverEtldps or question_name against
+// serverNameLikes. Values are inlined (fixed, trusted constants — no user input).
+func serverHitExpr() string {
+	quoted := make([]string, len(serverEtldps))
+	for i, d := range serverEtldps {
+		quoted[i] = "'" + d + "'"
+	}
+
+	likes := make([]string, len(serverNameLikes))
+	for i, p := range serverNameLikes {
+		likes[i] = "qn LIKE '%" + p + "%'"
+	}
+
+	return "CASE WHEN etldp IN (" + strings.Join(quoted, ",") + ") OR " +
+		strings.Join(likes, " OR ") + " THEN 1 ELSE 0 END"
+}
+
+// RefreshClientClasses recomputes every client's auto class from the recent real
+// timeline in one windowed pass and upserts it into client_class. The manual
+// override column is preserved (never touched here). Call on a timer / first use —
+// NOT per emission (single connection, ~110 clients).
+//
+// ponytail: one full window scan of log_entries per refresh (LAG over the
+// timeline; effective_tldp/question_name unindexed). Fine at refresh cadence over
+// the 7-day window; materialize incrementally only if refresh latency shows up.
+func (s *DecoySource) RefreshClientClasses() error {
+	since := time.Now().Add(-decoyReplayWindow)
+
+	query := `WITH gaps AS (
+		SELECT client_name AS c,
+		       effective_tldp AS etldp,
+		       question_type AS qt,
+		       question_name AS qn,
+		       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
+		FROM log_entries
+		WHERE decoy = 0 AND client_name <> '' AND request_ts >= ?
+		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+	)
+	SELECT c,
+	       COUNT(*) AS n,
+	       COUNT(DISTINCT etldp) AS domains,
+	       COUNT(DISTINCT qt) AS qtypes,
+	       SUM(` + serverHitExpr() + `) AS serverhits,
+	       COALESCE(AVG(gap),0) AS meangap,
+	       COALESCE(AVG(gap*gap),0) AS meangap2
+	FROM gaps
+	GROUP BY c`
+
+	var feats []classFeatures
+	if err := s.db.Raw(query, since).Scan(&feats).Error; err != nil {
+		return err
+	}
+
+	now := time.Now()
+
+	for _, f := range feats {
+		row := clientClass{Client: f.Client, Class: f.classify(), UpdatedAt: now}
+
+		// Upsert the auto class + timestamp only; leave override untouched.
+		err := s.db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "client"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"class":      row.Class,
+				"updated_at": row.UpdatedAt,
+			}),
+		}).Create(&row).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ClientClass returns the cached effective class for client (override if set,
+// else the auto class), or ClassUnknown when the client has no cached row yet.
+// Fast: one primary-key lookup, no scan — safe to call per emission.
+func (s *DecoySource) ClientClass(client string) (string, error) {
+	var row clientClass
+
+	err := s.db.Raw("SELECT class, override FROM client_class WHERE client = ? LIMIT 1", client).Scan(&row).Error
+	if err != nil {
+		return ClassUnknown, err
+	}
+
+	if row.Override != "" {
+		return row.Override, nil
+	}
+
+	if row.Class == "" {
+		return ClassUnknown, nil
+	}
+
+	return row.Class, nil
+}
+
+// ListClientClasses returns every cached client classification (auto + override +
+// resolved effective), for the management UI.
+func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
+	var rows []clientClass
+	if err := s.db.Raw("SELECT client, class, override, updated_at FROM client_class ORDER BY client").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	out := make([]ClientClassInfo, 0, len(rows))
+
+	for _, r := range rows {
+		eff := r.Class
+		if r.Override != "" {
+			eff = r.Override
+		}
+
+		if eff == "" {
+			eff = ClassUnknown
+		}
+
+		out = append(out, ClientClassInfo{
+			Client: r.Client, Class: r.Class, Override: r.Override, Effective: eff, UpdatedAt: r.UpdatedAt,
+		})
+	}
+
+	return out, nil
+}
+
+// SetClientClassOverride sets (or clears) the manual class override for client.
+// class "" or "auto" clears the override (auto classification resumes); any other
+// value must be a valid device class. The override wins over auto in ClientClass.
+// Creates the row if the client hasn't been auto-classified yet, so an override
+// set before first refresh still sticks.
+func (s *DecoySource) SetClientClassOverride(client, class string) error {
+	if client == "" {
+		return fmt.Errorf("client must not be empty")
+	}
+
+	if class == "auto" {
+		class = ""
+	}
+
+	if class != "" && !validClass(class) {
+		return fmt.Errorf("invalid device class %q", class)
+	}
+
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "client"}},
+		DoUpdates: clause.Assignments(map[string]any{"override": class}),
+	}).Create(&clientClass{Client: client, Override: class, UpdatedAt: time.Now()}).Error
+}
+
+// SampleClientOfClass returns a random real client whose EFFECTIVE class matches
+// class, as a ClientPersona (IP + fingerprint) for decoy attribution. Empty
+// ClientPersona (empty IP) when no such client exists — caller falls back to
+// SampleClient. Two cheap indexed random-row reads.
+func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
+	var name string
+
+	err := s.db.Raw(`SELECT client FROM client_class
+		WHERE CASE WHEN override <> '' THEN override ELSE class END = ?
+		ORDER BY RANDOM() LIMIT 1`, class).Scan(&name).Error
+	if err != nil {
+		return ClientPersona{}, err
+	}
+
+	if name == "" {
+		return ClientPersona{}, nil
+	}
+
+	since := time.Now().Add(-decoyReplayWindow)
+
+	var row struct {
+		ClientIP string `gorm:"column:client_ip"`
+		fpRow
+	}
+
+	err = s.db.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?
+		ORDER BY RANDOM() LIMIT 1`, name, since).Scan(&row).Error
+	if err != nil {
+		return ClientPersona{}, err
+	}
+
+	return ClientPersona{IP: row.ClientIP, Fp: row.fpRow.toFpSample()}, nil
 }
 
 // qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)

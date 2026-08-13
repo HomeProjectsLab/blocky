@@ -3,6 +3,7 @@
 package querylog
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 // the test can seed the replay pool without depending on the writer internals.
 type realRow struct {
 	RequestTS     time.Time `gorm:"column:request_ts"`
+	ClientIP      string    `gorm:"column:client_ip"`
 	ClientName    string    `gorm:"column:client_name"`
 	QuestionName  string    `gorm:"column:question_name"`
 	QuestionType  string    `gorm:"column:question_type"`
@@ -489,6 +491,137 @@ var _ = Describe("DecoySource", func() {
 			d, e := src.SampleCorpus()
 			Expect(e).Should(Succeed())
 			Expect(d).Should(Equal("warm.com"))
+		})
+	})
+
+	Describe("client classification (TASK M)", func() {
+		// buildClientTimeline emits n rows for one client: an IoT beacon (periodic,
+		// cycling through `domains`) or a browsing burst (many domains). Returns the
+		// crafted rows for seedLog.
+		beacon := func(client, ip string, domains []string, n int, start time.Time, period time.Duration) []realRow {
+			rows := make([]realRow, 0, n)
+			for i := 0; i < n; i++ {
+				d := domains[i%len(domains)]
+				rows = append(rows, realRow{
+					RequestTS: start.Add(time.Duration(i) * period), ClientIP: ip, ClientName: client,
+					QuestionName: d, QuestionType: "A", EffectiveTLDP: d,
+				})
+			}
+
+			return rows
+		}
+
+		It("classifies a periodic 2-domain client as iot, a browser as workstation, a registry-heavy client as server; override wins", func() {
+			now := time.Now()
+			var rows []realRow
+
+			// iot: 2 domains, periodic 5-min beacon, only A queries.
+			rows = append(rows, beacon("iotdev", "10.0.0.5",
+				[]string{"telemetry.tuya.com", "time.nist.gov"}, 40, now.Add(-8*time.Hour), 5*time.Minute)...)
+
+			// workstation: many distinct browsing domains, mixed qtypes, bursty.
+			qtypes := []string{"A", "AAAA", "HTTPS"}
+			for i := 0; i < 60; i++ {
+				d := fmt.Sprintf("site%d.com", i)
+				// cluster three per burst then jump ahead → high inter-arrival CoV
+				rows = append(rows, realRow{
+					RequestTS: now.Add(-6*time.Hour + time.Duration(i)*7*time.Minute + time.Duration(i%3)*time.Second),
+					ClientIP:  "10.0.0.20", ClientName: "laptop",
+					QuestionName: d, QuestionType: qtypes[i%3], EffectiveTLDP: d,
+				})
+			}
+
+			// server: registry/update-heavy.
+			srv := []string{"docker.io", "ghcr.io", "deb.debian.org", "registry.npmjs.org", "github.com"}
+			for i := 0; i < 50; i++ {
+				d := srv[i%len(srv)]
+				rows = append(rows, realRow{
+					RequestTS: now.Add(-4*time.Hour + time.Duration(i)*3*time.Minute),
+					ClientIP:  "10.0.0.30", ClientName: "buildbox",
+					QuestionName: d, QuestionType: "A", EffectiveTLDP: effectiveTLDP(d),
+				})
+			}
+
+			src := seedLog("classify.db", rows)
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
+			c, e := src.ClientClass("iotdev")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassIoT))
+
+			c, e = src.ClientClass("laptop")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassWorkstation))
+
+			c, e = src.ClientClass("buildbox")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassServer))
+
+			// override wins over auto, and "auto"/"" clears it.
+			Expect(src.SetClientClassOverride("iotdev", ClassServer)).Should(Succeed())
+			c, _ = src.ClientClass("iotdev")
+			Expect(c).Should(Equal(ClassServer))
+
+			list, e := src.ListClientClasses()
+			Expect(e).Should(Succeed())
+			var iot ClientClassInfo
+			for _, r := range list {
+				if r.Client == "iotdev" {
+					iot = r
+				}
+			}
+			Expect(iot.Class).Should(Equal(ClassIoT))     // auto unchanged
+			Expect(iot.Override).Should(Equal(ClassServer))
+			Expect(iot.Effective).Should(Equal(ClassServer))
+
+			Expect(src.SetClientClassOverride("iotdev", "auto")).Should(Succeed())
+			c, _ = src.ClientClass("iotdev")
+			Expect(c).Should(Equal(ClassIoT))
+		})
+
+		It("classifies a client with too few queries as unknown", func() {
+			now := time.Now()
+			src := seedLog("classify_sparse.db",
+				beacon("sparse", "10.0.0.9", []string{"a.com"}, 5, now.Add(-time.Hour), time.Minute))
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
+			c, e := src.ClientClass("sparse")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassUnknown))
+		})
+
+		It("returns unknown for an unclassified client and stores an override set before refresh", func() {
+			src := seedLog("classify_pre.db", nil)
+
+			c, e := src.ClientClass("ghost")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassUnknown))
+
+			Expect(src.SetClientClassOverride("ghost", ClassIoT)).Should(Succeed())
+			c, _ = src.ClientClass("ghost")
+			Expect(c).Should(Equal(ClassIoT))
+		})
+
+		It("rejects an invalid override class", func() {
+			src := seedLog("classify_bad.db", nil)
+			Expect(src.SetClientClassOverride("x", "toaster")).Should(MatchError(ContainSubstring("invalid device class")))
+		})
+
+		It("samples a client of a given effective class for attribution", func() {
+			now := time.Now()
+			rows := beacon("iotdev", "10.0.0.5",
+				[]string{"telemetry.tuya.com", "time.nist.gov"}, 40, now.Add(-8*time.Hour), 5*time.Minute)
+			src := seedLog("classify_sample.db", rows)
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
+			p, e := src.SampleClientOfClass(ClassIoT)
+			Expect(e).Should(Succeed())
+			Expect(p.IP).Should(Equal("10.0.0.5"))
+
+			// no server present → empty persona (caller falls back)
+			p, e = src.SampleClientOfClass(ClassServer)
+			Expect(e).Should(Succeed())
+			Expect(p.IP).Should(BeEmpty())
 		})
 	})
 })

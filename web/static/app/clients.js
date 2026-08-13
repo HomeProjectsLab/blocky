@@ -1,5 +1,6 @@
-// clients.js — client list + drill-down with the fingerprint panel.
-import { getJSON } from "./api.js";
+// clients.js — client list + drill-down with the fingerprint panel, plus the
+// device-class table (auto class + manual override).
+import { getJSON, send } from "./api.js";
 import { lineChart } from "./chart.js";
 import { fmtNum, fmtDateTime, fmtPct } from "./format.js";
 
@@ -149,6 +150,57 @@ async function openDetail(name) {
     detail.append((d.topDomains && d.topDomains.length) ? domainList(d.topDomains) : Object.assign(document.createElement("p"), { className: "empty", textContent: "No domains recorded." }));
 }
 
+// ---- device-class table ----
+const ccBody = document.getElementById("cc-body");
+const ccEmpty = document.getElementById("cc-empty");
+const ccMsg = document.getElementById("cc-msg");
+const CLASS_OPTS = ["auto", "iot", "workstation", "server", "unknown"];
+
+function classChip(cls) {
+    return `<span class="chip cc-${cls || "unknown"}">${escapeHTML(cls || "unknown")}</span>`;
+}
+
+function overrideSelect(client, override) {
+    const sel = document.createElement("select");
+    sel.className = "cc-override";
+    for (const opt of CLASS_OPTS) {
+        const o = document.createElement("option");
+        o.value = opt === "auto" ? "" : opt;
+        o.textContent = opt;
+        if ((override || "") === o.value) o.selected = true;
+        sel.append(o);
+    }
+    sel.addEventListener("change", async () => {
+        try {
+            await send("PUT", `/api/ui/clients/classes/${encodeURIComponent(client)}`, { class: sel.value || "auto" });
+            ccMsg.textContent = `Set ${client} → ${sel.value || "auto"}.`;
+            loadClasses();
+        } catch (err) { ccMsg.textContent = "Could not save: " + err.message; }
+    });
+    return sel;
+}
+
+async function loadClasses() {
+    let data;
+    try { data = await getJSON("/api/ui/clients/classes"); }
+    catch (err) { ccEmpty.hidden = false; ccEmpty.textContent = "Could not load classes: " + err.message; return; }
+    const rows = data.classes || [];
+    if (!rows.length) { ccEmpty.hidden = false; ccBody.innerHTML = ""; return; }
+    ccEmpty.hidden = true;
+    ccBody.innerHTML = "";
+    for (const c of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+            `<td>${escapeHTML(c.client || "—")}</td>` +
+            `<td>${classChip(c.class)}</td>` +
+            `<td>${classChip(c.effective)}</td>`;
+        const td = document.createElement("td");
+        td.append(overrideSelect(c.client, c.override));
+        tr.append(td);
+        ccBody.append(tr);
+    }
+}
+
 async function load() {
     let data;
     try { data = await getJSON("/api/ui/clients"); }
@@ -170,3 +222,4 @@ async function load() {
 }
 
 load();
+loadClasses();

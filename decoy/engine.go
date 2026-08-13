@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,8 @@ const (
 	provChatter   = "chatter"
 	provMiss      = "miss"
 	provFail      = "fail"
+	provBeacon    = "beacon" // iot vendor-telemetry beacon (device-class shaping)
+	provServer    = "server" // server registry/update/monitoring lookup
 )
 
 //nolint:gochecknoglobals
@@ -167,6 +170,50 @@ var heartbeatHosts = []string{
 	"detectportal.firefox.com", "pool.ntp.org", "time.google.com",
 }
 
+// vendorTelemetry (device-class IoT shaping) is the embedded set of solar/inverter/
+// smart-home telemetry endpoints, grouped by vendor FAMILY. IoT-classed clients
+// beacon to fixed vendor clouds — they don't browse — so an iot-attributed decoy
+// draws a low-diversity BEACON from here instead of a page-load cohort. To OBSCURE
+// the real fleet, beaconFamily also draws from families the site may not run
+// (phantom/other-vendor), so a sniffer can't read the true vendor or device count
+// off these low-entropy beacons. Blocked names still drop at isBlockedDecoy.
+//
+//nolint:gochecknoglobals
+var vendorTelemetry = map[string][]string{
+	// solar / inverter / storage
+	"solaredge": {"monitoring.solaredge.com", "monitoringapi.solaredge.com"},
+	"fronius":   {"www.solarweb.com", "fronius.solarweb.com"},
+	"huawei":    {"eu5.fusionsolar.huawei.com", "intl.fusionsolar.huawei.com"},
+	"sma":       {"ennexos.sunnyportal.com", "www.sunnyportal.com"},
+	"enphase":   {"enlighten.enphaseenergy.com", "api.enphaseenergy.com"},
+	"tesla":     {"owner-api.teslamotors.com", "energy.tesla.com"},
+	"growatt":   {"server.growatt.com", "openapi.growatt.com"},
+	"victron":   {"vrm.victronenergy.com", "mqtt.victronenergy.com"},
+	"goodwe":    {"www.semsportal.com", "eu.semsportal.com"},
+	// generic smart-home / IoT clouds
+	"tuya":   {"m1.tuyaeu.com", "a1.tuyaeu.com"},
+	"sonos":  {"devices.sonos.com", "update-firmware.sonos.com"},
+	"ring":   {"api.ring.com", "fw.ring.com"},
+	"shelly": {"shelly-api-eu.shelly.cloud", "api.shelly.cloud"},
+	"hue":    {"ws.meethue.com", "data.meethue.com"},
+	"ecobee": {"api.ecobee.com", "eapi.ecobee.com"},
+	"nest":   {"device-provisioning.googleapis.com", "nexusapi-eu1.camera.home.nest.com"},
+}
+
+// serverTelemetry (device-class server shaping) is the embedded set of registry/
+// package/OS-mirror/update/monitoring endpoints a SERVER-classed client hits. A
+// server-attributed decoy draws one of these instead of a human page load.
+//
+//nolint:gochecknoglobals
+var serverTelemetry = []string{
+	"registry-1.docker.io", "auth.docker.io", "index.docker.io", "ghcr.io", "quay.io", "gcr.io",
+	"deb.debian.org", "security.debian.org", "archive.ubuntu.com", "security.ubuntu.com",
+	"mirror.centos.org", "download.fedoraproject.org",
+	"pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "crates.io",
+	"proxy.golang.org", "sum.golang.org", "objects.githubusercontent.com",
+	"grafana.com", "prometheus.io", "acme-v02.api.letsencrypt.org",
+}
+
 // deadTLDs are real, resolvable TLDs under which a RANDOM second-level label is
 // almost certainly unregistered — a plausible-looking NXDOMAIN (#4 fail chaff),
 // unlike .invalid which no real client ever queries.
@@ -195,6 +242,7 @@ type Source interface {
 	SessionSeed() (string, error)
 	RevisitInterval(domain string) (time.Duration, bool)
 	SampleClient() (querylog.ClientPersona, error)
+	ClientClass(client string) (string, error)
 }
 
 // Engine emits background noise queries at a randomized rate, mixing replayed
@@ -389,15 +437,33 @@ var personaShape = [24]float64{
 	0.72, 0.70, 0.68, 0.70, 0.75, 0.85, 0.95, 1.00, 0.95, 0.80, 0.50, 0.25, // 12-23
 }
 
+// enterpriseShape is the office-diurnal activity shape: a sharp 07-09 ramp, a
+// sustained daytime plateau, an evening drop — over a high overnight FLOOR (never
+// near 0) that stands in for 24/7 servers + always-on IoT beaconing. Selected when
+// PersonaProfile is "enterprise"; scaled between the (higher) enterprise curve's
+// trough and peak by targetCurve.
+//
+//nolint:gochecknoglobals
+var enterpriseShape = [24]float64{
+	0.40, 0.38, 0.37, 0.37, 0.38, 0.42, 0.55, 0.80, 0.95, 1.00, 0.98, 0.97, // 00-11
+	0.95, 0.97, 0.98, 0.95, 0.90, 0.80, 0.60, 0.50, 0.45, 0.43, 0.42, 0.41, // 12-23
+}
+
 // targetCurve is the persona's target TOTAL egress (queries/min) for t's local
-// hour, interpolated between TargetQPMTrough and TargetQPMPeak by personaShape.
+// hour, interpolated between the resolved trough/peak (EffectivePersonaCurve —
+// preset + explicit overrides) by the profile's activity shape.
 func (e *Engine) targetCurve(t time.Time) float64 {
-	trough, peak := e.cfg.TargetQPMTrough, e.cfg.TargetQPMPeak
+	peak, trough := e.cfg.EffectivePersonaCurve()
 	if peak < trough {
 		peak = trough
 	}
 
-	return trough + personaShape[t.Hour()]*(peak-trough)
+	shape := personaShape
+	if e.cfg.PersonaProfile == "enterprise" {
+		shape = enterpriseShape
+	}
+
+	return trough + shape[t.Hour()]*(peak-trough)
 }
 
 // recentRealQPM is the live real-query rate (queries/min) over realWindow.
@@ -582,6 +648,9 @@ type decoyQuery struct {
 	replay       bool   // sourced from the real-query replay pool
 	allowBlocked bool   // recorded-cohort member: egress even if the box would block it (shadow-completion parity)
 	delayMs      int    // recorded page-load offset from the cohort's first member (cohort emission only)
+	// persona, when non-nil, forces this decoy's client attribution (device-class
+	// routing already chose the client + its class); nil lets resolveOne pick one.
+	persona *querylog.ClientPersona
 }
 
 // sessionCap bounds a synthetic session's length: after this many topical hops
@@ -599,6 +668,25 @@ const sessionCap = 8
 // (#5); persona cover (#8) shapes the RATE at which emit is called, not its
 // content. Cohorts are the recorded texture; sessions are the sequence.
 func (e *Engine) emit(ctx context.Context) {
+	// Device-class routing: attribute this emission to a real client and SHAPE the
+	// chaff to that client's class — iot beacons to vendor telemetry, servers hit
+	// registries/updates — instead of human browsing. Workstation/unknown (and the
+	// disabled/cold-start case) fall through to the browsing path below.
+	if e.cfg.DeviceClass.Enable {
+		if persona, class, ok := e.classPersona(); ok {
+			switch class {
+			case querylog.ClassIoT:
+				e.emitBeacon(ctx, persona)
+
+				return
+			case querylog.ClassServer:
+				e.emitServer(ctx, persona)
+
+				return
+			}
+		}
+	}
+
 	// technique 5 / T9: NXDOMAIN/miss chaff — a word-like random label under a
 	// PUBLIC/list-or-corpus parent. A miss is a lone lookup, so it skips the
 	// structural cohort/cluster paths below.
@@ -941,6 +1029,9 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 	// the synthetic split-upstream identity + name-keyed fingerprint when disabled
 	// or at cold start.
 	persona, attributed := e.pickPersona()
+	if q.persona != nil { // device-class routing already chose the client
+		persona, attributed = *q.persona, true
+	}
 
 	ip := e.clientIP()
 	if attributed {
@@ -1200,6 +1291,138 @@ func (e *Engine) pickPersona() (querylog.ClientPersona, bool) {
 	}
 
 	return e.personas[e.rnd.Intn(len(e.personas))], true
+}
+
+// vendorFamilyNames is the sorted list of vendorTelemetry family keys. Sorted (not
+// map-iteration order) so phantom-family selection is deterministic under a seeded
+// rng — the tests rely on it.
+//
+//nolint:gochecknoglobals
+var vendorFamilyNames = sortedKeys(vendorTelemetry)
+
+func sortedKeys(m map[string][]string) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+
+	sort.Strings(ks)
+
+	return ks
+}
+
+// classPersona attributes an emission to a real client and returns its effective
+// device class. ok=false when persona attribution is off / cold start / class
+// lookup fails, so emit falls back to the browsing path.
+func (e *Engine) classPersona() (querylog.ClientPersona, string, bool) {
+	persona, ok := e.pickPersona()
+	if !ok {
+		return persona, "", false
+	}
+
+	class, err := e.source.ClientClass(persona.IP)
+	if err != nil {
+		e.logger.WithError(err).Debug("client class lookup failed")
+
+		return persona, "", false
+	}
+
+	return persona, class, true
+}
+
+// emitBeacon fires one IoT-shaped BEACON attributed to persona: a low-diversity
+// lookup to a vendor-telemetry endpoint (or generic device chatter when vendor
+// telemetry is disabled). One query, not a burst — IoT devices beacon, they don't
+// browse; cadence/regularity is handled by the persona rate curve, not per-query.
+func (e *Engine) emitBeacon(ctx context.Context, persona querylog.ClientPersona) {
+	var q decoyQuery
+	if e.cfg.DeviceClass.VendorTelemetry {
+		q = e.beaconQuery()
+	} else {
+		q = e.chatterQuery()
+	}
+
+	q.persona = &persona
+	e.resolveOne(ctx, q)
+}
+
+// beaconQuery returns one vendor-telemetry beacon. Qtype is A-dominant (low
+// diversity, matching a real beacon). beaconFamily obscures the real fleet: a
+// PhantomDevicesPct share draws from a family NOT configured as present, so the
+// on-wire beacon mix can't be read for the site's true vendor or device count.
+func (e *Engine) beaconQuery() decoyQuery {
+	hosts := vendorTelemetry[e.beaconFamily()]
+
+	qtype := dns.TypeA
+	if e.rnd.Intn(5) == 0 { //nolint:mnd // ~20% AAAA — keep qtype diversity low
+		qtype = dns.TypeAAAA
+	}
+
+	return decoyQuery{name: hosts[e.rnd.Intn(len(hosts))], qtype: qtype, source: provBeacon}
+}
+
+// beaconFamily picks which vendor family to beacon to. With PhantomDevicesPct (or
+// when no "real" families are configured) it draws a PHANTOM family — one not in
+// cfg.VendorFamilies — so beacons to vendors the site doesn't run mask the real
+// fleet's vendor and device count. Otherwise it beacons to a configured family.
+func (e *Engine) beaconFamily() string {
+	real := knownFamilies(e.cfg.DeviceClass.VendorFamilies)
+
+	if len(real) == 0 || e.rndPct(e.cfg.DeviceClass.PhantomDevicesPct) {
+		return e.phantomFamily(real)
+	}
+
+	return real[e.rnd.Intn(len(real))]
+}
+
+// phantomFamily returns a family not in exclude (a vendor the site may not run).
+// Falls back to any family when every known family is excluded.
+func (e *Engine) phantomFamily(exclude []string) string {
+	pool := make([]string, 0, len(vendorFamilyNames))
+
+	for _, f := range vendorFamilyNames {
+		if !containsStr(exclude, f) {
+			pool = append(pool, f)
+		}
+	}
+
+	if len(pool) == 0 {
+		pool = vendorFamilyNames
+	}
+
+	return pool[e.rnd.Intn(len(pool))]
+}
+
+// knownFamilies filters names to those with an embedded endpoint set (unknown
+// family names in config are ignored rather than crashing).
+func knownFamilies(names []string) []string {
+	out := make([]string, 0, len(names))
+
+	for _, n := range names {
+		if _, ok := vendorTelemetry[n]; ok {
+			out = append(out, n)
+		}
+	}
+
+	return out
+}
+
+func containsStr(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+
+	return false
+}
+
+// emitServer fires one SERVER-shaped lookup attributed to persona: a registry/
+// update/monitoring endpoint (A record), not a human page load.
+func (e *Engine) emitServer(ctx context.Context, persona querylog.ClientPersona) {
+	q := decoyQuery{name: serverTelemetry[e.rnd.Intn(len(serverTelemetry))], qtype: dns.TypeA, source: provServer}
+	q.persona = &persona
+	e.resolveOne(ctx, q)
 }
 
 func hasPersona(ps []querylog.ClientPersona, ip string) bool {

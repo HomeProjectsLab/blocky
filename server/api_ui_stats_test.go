@@ -80,7 +80,7 @@ var _ = Describe("Stats UI API", func() {
 
 		hub = querylog.NewHub()
 		router = chi.NewRouter()
-		registerStatsUIEndpoints(router, cfg, hub, nil)
+		registerStatsUIEndpoints(router, cfg, hub, nil, nil)
 	})
 
 	Describe("GET /api/ui/stats/overview", func() {
@@ -245,7 +245,7 @@ var _ = Describe("Stats UI API", func() {
 			cfg.QueryLog = config.QueryLog{Type: config.QueryLogTypeConsole}
 
 			router = chi.NewRouter()
-			registerStatsUIEndpoints(router, cfg, nil, nil)
+			registerStatsUIEndpoints(router, cfg, nil, nil, nil)
 		})
 
 		It("responds 503 on stats, queries and stream", func() {

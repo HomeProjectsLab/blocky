@@ -239,7 +239,20 @@
     </section>
 {{else if eq .Page "clients"}}
     <div class="page-head"><h1>Clients</h1></div>
+    <section class="panel">
+        <h2>Device classes &amp; personas</h2>
+        <p class="empty">Each client is auto-classified from how it actually queries DNS — <strong>IoT</strong> devices beacon to a few fixed vendor-telemetry endpoints, <strong>servers</strong> hit registries / package mirrors / updates, <strong>workstations</strong> browse the open web. The decoy engine shapes each client's cover traffic to match its class, so IoT and servers don't get browsing-shaped noise (which would itself be a tell). Override the guess if it's wrong; "auto" hands it back to the classifier.</p>
+        <div class="wire-scroll">
+            <table class="wire" id="cc-table">
+                <thead><tr><th>client</th><th>detected</th><th>effective</th><th>override</th></tr></thead>
+                <tbody id="cc-body"></tbody>
+            </table>
+        </div>
+        <p class="empty" id="cc-empty" hidden>No classified clients yet — the classifier needs at least 20 real queries per client.</p>
+        <span id="cc-msg" class="empty"></span>
+    </section>
     <section class="panel panel-flush">
+        <h2>Activity</h2>
         <div class="wire-scroll">
             <table class="wire" id="cl-table">
                 <thead><tr><th>client</th><th class="num">queries</th><th class="num">blocked</th><th>last seen</th></tr></thead>

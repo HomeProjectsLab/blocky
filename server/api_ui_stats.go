@@ -19,8 +19,10 @@ import (
 // registerStatsUIEndpoints wires the stats/noise/queries API and returns the
 // statsAPI so the server can Close its lazily-opened read-only reader on
 // shutdown/rebuild (otherwise each apply leaks one sqlite RO connection).
-func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog.Hub, store *configstore.Store) *statsAPI {
-	s := &statsAPI{qlCfg: cfg.QueryLog, hub: hub, store: store, start: time.Now()}
+func registerStatsUIEndpoints(
+	router *chi.Mux, cfg *config.Config, hub *querylog.Hub, store *configstore.Store, classifier clientClassifier,
+) *statsAPI {
+	s := &statsAPI{qlCfg: cfg.QueryLog, hub: hub, store: store, classifier: classifier, start: time.Now()}
 
 	router.Route("/api/ui/stats", func(r chi.Router) {
 		r.Get("/overview", s.overview)
@@ -40,6 +42,8 @@ func registerStatsUIEndpoints(router *chi.Mux, cfg *config.Config, hub *querylog
 	router.Get("/api/ui/stream", s.stream)
 	router.Get("/api/ui/system", s.system)
 	router.Get("/api/ui/clients", s.clients)
+	router.Get("/api/ui/clients/classes", s.clientClasses)
+	router.Put("/api/ui/clients/classes/{client}", s.putClientClass)
 	router.Get("/api/ui/clients/{name}", s.clientDetail)
 	router.Get("/api/ui/privacy", s.getPrivacy)
 	router.Put("/api/ui/privacy", s.putPrivacy)
@@ -64,10 +68,11 @@ func (s *statsAPI) Close() error {
 }
 
 type statsAPI struct {
-	qlCfg config.QueryLog
-	hub   *querylog.Hub
-	store *configstore.Store
-	start time.Time
+	qlCfg      config.QueryLog
+	hub        *querylog.Hub
+	store      *configstore.Store
+	classifier clientClassifier // nil when no decoy store: class endpoints 503
+	start      time.Time
 
 	mu     sync.Mutex
 	reader *querylog.Reader // constructed lazily: the writer must create the DB file first

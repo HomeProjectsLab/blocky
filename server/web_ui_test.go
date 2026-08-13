@@ -61,6 +61,17 @@ var _ = Describe("Web UI shell", func() {
 		})
 	})
 
+	Describe("clients page", func() {
+		It("renders the device-class table + activity table", func() {
+			_, body := get("/clients")
+
+			for _, id := range []string{"cc-table", "cc-body", "cc-empty", "cl-table", "cl-body"} {
+				Expect(body).Should(ContainSubstring(`id="` + id + `"`))
+			}
+			Expect(body).Should(ContainSubstring("Device classes"))
+		})
+	})
+
 	Describe("noise page", func() {
 		It("renders the decoy dashboard container + noise wire", func() {
 			_, body := get("/noise")

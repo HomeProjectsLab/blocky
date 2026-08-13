@@ -3,11 +3,88 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/querylog"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// clientClassifier is the slice of *querylog.DecoySource the clients UI needs to
+// read/override per-client device classes. nil (no decoy store) => 503.
+type clientClassifier interface {
+	ListClientClasses() ([]querylog.ClientClassInfo, error)
+	SetClientClassOverride(client, class string) error
+	RefreshClientClasses() error
+}
+
+type clientClassJSON struct {
+	Client    string `json:"client"`
+	Class     string `json:"class"`     // auto-detected
+	Override  string `json:"override"`  // manual, "" if none
+	Effective string `json:"effective"` // what the engine actually uses
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+// clientClasses lists every client's device class (auto + override). A best-effort
+// refresh runs first so the table reflects current traffic even if no engine timer
+// has fired yet; the engine refreshes on its own cadence too.
+func (s *statsAPI) clientClasses(rw http.ResponseWriter, _ *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "device classification not available"})
+
+		return
+	}
+
+	_ = s.classifier.RefreshClientClasses() // best-effort; stale list is still useful
+
+	list, err := s.classifier.ListClientClasses()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	out := make([]clientClassJSON, 0, len(list))
+	for _, c := range list {
+		j := clientClassJSON{Client: c.Client, Class: c.Class, Override: c.Override, Effective: c.Effective}
+		if !c.UpdatedAt.IsZero() {
+			j.UpdatedAt = c.UpdatedAt.Format(time.RFC3339)
+		}
+
+		out = append(out, j)
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"classes": out})
+}
+
+// putClientClass sets (or clears, with "" / "auto") a client's manual class override.
+func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "device classification not available"})
+
+		return
+	}
+
+	var body struct {
+		Class string `json:"class"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if err := s.classifier.SetClientClassOverride(chi.URLParam(req, "client"), body.Class); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
+}
 
 // Clients + privacy UI endpoints. Registered alongside the other stats
 // endpoints (they share the lazy sqlite reader and the config store).
@@ -80,7 +157,18 @@ type privacyJSON struct {
 		ActiveHoursStart int     `json:"activeHoursStart"`
 		ActiveHoursEnd   int     `json:"activeHoursEnd"`
 		RefreshURL       string  `json:"refreshURL"`
+		PersonaProfile   string  `json:"personaProfile"`
+		TargetQPMPeak    float64 `json:"targetQpmPeak"`
+		TargetQPMTrough  float64 `json:"targetQpmTrough"`
 	} `json:"decoy"`
+	// DeviceClass is DecoyConfig.DeviceClass, surfaced at the top level of the wire
+	// shape so the flat privacy.js panel renderer can bind it like the other sections.
+	DeviceClass struct {
+		Enable            bool     `json:"enable"`
+		VendorTelemetry   bool     `json:"vendorTelemetry"`
+		VendorFamilies    []string `json:"vendorFamilies"`
+		PhantomDevicesPct uint     `json:"phantomDevicesPct"`
+	} `json:"deviceClass"`
 	TTLJitter struct {
 		Enable  bool `json:"enable"`
 		Percent uint `json:"percent"`
@@ -100,6 +188,13 @@ func privacyToJSON(p config.PrivacyConfig) privacyJSON {
 	j.Decoy.ActiveHoursStart = p.Decoy.ActiveHoursStart
 	j.Decoy.ActiveHoursEnd = p.Decoy.ActiveHoursEnd
 	j.Decoy.RefreshURL = p.Decoy.RefreshURL
+	j.Decoy.PersonaProfile = p.Decoy.PersonaProfile
+	j.Decoy.TargetQPMPeak = p.Decoy.TargetQPMPeak
+	j.Decoy.TargetQPMTrough = p.Decoy.TargetQPMTrough
+	j.DeviceClass.Enable = p.Decoy.DeviceClass.Enable
+	j.DeviceClass.VendorTelemetry = p.Decoy.DeviceClass.VendorTelemetry
+	j.DeviceClass.VendorFamilies = p.Decoy.DeviceClass.VendorFamilies
+	j.DeviceClass.PhantomDevicesPct = p.Decoy.DeviceClass.PhantomDevicesPct
 	j.TTLJitter.Enable = p.TTLJitter.Enable
 	j.TTLJitter.Percent = p.TTLJitter.PercentPct
 	j.EDNSPadding.Enable = p.EDNSPadding.Enable
@@ -117,6 +212,16 @@ func (j privacyJSON) toConfig() config.PrivacyConfig {
 	p.Decoy.ActiveHoursStart = j.Decoy.ActiveHoursStart
 	p.Decoy.ActiveHoursEnd = j.Decoy.ActiveHoursEnd
 	p.Decoy.RefreshURL = j.Decoy.RefreshURL
+	p.Decoy.PersonaProfile = j.Decoy.PersonaProfile
+	if p.Decoy.PersonaProfile == "" {
+		p.Decoy.PersonaProfile = "auto" // empty = unset; matches the config default so partial bodies validate
+	}
+	p.Decoy.TargetQPMPeak = j.Decoy.TargetQPMPeak
+	p.Decoy.TargetQPMTrough = j.Decoy.TargetQPMTrough
+	p.Decoy.DeviceClass.Enable = j.DeviceClass.Enable
+	p.Decoy.DeviceClass.VendorTelemetry = j.DeviceClass.VendorTelemetry
+	p.Decoy.DeviceClass.VendorFamilies = j.DeviceClass.VendorFamilies
+	p.Decoy.DeviceClass.PhantomDevicesPct = j.DeviceClass.PhantomDevicesPct
 	p.TTLJitter.Enable = j.TTLJitter.Enable
 	p.TTLJitter.PercentPct = j.TTLJitter.Percent
 	p.EDNSPadding.Enable = j.EDNSPadding.Enable

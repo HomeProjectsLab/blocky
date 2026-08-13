@@ -29,6 +29,7 @@ type mockSource struct {
 	blocked    map[string]bool        // IsBlockedDomain lookup
 	listDomain string                 // SampleList / nextQuery fallback
 	persona    querylog.ClientPersona // SampleClient result
+	class      string                 // ClientClass result (device-class routing)
 }
 
 func (m *mockSource) SeedIfEmpty(io.Reader) (int, error)                 { return 0, nil }
@@ -51,6 +52,13 @@ func (m *mockSource) NextInSession(primary string) (string, error) {
 func (m *mockSource) SessionSeed() (string, error)                  { return m.seed, nil }
 func (m *mockSource) RevisitInterval(string) (time.Duration, bool)  { return m.revisit, m.revisitOK }
 func (m *mockSource) SampleClient() (querylog.ClientPersona, error) { return m.persona, nil }
+func (m *mockSource) ClientClass(string) (string, error) {
+	if m.class == "" {
+		return querylog.ClassUnknown, nil
+	}
+
+	return m.class, nil
+}
 
 var _ = Describe("Structural emission", func() {
 	var cfg config.DecoyConfig

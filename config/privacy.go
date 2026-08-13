@@ -76,9 +76,20 @@ type DecoyConfig struct {
 	// Residual: real usage ABOVE the peak ceiling still spikes total egress — the
 	// curve hides level only up to targetQpmPeak, by design (a truly constant
 	// max-rate cover would cost fixed bandwidth we don't pay on a home box).
-	PersonaCover    bool    `yaml:"personaCover" default:"true"`
-	TargetQPMPeak   float64 `yaml:"targetQpmPeak" default:"40"`  // busy-hour target total egress (queries/min)
-	TargetQPMTrough float64 `yaml:"targetQpmTrough" default:"6"` // pre-dawn quiet target total egress (queries/min)
+	PersonaCover bool `yaml:"personaCover" default:"true"`
+	// PersonaProfile selects the persona-curve preset the compensating cover aims
+	// for: "home" (peak/trough 40/6), "enterprise" (300/60, office-diurnal over a
+	// 24/7 IoT floor), or "auto" (home baseline; the engine may escalate toward the
+	// enterprise curve from observed client classes). The explicit TargetQPM* fields
+	// still override the preset (see EffectivePersonaCurve). "auto" is the default so
+	// a home box behaves exactly as before this field existed.
+	PersonaProfile  string  `yaml:"personaProfile" default:"auto"`
+	TargetQPMPeak   float64 `yaml:"targetQpmPeak" default:"40"`  // busy-hour target total egress (queries/min); the shipped home default
+	TargetQPMTrough float64 `yaml:"targetQpmTrough" default:"6"` // pre-dawn quiet target total egress (queries/min); the shipped home default
+
+	// Device-class awareness: classify each client from its real DNS behavior
+	// (iot / workstation / server / unknown) and shape its cover accordingly.
+	DeviceClass DeviceClassConfig `yaml:"deviceClass"`
 
 	// Per-query realism + operational (device chatter, transport/qtype/failure
 	// diversity, per-client personas, adaptive back-off).
@@ -102,6 +113,67 @@ type DecoyConfig struct {
 	PrewarmEnable        bool   `yaml:"prewarmEnable" default:"true"`
 	PrewarmURL           string `yaml:"prewarmURL"` // optional trending source (Tranco rising / CF Radar CSV/txt); empty = embedded band
 	PrewarmIntervalHours uint   `yaml:"prewarmIntervalHours" default:"12"`
+}
+
+// DeviceClassConfig controls per-device-class decoy shaping. IoT devices beacon
+// to fixed vendor telemetry (they do not browse) and servers hit
+// registry/update/monitoring endpoints; emitting BROWSING-shaped cover for them
+// is itself a tell. When Enable is on, the engine reads each client's cached
+// class (querylog.DecoySource.ClientClass) and shapes its chaff to match.
+type DeviceClassConfig struct {
+	// Enable turns on classification + per-class shaping. Off = every client gets
+	// the browsing-shaped cover (pre-device-class behaviour).
+	Enable bool `yaml:"enable" default:"true"`
+	// VendorTelemetry emits vendor-telemetry chaff (fixed beacon endpoints) for
+	// iot/server-classed clients instead of browse companions.
+	VendorTelemetry bool `yaml:"vendorTelemetry" default:"true"`
+	// VendorFamilies names which telemetry families to draw beacon domains from
+	// (e.g. "apple", "google", "amazon", "microsoft", "samsung", "tuya", "sonos").
+	// Empty = the engine's built-in default family set.
+	VendorFamilies []string `yaml:"vendorFamilies"`
+	// PhantomDevicesPct is the share of vendor-telemetry chaff drawn from families
+	// NOT present in the real fleet, to obscure true fleet size and vendor mix.
+	// 0 = only mirror observed vendors.
+	PhantomDevicesPct uint `yaml:"phantomDevicesPct" default:"20"`
+}
+
+// personaPreset is a (peak, trough) queries/min target curve.
+type personaPreset struct{ Peak, Trough float64 }
+
+const (
+	homeDefaultPeak   = 40 // must match TargetQPMPeak's default tag
+	homeDefaultTrough = 6  // must match TargetQPMTrough's default tag
+)
+
+// personaPresets maps PersonaProfile to its busy-hour/quiet-hour target curve.
+var personaPresets = map[string]personaPreset{
+	"home":       {Peak: homeDefaultPeak, Trough: homeDefaultTrough},
+	"auto":       {Peak: homeDefaultPeak, Trough: homeDefaultTrough},
+	"enterprise": {Peak: 300, Trough: 60},
+}
+
+// EffectivePersonaCurve resolves the compensating-cover target curve the engine
+// should aim for: the PersonaProfile preset, with any explicit TargetQPM* value
+// overriding it. This is what the engine consumes instead of the raw fields.
+//
+// ponytail: an override is detected as "field differs from the shipped home
+// default". So an enterprise deployment that genuinely wants exactly 40/6 must
+// nudge it (e.g. 40.0001); harmless. Add an explicit *float64 sentinel only if a
+// user ever hits that.
+func (c *DecoyConfig) EffectivePersonaCurve() (peak, trough float64) {
+	peak, trough = c.TargetQPMPeak, c.TargetQPMTrough
+
+	if p, ok := personaPresets[c.PersonaProfile]; ok {
+		if peak == homeDefaultPeak {
+			peak = p.Peak
+		}
+
+		if trough == homeDefaultTrough {
+			trough = p.Trough
+		}
+	}
+
+	return peak, trough
 }
 
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.
@@ -189,13 +261,22 @@ func (c *DecoyConfig) validate() error {
 		return fmt.Errorf("privacy.decoy: failChaffPct (%d) must be in [0, 100]", c.FailChaffPct)
 	}
 
-	if c.TargetQPMTrough < 0 {
-		return fmt.Errorf("privacy.decoy: targetQpmTrough (%.2f) must be >= 0", c.TargetQPMTrough)
+	if _, ok := personaPresets[c.PersonaProfile]; !ok {
+		return fmt.Errorf("privacy.decoy: personaProfile (%q) must be one of home, enterprise, auto", c.PersonaProfile)
 	}
 
-	if c.TargetQPMPeak < c.TargetQPMTrough {
-		return fmt.Errorf("privacy.decoy: targetQpmPeak (%.2f) must be >= targetQpmTrough (%.2f)",
-			c.TargetQPMPeak, c.TargetQPMTrough)
+	peak, trough := c.EffectivePersonaCurve()
+	if trough < 0 {
+		return fmt.Errorf("privacy.decoy: targetQpmTrough (%.2f) must be >= 0", trough)
+	}
+
+	if peak < trough {
+		return fmt.Errorf("privacy.decoy: targetQpmPeak (%.2f) must be >= targetQpmTrough (%.2f)", peak, trough)
+	}
+
+	if c.DeviceClass.PhantomDevicesPct > 100 {
+		return fmt.Errorf("privacy.decoy: deviceClass.phantomDevicesPct (%d) must be in [0, 100]",
+			c.DeviceClass.PhantomDevicesPct)
 	}
 
 	return nil

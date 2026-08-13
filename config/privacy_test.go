@@ -42,6 +42,11 @@ var _ = Describe("Privacy config", func() {
 			Expect(p.Decoy.FailChaffPct).Should(Equal(uint(8)))
 			Expect(p.Decoy.PersonaAttribution).Should(BeTrue())
 			Expect(p.Decoy.AdaptiveBackoff).Should(BeTrue())
+			Expect(p.Decoy.PersonaProfile).Should(Equal("auto"))
+			Expect(p.Decoy.DeviceClass.Enable).Should(BeTrue())
+			Expect(p.Decoy.DeviceClass.VendorTelemetry).Should(BeTrue())
+			Expect(p.Decoy.DeviceClass.VendorFamilies).Should(BeEmpty())
+			Expect(p.Decoy.DeviceClass.PhantomDevicesPct).Should(Equal(uint(20)))
 			Expect(p.TTLJitter.Enable).Should(BeFalse())
 			Expect(p.TTLJitter.PercentPct).Should(Equal(uint(10)))
 			Expect(p.EDNSPadding.Enable).Should(BeFalse())
@@ -151,6 +156,40 @@ var _ = Describe("Privacy config", func() {
 			p.Decoy.TargetQPMTrough = 40
 			p.Decoy.TargetQPMPeak = 10
 			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("targetQpmPeak")))
+		})
+
+		It("rejects an unknown personaProfile", func() {
+			p.Decoy.Enable = true
+			p.Decoy.PersonaProfile = "datacenter"
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("personaProfile")))
+		})
+
+		It("rejects deviceClass.phantomDevicesPct above 100", func() {
+			p.Decoy.Enable = true
+			p.Decoy.DeviceClass.PhantomDevicesPct = 101
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("phantomDevicesPct")))
+		})
+
+		It("applies the enterprise persona preset when targets are left at home defaults", func() {
+			p.Decoy.PersonaProfile = "enterprise"
+			peak, trough := p.Decoy.EffectivePersonaCurve()
+			Expect(peak).Should(Equal(float64(300)))
+			Expect(trough).Should(Equal(float64(60)))
+		})
+
+		It("lets explicit targets override the persona preset", func() {
+			p.Decoy.PersonaProfile = "enterprise"
+			p.Decoy.TargetQPMPeak = 120
+			p.Decoy.TargetQPMTrough = 20
+			peak, trough := p.Decoy.EffectivePersonaCurve()
+			Expect(peak).Should(Equal(float64(120)))
+			Expect(trough).Should(Equal(float64(20)))
+		})
+
+		It("keeps the home curve for the auto profile", func() {
+			peak, trough := p.Decoy.EffectivePersonaCurve()
+			Expect(peak).Should(Equal(float64(40)))
+			Expect(trough).Should(Equal(float64(6)))
 		})
 
 		It("rejects ttlJitter percent above 90", func() {
