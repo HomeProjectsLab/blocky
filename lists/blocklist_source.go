@@ -20,6 +20,11 @@ const BlocklistSourcePrefix = "blocklist:"
 // (lists cannot import querylog — metrics→lists would cycle).
 type BlocklistProvider interface {
 	ForEachBlocklistDomain(category string, fn func(domain string) error) error
+
+	// BlocklistVersion returns the category's stored content-version, so the list
+	// loader can tell whether an updater refresh changed it (and bust that group's
+	// reuse fingerprint) without importing querylog. "" when unknown.
+	BlocklistVersion(category string) (string, error)
 }
 
 //nolint:gochecknoglobals // process-wide registry, set once by the server before resolvers are built
@@ -42,6 +47,24 @@ func blocklistProvider() BlocklistProvider {
 	defer blProviderMu.RUnlock()
 
 	return blProvider
+}
+
+// blocklistVersion returns a category's content-version through the registered
+// provider, or "" when no provider is registered or the lookup fails. "" is a
+// safe fingerprint input: two builds with no provider hash identically, and a
+// build that later gains a real version hashes differently, forcing a rebuild.
+func blocklistVersion(category string) string {
+	p := blocklistProvider()
+	if p == nil {
+		return ""
+	}
+
+	v, err := p.BlocklistVersion(category)
+	if err != nil {
+		return ""
+	}
+
+	return v
 }
 
 // blocklistOpener adapts one category of the blocklist_domains table to the

@@ -30,6 +30,8 @@ func (f *fakeProvider) ForEachBlocklistDomain(category string, fn func(domain st
 	return nil
 }
 
+func (f *fakeProvider) BlocklistVersion(string) (string, error) { return "", nil }
+
 var _ = Describe("blocklist source adapter", func() {
 	AfterEach(func() {
 		SetBlocklistProvider(nil)

@@ -88,6 +88,31 @@ func remainingGroups(groups []string, matched map[string]string) []string {
 	return out
 }
 
+// SnapshotGroup captures the group across every sub-cache as one handle. The
+// per-sub-cache order matches construction, so RestoreGroup can fan it back out.
+func (c *ChainedGroupedCache) SnapshotGroup(group string) any {
+	snaps := make([]any, len(c.caches))
+	for i, cache := range c.caches {
+		snaps[i] = cache.SnapshotGroup(group)
+	}
+
+	return snaps
+}
+
+// RestoreGroup installs a ChainedGroupedCache snapshot by reference, one
+// sub-cache at a time. A non-matching snapshot clears the group (fail-safe).
+func (c *ChainedGroupedCache) RestoreGroup(group string, snapshot any) {
+	snaps, _ := snapshot.([]any)
+	for i, cache := range c.caches {
+		var s any
+		if i < len(snaps) {
+			s = snaps[i]
+		}
+
+		cache.RestoreGroup(group, s)
+	}
+}
+
 func (c *ChainedGroupedCache) Refresh(group string) GroupFactory {
 	cacheFactories := make([]GroupFactory, len(c.caches))
 	for i, cache := range c.caches {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	"github.com/sirupsen/logrus"
@@ -144,8 +145,44 @@ func (b *ListCache) refresh(ctx context.Context) error {
 	producersGrp := jobgroup.WithMaxConcurrency(unlimitedGrp, b.cfg.Concurrency)
 	defer producersGrp.Close()
 
+	// Accumulates this build's per-group fingerprints+snapshots; registered once,
+	// atomically, after every group settles (see registerReusableGroups).
+	var (
+		builtMu sync.Mutex
+		built   = make(map[string]reusableGroup, len(b.groupSources))
+	)
+
 	for group, sources := range b.groupSources {
 		unlimitedGrp.Go(func(ctx context.Context) error {
+			// Only groups whose content is fully captured by the fingerprint are
+			// reuse-eligible; http/file groups always rebuild (may change out-of-band).
+			eligible := groupReuseEligible(sources)
+			fp := ""
+
+			if eligible {
+				fp = groupFingerprint(sources)
+
+				// Unchanged group: reuse the prior build's immutable cache by reference
+				// instead of re-streaming it from the DB. This is the whole fix.
+				if snap, ok := lookupReusableGroup(b.listType, group, fp); ok {
+					b.groupedCache.RestoreGroup(group, snap)
+
+					builtMu.Lock()
+					built[group] = reusableGroup{fingerprint: fp, snapshot: snap}
+					builtMu.Unlock()
+
+					count := b.groupedCache.ElementCount(group)
+					evt.Bus().Publish(evt.BlockingCacheGroupChanged, b.listType, group, count)
+
+					logger().WithFields(logrus.Fields{
+						logFieldGroup:      group,
+						logFieldTotalCount: count,
+					}).Info("group unchanged, reused cache")
+
+					return nil
+				}
+			}
+
 			err := b.createCacheForGroup(producersGrp, unlimitedGrp, group, sources)
 			if err != nil {
 				count := b.groupedCache.ElementCount(group)
@@ -164,6 +201,14 @@ func (b *ListCache) refresh(ctx context.Context) error {
 				return fmt.Errorf("failed to create cache for group %s: %w", group, err)
 			}
 
+			// Register only reuse-eligible groups; ineligible ones are never looked
+			// up, so leaving them out keeps the registry from pinning stale caches.
+			if eligible {
+				builtMu.Lock()
+				built[group] = reusableGroup{fingerprint: fp, snapshot: b.groupedCache.SnapshotGroup(group)}
+				builtMu.Unlock()
+			}
+
 			count := b.groupedCache.ElementCount(group)
 
 			evt.Bus().Publish(evt.BlockingCacheGroupChanged, b.listType, group, count)
@@ -180,6 +225,11 @@ func (b *ListCache) refresh(ctx context.Context) error {
 	if err := unlimitedGrp.Wait(); err != nil {
 		return fmt.Errorf("failed to refresh %s list cache: %w", b.listType, err)
 	}
+
+	// Only publish the registry on a fully successful build: a partial failure
+	// leaves the prior registry intact so the next refresh retries from a known
+	// state rather than reusing a half-built set.
+	registerReusableGroups(b.listType, built)
 
 	return nil
 }

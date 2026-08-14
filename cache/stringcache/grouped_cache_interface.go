@@ -16,6 +16,18 @@ type GroupedStringCache interface {
 
 	// ElementCount returns the amount of elements in the group
 	ElementCount(group string) int
+
+	// SnapshotGroup captures the group's currently-built cache as an opaque,
+	// by-reference handle. The built caches are immutable after construction, so
+	// the handle can be installed into another cache of the same concrete type
+	// (via RestoreGroup) without copying or re-parsing the group's entries. Used
+	// to reuse an unchanged blocklist group across a resolver rebuild.
+	SnapshotGroup(group string) any
+
+	// RestoreGroup installs a snapshot previously returned by SnapshotGroup on a
+	// cache of the same concrete type, by reference (copy-on-write). The two
+	// caches then share one immutable copy of the group's entries.
+	RestoreGroup(group string, snapshot any)
 }
 
 type GroupFactory interface {

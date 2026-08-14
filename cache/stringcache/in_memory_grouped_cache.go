@@ -73,6 +73,19 @@ func (c *InMemoryGroupedCache) Contains(searchString string, groups []string) ma
 	return result
 }
 
+// SnapshotGroup returns the group's built stringCache (nil when absent) as an
+// opaque handle. The stringCache is immutable post-build, so it is safe to share.
+func (c *InMemoryGroupedCache) SnapshotGroup(group string) any {
+	return (*c.caches.Load())[group]
+}
+
+// RestoreGroup installs a SnapshotGroup handle by reference via the same
+// copy-on-write path as a normal refresh. A nil/absent snapshot clears the group.
+func (c *InMemoryGroupedCache) RestoreGroup(group string, snapshot any) {
+	sc, _ := snapshot.(stringCache) // nil interface when the group was absent
+	c.storeGroup(group, sc)
+}
+
 func (c *InMemoryGroupedCache) Refresh(group string) GroupFactory {
 	return &inMemoryGroupFactory{
 		factory:  c.factoryFn(),

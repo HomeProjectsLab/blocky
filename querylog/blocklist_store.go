@@ -59,6 +59,14 @@ func (s *DecoySource) GetListMeta(source, category string) (string, error) {
 	return m.Version, nil
 }
 
+// BlocklistVersion returns the stored blocklistproject upstream version for a
+// category (or "" when none recorded). The list loader folds it into a group's
+// reuse fingerprint so an updater refresh (which bumps the version) busts only
+// that category's cache — without lists having to import querylog.
+func (s *DecoySource) BlocklistVersion(category string) (string, error) {
+	return s.GetListMeta("blocklistproject", category)
+}
+
 // SetListMeta upserts the stored version for (source, category).
 func (s *DecoySource) SetListMeta(source, category, version string) error {
 	return s.db.Clauses(clause.OnConflict{
