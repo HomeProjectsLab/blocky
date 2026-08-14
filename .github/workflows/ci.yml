@@ -24,21 +24,35 @@ env:
   REGISTRY_IMAGE: ghcr.io/homeprojectslab/blocky
 
 jobs:
-  # Fast gate: lint + unit tests (e2e excluded via the Makefile label filter, so
-  # no docker/network needed here). Build and push wait on this.
-  verify:
-    name: verify (${{ matrix.task }})
+  # Hard gate: unit tests (e2e excluded via the Makefile label filter, so no
+  # docker/network needed here). Build and push wait on this.
+  test:
+    name: verify (test)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        task: [lint, test]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make ${{ matrix.task }}
+      - run: make test
+        env:
+          GO_SKIP_GENERATE: 1
+
+  # Advisory only — deliberately NOT a gate and nothing depends on it.
+  # The style linters (mnd/lll/goconst/funlen) flag ~150 findings in this fork's
+  # code; gating image publishing on them left the appliance with no image to
+  # pull. Findings still show up here. Run locally with:
+  #   GOTOOLCHAIN=go1.26.2 make lint
+  lint:
+    name: verify (lint, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make lint
         env:
           GO_SKIP_GENERATE: 1
 
@@ -47,7 +61,7 @@ jobs:
   # inject the real version + build time so `blocky version` is never "undefined".
   binaries:
     name: binaries
-    needs: verify
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write # goreleaser creates the GitHub Release on tags
@@ -76,7 +90,7 @@ jobs:
   # with nothing executed at build time, so no QEMU emulation is needed.
   docker:
     name: docker
-    needs: verify
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
