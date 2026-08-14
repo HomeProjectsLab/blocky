@@ -223,13 +223,13 @@
         <div class="panel">
             <h2>Always allow</h2>
             <p class="empty">Domains that are never blocked, for anyone. Supports *.wildcards and /regex/.</p>
-            <div class="ctl-row"><input type="text" id="allow-in" placeholder="good.example.com" autocomplete="off"><button id="allow-add">Allow</button></div>
+            <div class="ctl-row"><textarea id="allow-in" rows="1" placeholder="good.example.com  (or paste a space/newline-separated list)" autocomplete="off" spellcheck="false"></textarea><button id="allow-add">Allow</button></div>
             <ul class="entry-list" id="allow-list"></ul>
         </div>
         <div class="panel">
             <h2>Always block</h2>
             <p class="empty">Domains that are always blocked, for everyone.</p>
-            <div class="ctl-row"><input type="text" id="deny-in" placeholder="bad.example.com" autocomplete="off"><button id="deny-add">Block</button></div>
+            <div class="ctl-row"><textarea id="deny-in" rows="1" placeholder="bad.example.com  (or paste a space/newline-separated list)" autocomplete="off" spellcheck="false"></textarea><button id="deny-add">Block</button></div>
             <ul class="entry-list" id="deny-list"></ul>
         </div>
     </section>

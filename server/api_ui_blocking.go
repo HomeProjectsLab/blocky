@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/querylog"
@@ -201,14 +203,42 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 			add = b.store.AddAllowEntry
 		}
 
-		id, err := add(body.Group, body.Domain)
-		if err != nil {
-			badRequest(rw, err)
+		// Accept a whole pasted list, not just one domain: split on any
+		// whitespace or comma and strip a trailing URL path, then add each. So
+		// the box takes "a.com" or "a.com b.com, c.com/x" equally.
+		ids := make([]uint, 0)
+		skipped := make([]string, 0)
+
+		for _, tok := range strings.FieldsFunc(body.Domain, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ','
+		}) {
+			if i := strings.IndexByte(tok, '/'); i >= 0 {
+				tok = tok[:i] // a domain, not a URL
+			}
+
+			if tok == "" {
+				continue
+			}
+
+			id, err := add(body.Group, tok)
+			if err != nil {
+				skipped = append(skipped, tok)
+
+				continue
+			}
+
+			ids = append(ids, id)
+		}
+
+		if len(ids) == 0 {
+			badRequest(rw, fmt.Errorf("no valid domains in %q", body.Domain))
 
 			return
 		}
 
-		writeJSON(rw, http.StatusOK, map[string]any{"id": id, "needsApply": true})
+		writeJSON(rw, http.StatusOK, map[string]any{
+			"added": len(ids), "ids": ids, "skipped": skipped, "needsApply": true,
+		})
 	}
 }
 

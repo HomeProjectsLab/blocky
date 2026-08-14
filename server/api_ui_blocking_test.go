@@ -167,8 +167,9 @@ var _ = Describe("Blocking UI API", func() {
 
 			body := jsonBody(rec)
 			Expect(body["needsApply"]).Should(BeTrue())
+			Expect(body["added"]).Should(BeNumerically("==", 1))
 
-			id := int(body["id"].(float64))
+			id := int(body["ids"].([]any)[0].(float64))
 			Expect(id).Should(BeNumerically(">", 0))
 
 			rec = exec(http.MethodDelete, "/api/ui/blocking/deny/"+strconv.Itoa(id), "")
@@ -177,6 +178,21 @@ var _ = Describe("Blocking UI API", func() {
 			denies, err := store.ListDenyEntries()
 			Expect(err).Should(Succeed())
 			Expect(denies).Should(BeEmpty())
+		})
+
+		It("adds a whole pasted list at once (space/comma/newline, strips URL paths)", func() {
+			rec := exec(http.MethodPost, "/api/ui/blocking/deny",
+				`{"domain":"a.com b.com,c.com\nd.com/gampad/ads"}`)
+			Expect(rec.Code).Should(Equal(http.StatusOK))
+			Expect(jsonBody(rec)["added"]).Should(BeNumerically("==", 4))
+
+			denies, err := store.ListDenyEntries()
+			Expect(err).Should(Succeed())
+			domains := make([]string, len(denies))
+			for i, d := range denies {
+				domains[i] = d.Domain
+			}
+			Expect(domains).Should(ConsistOf("a.com", "b.com", "c.com", "d.com")) // path stripped
 		})
 
 		It("adds an allow entry", func() {
@@ -189,8 +205,8 @@ var _ = Describe("Blocking UI API", func() {
 			Expect(allows[0].Domain).Should(Equal("good.example.com"))
 		})
 
-		It("rejects a garbage domain with 400", func() {
-			rec := exec(http.MethodPost, "/api/ui/blocking/deny", `{"domain":"two words"}`)
+		It("rejects input with no valid domains with 400", func() {
+			rec := exec(http.MethodPost, "/api/ui/blocking/deny", `{"domain":"   "}`)
 			Expect(rec.Code).Should(Equal(http.StatusBadRequest))
 		})
 

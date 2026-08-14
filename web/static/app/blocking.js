@@ -229,14 +229,23 @@ function wireAdd(kind) {
         const domain = input.value.trim();
         if (!domain) return;
         try {
+            // domain may be one entry or a whole pasted list (space/comma/newline
+            // separated); the server splits it.
             const r = await send("POST", `/api/ui/blocking/${kind}`, { group: "manual", domain });
             input.value = "";
+            if (r.added > 1 || (r.skipped && r.skipped.length)) {
+                const msg = `Added ${r.added}` + (r.skipped && r.skipped.length ? `, skipped ${r.skipped.length} invalid` : "");
+                flash(msg, r.skipped && r.skipped.length > 0);
+            }
             if (r.needsApply) showApply(true);
             load();
         } catch (err) { flash(err.message, true); }
     };
     document.getElementById(`${kind}-add`).addEventListener("click", add);
-    input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); add(); } });
+    // Enter adds; Shift+Enter inserts a newline (so a multi-line list can be pasted/typed).
+    input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); add(); }
+    });
 }
 wireAdd("allow");
 wireAdd("deny");

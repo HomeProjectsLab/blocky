@@ -113,12 +113,14 @@ h2 {
 .empty { color: var(--muted); margin: 0.5rem 0; }
 
 /* ---------- buttons + inputs ---------- */
-button, input, select {
+button, input, select, textarea {
     font: 13px var(--font-body); color: var(--ink);
     background: var(--bg2); border: 1px solid var(--grid); border-radius: 4px;
     padding: 0.35rem 0.7rem;
 }
-input, select { font-family: var(--font-mono); font-size: 12px; }
+input, select, textarea { font-family: var(--font-mono); font-size: 12px; }
+/* allow/deny box: sits inline like an input but can grow for a pasted list */
+.ctl-row textarea { flex: 1; min-width: 12rem; resize: vertical; line-height: 1.4; }
 button { cursor: pointer; }
 button:hover { border-color: var(--muted); }
 button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
