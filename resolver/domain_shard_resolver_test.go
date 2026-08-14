@@ -172,3 +172,12 @@ var _ = Describe("DomainShardResolver", Label("domainShardResolver"), func() {
 		})
 	})
 })
+
+var _ = Describe("DomainShardResolver guards", func() {
+	It("shardIndex returns 0 instead of panicking when there are no upstreams", func() {
+		// modulo by len(resolvers) would be a division by zero; the DNS hot path
+		// must never panic on an empty group.
+		Expect(func() { shardIndex(123, "example.com", 0) }).ShouldNot(Panic())
+		Expect(shardIndex(123, "example.com", 0)).Should(Equal(uint64(0)))
+	})
+})

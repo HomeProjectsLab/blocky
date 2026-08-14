@@ -90,6 +90,12 @@ func (r *DomainShardResolver) shardSalt() uint64 {
 // shardIndex maps a shard key to an upstream index, mixing the rotation salt into
 // the hash so the same key lands on a different upstream once the salt rotates.
 func shardIndex(salt uint64, key string, n int) uint64 {
+	if n <= 0 {
+		// No upstreams to shard across. Callers must handle the empty case, but
+		// never let a modulo-by-zero panic escape into the DNS hot path.
+		return 0
+	}
+
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], salt)
 
@@ -97,7 +103,7 @@ func shardIndex(salt uint64, key string, n int) uint64 {
 	_, _ = h.Write(buf[:])
 	_, _ = h.Write([]byte(key))
 
-	return h.Sum64() % uint64(n)
+	return h.Sum64() % uint64(n) //nolint:gosec // n > 0 checked above
 }
 
 // Resolve delegates the request to the upstream the query's eTLD+1 hashes to,
@@ -106,6 +112,9 @@ func (r *DomainShardResolver) Resolve(ctx context.Context, request *model.Reques
 	ctx, logger := r.log(ctx)
 
 	resolvers := *r.resolvers.Load()
+	if len(resolvers) == 0 {
+		return nil, errors.New("no upstreams available in the domain_shard group")
+	}
 
 	start := shardIndex(r.shardSalt(), shardKey(request.Req.Question[0].Name), len(resolvers))
 

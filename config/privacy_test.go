@@ -192,6 +192,20 @@ var _ = Describe("Privacy config", func() {
 			Expect(trough).Should(Equal(float64(6)))
 		})
 
+		It("rejects a prewarm interval that would panic time.NewTicker", func() {
+			p.Decoy.Enable = true
+			p.Decoy.PrewarmEnable = true
+
+			p.Decoy.PrewarmIntervalHours = 0 // NewTicker panics on a non-positive interval
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("prewarmIntervalHours")))
+
+			p.Decoy.PrewarmIntervalHours = MaxIntervalHours + 1 // overflows into a negative duration
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("prewarmIntervalHours")))
+
+			p.Decoy.PrewarmIntervalHours = 12
+			Expect(p.validate(nil)).Should(Succeed())
+		})
+
 		It("rejects ttlJitter percent above 90", func() {
 			p.TTLJitter.Enable = true
 			p.TTLJitter.PercentPct = 91

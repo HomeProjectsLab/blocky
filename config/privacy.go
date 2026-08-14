@@ -280,6 +280,15 @@ func (c *DecoyConfig) validate() error {
 			c.DeviceClass.PhantomDevicesPct)
 	}
 
+	// The prewarm interval becomes a time.Duration in hours. Zero makes
+	// time.NewTicker panic outright, and a large enough value overflows int64
+	// into a negative duration, which panics the same way — either would take
+	// the process down at startup rather than surfacing as a config error.
+	if c.PrewarmEnable && (c.PrewarmIntervalHours == 0 || c.PrewarmIntervalHours > MaxIntervalHours) {
+		return fmt.Errorf("privacy.decoy: prewarmIntervalHours must be in [1, %d] when prewarm is enabled",
+			MaxIntervalHours)
+	}
+
 	return nil
 }
 

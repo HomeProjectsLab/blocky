@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/sirupsen/logrus"
 )
@@ -32,13 +33,22 @@ type ListUpdaterConfig struct {
 	BlocklistRepo string `default:"blocklistproject/Lists" yaml:"blocklistRepo"`
 }
 
+// MaxIntervalHours bounds any hours-valued config that becomes a time.Duration.
+// Beyond roughly 292 years the hours*time.Hour multiplication overflows int64
+// into a negative duration, and time.NewTicker panics on a non-positive
+// interval. One year is far past any sane refresh cadence.
+const MaxIntervalHours = 24 * 365
+
 func (c *ListsConfig) validate(_ *logrus.Entry) error {
 	if !c.Updater.Enable {
 		return nil
 	}
 
-	if c.Updater.IntervalHours == 0 {
-		return errors.New("lists.updater.intervalHours must be > 0 when enabled")
+	// Upper bound matters: the interval is turned into a time.Duration in hours,
+	// and a large enough value overflows int64 into a negative duration, which
+	// makes time.NewTicker panic and takes the process down at startup.
+	if c.Updater.IntervalHours == 0 || c.Updater.IntervalHours > MaxIntervalHours {
+		return fmt.Errorf("lists.updater.intervalHours must be in [1, %d] when enabled", MaxIntervalHours)
 	}
 
 	if c.Updater.TrancoURL == "" {
