@@ -130,6 +130,16 @@ var _ = Describe("Stats UI API", func() {
 		It("rejects an unknown column", func() {
 			Expect(exec("/api/ui/stats/top?col=nope").Code).Should(Equal(http.StatusBadRequest))
 		})
+
+		It("returns multiple columns in one response when col is comma-separated", func() {
+			rec := exec("/api/ui/stats/top?col=domain,blocked&n=5")
+
+			Expect(rec.Code).Should(Equal(http.StatusOK))
+			cols := jsonBody(rec)["columns"].(map[string]any)
+			Expect(cols).Should(HaveKey("domain"))
+			Expect(cols).Should(HaveKey("blocked"))
+			Expect(cols["domain"].([]any)[0].(map[string]any)).Should(HaveKeyWithValue("name", "example.com"))
+		})
 	})
 
 	Describe("GET /api/ui/stats/latency", func() {

@@ -77,16 +77,7 @@ func (s *statsAPI) noiseTop(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	n := 10
-	if v := req.URL.Query().Get("n"); v != "" {
-		if n, err = strconv.Atoi(v); err != nil {
-			badRequest(rw, err)
-
-			return
-		}
-	}
-
-	items, err := reader.DecoyTopDomains(from, to, n)
+	items, err := reader.DecoyTopDomains(from, to, topN(req))
 	if err != nil {
 		internalError(rw, err)
 

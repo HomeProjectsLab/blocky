@@ -39,6 +39,11 @@ fi
 
 # --- 3. seed the config database once ----------------------------------------
 mkdir -p "$DATA"
+# The image runs as UID 100 (Dockerfile USER 100). $DATA is bind-mounted at
+# /data in both the seed and serve containers, and a bind mount keeps the host's
+# ownership — so without this chown the root:root dir is read-only to UID 100,
+# config.db/querylog.db can't be created, and the stack crash-loops on boot.
+chown -R 100:100 "$DATA"
 
 if [ ! -f "$DATA/config.db" ]; then
 	APPLIANCE=/boot/firmware/appliance.yml

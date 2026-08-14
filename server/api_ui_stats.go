@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -203,6 +204,31 @@ func (s *statsAPI) buckets(rw http.ResponseWriter, req *http.Request) {
 	writeJSON(rw, http.StatusOK, map[string]any{"buckets": buckets})
 }
 
+// topN reads the "n" query param and clamps it to [1, maxTopN]. A missing param
+// yields the default; a garbage/negative/oversized value is clamped rather than
+// rejected, so a hand-typed URL can't ask for a negative or unbounded result set.
+const (
+	defaultTopN = 10
+	maxTopN     = 100
+)
+
+func topN(req *http.Request) int {
+	n := defaultTopN
+	if v, err := strconv.Atoi(req.URL.Query().Get("n")); err == nil {
+		n = v
+	}
+
+	if n < 1 {
+		return 1
+	}
+
+	if n > maxTopN {
+		return maxTopN
+	}
+
+	return n
+}
+
 func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 	reader := s.readerOr503(rw)
 	if reader == nil {
@@ -216,16 +242,33 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	n := 10
-	if v := req.URL.Query().Get("n"); v != "" {
-		if n, err = strconv.Atoi(v); err != nil {
-			badRequest(rw, err)
+	n := topN(req)
 
-			return
+	// col may be a single column ({"items": [...]}) or a comma-separated list
+	// ({"columns": {col: [...]}}). The dashboard batches its four top-N panels
+	// into one request so a single page load stays under the browser's 6
+	// connections-per-origin cap (one SSE stream already holds a slot).
+	cols := strings.Split(req.URL.Query().Get("col"), ",")
+	if len(cols) > 1 {
+		out := make(map[string][]querylog.TopItem, len(cols))
+
+		for _, col := range cols {
+			items, err := reader.Top(from, to, col, n)
+			if err != nil {
+				badRequest(rw, err)
+
+				return
+			}
+
+			out[col] = items
 		}
+
+		writeJSON(rw, http.StatusOK, map[string]any{"columns": out})
+
+		return
 	}
 
-	items, err := reader.Top(from, to, req.URL.Query().Get("col"), n)
+	items, err := reader.Top(from, to, cols[0], n)
 	if err != nil {
 		badRequest(rw, err)
 

@@ -13,7 +13,10 @@ upstreams:
       strategy: recursive   # resolve from the root servers; quad9 above is the fallback tier
 queryLog:
   type: sqlite
-  target: /var/lib/blocky/querylog.db
+  # /data is the container's writable, persistent volume (BLOCKY_DB_DIR=/data).
+  # A host path like /var/lib/blocky isn't writable inside the scratch image and
+  # would make the query log silently fall back to console — no stats, no UI data.
+  target: /data/querylog.db
 privacy:
   decoy:
     enable: true            # the appliance runs the noise machine

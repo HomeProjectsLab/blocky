@@ -81,12 +81,12 @@ async function loadBuckets() {
     });
 }
 
-async function loadTop(col, elID) {
-    const w = window_();
-    const res = await getJSON("/api/ui/stats/top", { ...w, col, n: 10 });
-    const items = res.items || [];
+// TOP_PANELS maps each top-N column to its list element id.
+const TOP_PANELS = { domain: "top-domain", blocked: "top-blocked", client: "top-client", transport: "top-transport" };
+
+function renderTop(elID, items) {
     const ol = document.getElementById(elID);
-    if (items.length === 0) {
+    if (!items || items.length === 0) {
         ol.innerHTML = `<p class="empty">No queries in this window — widen the time range.</p>`;
         return;
     }
@@ -96,6 +96,15 @@ async function loadTop(col, elID) {
             <div class="bar-row"><span class="bar-name" title="${esc(i.name)}">${esc(i.name)}</span><span class="bar-count">${fmtNum(i.count)}</span></div>
             <div class="bar-track"><div class="bar-fill" style="width:${(i.count / max * 100).toFixed(1)}%"></div></div>
         </li>`).join("");
+}
+
+// One request for all four panels: keeps the dashboard under the browser's
+// 6-connections-per-origin cap (the SSE stream already holds one slot).
+async function loadTop() {
+    const cols = Object.keys(TOP_PANELS);
+    const res = await getJSON("/api/ui/stats/top", { ...window_(), col: cols.join(","), n: 10 });
+    const columns = res.columns || {};
+    for (const col of cols) renderTop(TOP_PANELS[col], columns[col]);
 }
 
 function esc(s) {
@@ -108,9 +117,7 @@ function setText(id, text) {
 
 function loadAll() {
     const jobs = [
-        loadOverview(), loadLatency(), loadBuckets(),
-        loadTop("domain", "top-domain"), loadTop("blocked", "top-blocked"),
-        loadTop("client", "top-client"), loadTop("transport", "top-transport"),
+        loadOverview(), loadLatency(), loadBuckets(), loadTop(),
     ];
     for (const j of jobs) j.catch((err) => console.error(err));
 }

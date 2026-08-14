@@ -47,7 +47,7 @@ function transportMix(transports, total) {
         const row = document.createElement("div");
         row.className = "mix-row";
         row.innerHTML =
-            `<span class="mix-name">${t.name || "—"}</span>` +
+            `<span class="mix-name">${t.name ? escapeHTML(t.name) : "—"}</span>` +
             `<span class="mix-count">${fmtNum(t.count)} · ${fmtPct(t.count, total)}</span>`;
         const track = document.createElement("div");
         track.className = "bar-track";
@@ -80,7 +80,7 @@ function fpPanel(fingerprints) {
         card.innerHTML =
             `<div class="fp-head"><span class="fp-guess">${guessSoftware(fp)}</span>` +
             `<span class="fp-count">${fmtNum(fp.count)}</span></div>` +
-            `<div class="fp-hash">${fp.fpHash}</div>` +
+            `<div class="fp-hash">${escapeHTML(fp.fpHash || "")}</div>` +
             `<div class="fp-feats">${feats.map((f) => `<span class="chip">${escapeHTML(f)}</span>`).join("")}</div>`;
         wrap.append(card);
     }

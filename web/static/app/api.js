@@ -60,6 +60,8 @@ export async function action(method, path, params) {
 const subscribers = new Set();
 let source = null;
 
+let reconnectDelay = 1000;
+
 function ensureSource() {
     if (source) return;
     source = new EventSource("/api/ui/stream");
@@ -68,7 +70,19 @@ function ensureSource() {
         try { item = JSON.parse(ev.data); } catch { return; }
         for (const fn of subscribers) fn(item);
     });
-    // EventSource auto-reconnects; nothing else to do.
+    source.addEventListener("open", () => { reconnectDelay = 1000; });
+    // EventSource only auto-reconnects on transient drops. On an HTTP error
+    // (e.g. the server returns 503 during a config apply) it goes CLOSED and
+    // stays dead — the ticker and live wire would freeze forever. Re-open it
+    // ourselves on a capped backoff.
+    source.addEventListener("error", () => {
+        if (source && source.readyState === EventSource.CLOSED) {
+            source.close();
+            source = null;
+            setTimeout(ensureSource, reconnectDelay);
+            reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+        }
+    });
 }
 
 export function onQuery(fn) {

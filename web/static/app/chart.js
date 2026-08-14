@@ -54,6 +54,10 @@ function observe(el, u) {
         u.setSize({ width: el.clientWidth, height: 260 });
     });
     ro.observe(el);
+    // Disconnect when the chart is destroyed. Without this, every re-render
+    // (destroy + recreate on a range switch) leaks a live observer still holding
+    // the destroyed uPlot, and each fires setSize() on it on the next resize.
+    u.hooks.destroy = (u.hooks.destroy || []).concat(() => ro.disconnect());
 }
 
 // Stacked area time series. data = [xs, s1, s2, ...] (raw, unstacked).
