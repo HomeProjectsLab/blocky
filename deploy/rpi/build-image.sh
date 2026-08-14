@@ -142,6 +142,24 @@ ln -sf ../blocky-stack.service "$ROOT_MNT/etc/systemd/system/multi-user.target.w
 ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # dashboard container owns tty1
 install -Dm644 "$HERE/appliance.yml" "$BOOT_MNT/appliance.yml"
 
+# Headless user account. Raspberry Pi OS bookworm REQUIRES a user or it drops to
+# an interactive "create user" prompt on the console and never boots headless
+# (the "asks for username" hang). Seed one non-interactively via userconf.txt.
+# The password is a throwaway random hash we immediately discard, so the account
+# exists (satisfies first boot) but cannot be logged into — no console recovery,
+# matching the appliance's locked-down policy. SSH is off regardless.
+APPLIANCE_USER="${APPLIANCE_USER:-blocky}"
+USER_HASH="${APPLIANCE_USER_HASH:-}"
+if [ -z "$USER_HASH" ]; then
+	if command -v openssl >/dev/null 2>&1; then
+		USER_HASH="$(openssl passwd -6 "$(head -c 32 /dev/urandom | base64 | tr -d '\n=')")"
+	else
+		USER_HASH='*'  # locked password; chpasswd -e accepts it
+	fi
+fi
+printf '%s:%s\n' "$APPLIANCE_USER" "$USER_HASH" > "$BOOT_MNT/userconf.txt"
+echo ">> baked headless user '$APPLIANCE_USER' (locked password) — suppresses first-boot prompt"
+
 # Optional WiFi: when WIFI_SSID/WIFI_PSK are provided at BUILD time, bake a
 # NetworkManager keyfile profile (bookworm uses NetworkManager, not
 # wpa_supplicant) plus the regulatory country. Credentials are passed via env so
@@ -178,6 +196,26 @@ EOF
 		echo "options cfg80211 ieee80211_regdom=${WIFI_COUNTRY}" \
 			> "$ROOT_MNT/etc/modprobe.d/cfg80211.conf"
 	fi
+	# Insurance: on some images the WiFi radio is rfkill soft-blocked until a
+	# country is set, and NetworkManager then silently never associates. Unblock
+	# it early (before NetworkManager) so association can't be gated on rfkill.
+	cat > "$ROOT_MNT/etc/systemd/system/blocky-rfkill-unblock.service" <<'EOF'
+[Unit]
+Description=Unblock WiFi radio for the blocky appliance
+DefaultDependencies=no
+Before=network-pre.target NetworkManager.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill unblock wifi
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	ln -sf ../blocky-rfkill-unblock.service \
+		"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-rfkill-unblock.service"
 fi
 
 # verify what we placed
