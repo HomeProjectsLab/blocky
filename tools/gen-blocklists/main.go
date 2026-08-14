@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -121,7 +122,7 @@ func selectCategories(only, skip string) []string {
 
 func splitCSV(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
@@ -145,7 +146,7 @@ func fetchCategory(cat, outDir string) (int, int, error) {
 	}
 
 	path := filepath.Join(outDir, cat+".txt.gz")
-	f, err := os.Create(path) //nolint:gosec
+	f, err := os.Create(path)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -230,7 +231,7 @@ func fetchCommit() (string, error) {
 		return "", err
 	}
 	if body.SHA == "" {
-		return "", fmt.Errorf("empty sha in commit response")
+		return "", errors.New("empty sha in commit response")
 	}
 
 	return body.SHA, nil

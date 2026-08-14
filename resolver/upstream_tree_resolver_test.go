@@ -366,10 +366,8 @@ var _ = Describe("UpstreamTreeResolver", Label("upstreamTreeResolver"), func() {
 
 			By("swapping while queries are in flight", func() {
 				for range 4 {
-					wg.Add(1)
 
-					go func() {
-						defer wg.Done()
+					wg.Go(func() {
 						defer GinkgoRecover()
 
 						for {
@@ -384,7 +382,7 @@ var _ = Describe("UpstreamTreeResolver", Label("upstreamTreeResolver"), func() {
 								resolveErrs.Add(1)
 							}
 						}
-					}()
+					})
 				}
 
 				Expect(tree.ReplaceUpstreams(ctx, upstreamDefaultCfgName, []config.Upstream{mockB.Start()})).

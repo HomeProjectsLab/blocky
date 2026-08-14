@@ -106,7 +106,6 @@ type notSqliteError struct{}
 
 func (notSqliteError) Error() string { return "query log not in sqlite mode" }
 
-//nolint:gochecknoglobals // sentinel error
 var errNotSqlite = notSqliteError{}
 
 // readerOr503 resolves the reader, answering 503 itself on failure.
@@ -124,7 +123,7 @@ func (s *statsAPI) readerOr503(rw http.ResponseWriter) *querylog.Reader {
 // parseTimeRange reads from/to (RFC3339) query params; defaults: to=now, from=now-24h.
 func parseTimeRange(req *http.Request) (from, to time.Time, err error) {
 	to = time.Now()
-	from = to.Add(-24 * time.Hour) //nolint:mnd
+	from = to.Add(-24 * time.Hour)
 
 	if v := req.URL.Query().Get("to"); v != "" {
 		if to, err = time.Parse(time.RFC3339, v); err != nil {
@@ -217,7 +216,7 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	n := 10 //nolint:mnd // default top-n
+	n := 10
 	if v := req.URL.Query().Get("n"); v != "" {
 		if n, err = strconv.Atoi(v); err != nil {
 			badRequest(rw, err)

@@ -93,7 +93,7 @@ var _ = Describe("Egress hardening", func() {
 			cfg.ListWeight = 0
 			eng := NewEngine(cfg, src, nil)
 
-			for i := 0; i < 50; i++ {
+			for range 50 {
 				Expect(eng.nextQuery().name).Should(Equal("mycorpus.example"))
 			}
 		})
@@ -220,7 +220,7 @@ var _ = Describe("Egress hardening", func() {
 			eng := NewEngine(cfg, nil, nil)
 			base := decoyQuery{name: "replay.example", qtype: dns.TypeA, replay: true}
 
-			for i := 0; i < 2000; i++ {
+			for range 2000 {
 				Expect(eng.mutate(base).qclass).ShouldNot(Equal(uint16(dns.ClassCHAOS)))
 			}
 		})
@@ -229,7 +229,7 @@ var _ = Describe("Egress hardening", func() {
 			eng := NewEngine(cfg, nil, nil)
 
 			seen := map[uint16]struct{}{}
-			for i := 0; i < 2000; i++ {
+			for range 2000 {
 				seen[eng.realQtype()] = struct{}{}
 			}
 			Expect(seen).Should(HaveKey(dns.TypeA))
@@ -264,7 +264,7 @@ var _ = Describe("Egress hardening", func() {
 				return &model.Response{Res: new(dns.Msg)}, nil
 			})
 
-			for i := 0; i < 40; i++ {
+			for range 40 {
 				eng.emit(context.Background())
 			}
 
@@ -288,7 +288,7 @@ var _ = Describe("Egress hardening", func() {
 			eng := NewEngine(cfg, src, nil)
 
 			signatures := map[string]struct{}{}
-			for i := 0; i < 60; i++ {
+			for range 60 {
 				burst := eng.companionsFor("example.com")
 				Expect(len(burst)).Should(BeNumerically(">=", 2))
 				Expect(len(burst)).Should(BeNumerically("<=", 4))

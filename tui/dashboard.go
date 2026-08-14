@@ -239,7 +239,7 @@ func (d *Dashboard) drawHeader(s tcell.Screen, w int, base tcell.Style) {
 	right := time.Now().Format("2006-01-02 15:04:05 ")
 
 	title := base.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue).Bold(true)
-	for x := 0; x < w; x++ {
+	for x := range w {
 		s.SetContent(x, 0, ' ', nil, title)
 	}
 
@@ -379,7 +379,7 @@ func (d *Dashboard) drawFooter(s tcell.Screen, w, h int, base tcell.Style) {
 	}
 
 	foot := base.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue)
-	for x := 0; x < w; x++ {
+	for x := range w {
 		s.SetContent(x, h-1, ' ', nil, foot)
 	}
 
@@ -388,7 +388,7 @@ func (d *Dashboard) drawFooter(s tcell.Screen, w, h int, base tcell.Style) {
 		pauseLbl = " [PAUSED]"
 	}
 
-	left := fmt.Sprintf(" q quit  p pause%s", pauseLbl)
+	left := " q quit  p pause" + pauseLbl
 	right := fmt.Sprintf("queries %d  blocked %d  decoys %d ",
 		d.overview.Queries, d.overview.Blocked, decoyTotal)
 	drawText(s, 0, h-1, foot, left)

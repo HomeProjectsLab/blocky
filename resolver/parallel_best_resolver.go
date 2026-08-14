@@ -128,7 +128,7 @@ func newParallelBestResolver(cfg config.UpstreamGroup, resolvers []Resolver) *Pa
 	resolverCount := parallelBestResolverCount
 	retryWithDifferentResolver := false
 
-	switch cfg.Strategy {
+	switch cfg.Strategy { //nolint:exhaustive // only the random-family strategies re-shape this resolver; the rest keep parallel-best defaults
 	case config.UpstreamStrategyRandom:
 		typeName = randomResolverType
 		resolverCount = 1

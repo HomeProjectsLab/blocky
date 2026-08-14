@@ -2,7 +2,7 @@ package lists
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 
 	"github.com/0xERR0R/blocky/config"
@@ -71,7 +71,7 @@ var _ = Describe("blocklist source adapter", func() {
 	})
 
 	It("surfaces provider errors to the reader", func() {
-		SetBlocklistProvider(&fakeProvider{err: fmt.Errorf("db exploded")})
+		SetBlocklistProvider(&fakeProvider{err: errors.New("db exploded")})
 
 		opener, err := NewSourceOpener("", config.NewBytesSources("blocklist:ads")[0], nil)
 		Expect(err).Should(Succeed())

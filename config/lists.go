@@ -1,7 +1,7 @@
 package config
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/sirupsen/logrus"
 )
@@ -20,16 +20,16 @@ type ListsConfig struct {
 type ListUpdaterConfig struct {
 	// Enable the background updater. Seeding from embedded assets still happens
 	// on startup regardless, so downstream consumers always have data.
-	Enable bool `yaml:"enable" default:"true"`
+	Enable bool `default:"true" yaml:"enable"`
 	// IntervalHours between upstream version checks (default weekly).
-	IntervalHours uint `yaml:"intervalHours" default:"168"`
+	IntervalHours uint `default:"168" yaml:"intervalHours"`
 	// TrancoURL is the Tranco "latest list" API base. The updater GETs
 	// <TrancoURL>/api/lists/date/latest for the list id, then downloads
 	// <TrancoURL>/download/<id>/1000000.
-	TrancoURL string `yaml:"trancoUrl" default:"https://tranco-list.eu"`
+	TrancoURL string `default:"https://tranco-list.eu" yaml:"trancoUrl"`
 	// BlocklistRepo is the blocklistproject GitHub repo (owner/name) whose main
 	// commit SHA gates blocklist refresh.
-	BlocklistRepo string `yaml:"blocklistRepo" default:"blocklistproject/Lists"`
+	BlocklistRepo string `default:"blocklistproject/Lists" yaml:"blocklistRepo"`
 }
 
 func (c *ListsConfig) validate(_ *logrus.Entry) error {
@@ -38,15 +38,15 @@ func (c *ListsConfig) validate(_ *logrus.Entry) error {
 	}
 
 	if c.Updater.IntervalHours == 0 {
-		return fmt.Errorf("lists.updater.intervalHours must be > 0 when enabled")
+		return errors.New("lists.updater.intervalHours must be > 0 when enabled")
 	}
 
 	if c.Updater.TrancoURL == "" {
-		return fmt.Errorf("lists.updater.trancoUrl must not be empty when enabled")
+		return errors.New("lists.updater.trancoUrl must not be empty when enabled")
 	}
 
 	if c.Updater.BlocklistRepo == "" {
-		return fmt.Errorf("lists.updater.blocklistRepo must not be empty when enabled")
+		return errors.New("lists.updater.blocklistRepo must not be empty when enabled")
 	}
 
 	return nil

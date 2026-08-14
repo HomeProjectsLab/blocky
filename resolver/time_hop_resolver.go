@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -134,10 +135,8 @@ func (r *TimeHopResolver) currentStatus(resolvers []*upstreamResolverStatus) *up
 		return nil
 	}
 
-	for _, res := range resolvers {
-		if res == state.status {
-			return state.status
-		}
+	if slices.Contains(resolvers, state.status) {
+		return state.status
 	}
 
 	return nil

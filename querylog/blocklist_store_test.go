@@ -3,7 +3,7 @@
 package querylog
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -26,7 +26,7 @@ func (e *errReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 
-	return 0, fmt.Errorf("simulated read failure")
+	return 0, errors.New("simulated read failure")
 }
 
 var _ = Describe("Blocklist store", func() {
@@ -142,7 +142,7 @@ var _ = Describe("Blocklist store", func() {
 		})
 
 		It("samples a domain from the blocklist", func() {
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				d, err := source.SampleBlocklist()
 				Expect(err).Should(Succeed())
 				Expect(d).To(BeElementOf("a.com", "b.com", "t.com"))

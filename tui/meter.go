@@ -29,7 +29,7 @@ func levelFor(frac float64) Level {
 }
 
 func (l Level) Color() tcell.Color {
-	switch l {
+	switch l { //nolint:exhaustive // default covers LevelGreen
 	case LevelRed:
 		return tcell.ColorRed
 	case LevelYellow:

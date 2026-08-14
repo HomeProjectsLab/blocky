@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sirupsen/logrus"
@@ -18,7 +19,7 @@ type PrivacyConfig struct {
 	// upper/lower-cased on the wire, the upstream must echo the exact case (spoofing defense),
 	// and the answer is normalized back to the client's case. Forwarding path only; the
 	// recursive (zdns) path ignores it until the documented zdns fork lands.
-	QueryCaseRandomization bool `yaml:"queryCaseRandomization" default:"false"`
+	QueryCaseRandomization bool `default:"false" yaml:"queryCaseRandomization"`
 	// ShadowBlockedQueries decouples the client answer from the wire query for blocked
 	// domains: the client still gets the block response (ad-blocking intact), but the
 	// real upstream query is also egressed asynchronously and its answer discarded, so
@@ -27,45 +28,45 @@ type PrivacyConfig struct {
 	// also enabled (privacy.decoy.enable) — that is what gives the egressed tracker
 	// queries their decoy cover. Without the noise engine it stays inert, so a
 	// blocking-only setup never egresses blocked-domain queries uncovered.
-	ShadowBlockedQueries bool `yaml:"shadowBlockedQueries" default:"true"`
+	ShadowBlockedQueries bool `default:"true" yaml:"shadowBlockedQueries"`
 }
 
 // DecoyConfig configures the background noise/decoy query engine. Decoy
 // queries are marked Bypass so they never touch the cache (neither served from
 // it nor stored in it).
 type DecoyConfig struct {
-	Enable           bool    `yaml:"enable" default:"false"`
-	QueriesPerMinute float64 `yaml:"queriesPerMinute" default:"4"`
+	Enable           bool    `default:"false" yaml:"enable"`
+	QueriesPerMinute float64 `default:"4"     yaml:"queriesPerMinute"`
 	// Source-weighted noise repartition (pick source by weight, then a domain
 	// within it — the list's ~1.8M count never affects source odds). Large spread
 	// so the user's own domains dominate: replay+corpus (visited) : list ≈ 20:1.
 	// Companions are a separate, higher tier — triggered per real query
 	// (companionPct), so realistic page-load bursts dominate the noise overall.
-	ReplayWeight     uint   `yaml:"replayWeight" default:"15"`    // recent-real replay pool (7-day window)
-	CorpusWeight     uint   `yaml:"corpusWeight" default:"5"`     // persistent all-time visited-domains corpus
-	ListWeight       uint   `yaml:"listWeight" default:"1"`       // Tranco 1M public static list (thin breadth layer)
-	ActiveHoursStart int    `yaml:"activeHoursStart" default:"0"` // 0-23; full rate within [start,end), floor rate outside
-	ActiveHoursEnd   int    `yaml:"activeHoursEnd" default:"24"`  // 1-24
-	RefreshURL       string `yaml:"refreshURL"`                   // optional live list source; empty = embedded
+	ReplayWeight     uint   `default:"15"      yaml:"replayWeight"`     // recent-real replay pool (7-day window)
+	CorpusWeight     uint   `default:"5"       yaml:"corpusWeight"`     // persistent all-time visited-domains corpus
+	ListWeight       uint   `default:"1"       yaml:"listWeight"`       // Tranco 1M public static list (thin breadth layer)
+	ActiveHoursStart int    `default:"0"       yaml:"activeHoursStart"` // 0-23; full rate within [start,end), floor rate outside
+	ActiveHoursEnd   int    `default:"24"      yaml:"activeHoursEnd"`   // 1-24
+	RefreshURL       string `yaml:"refreshURL"`                         // optional live list source; empty = embedded
 
 	// Obfuscation techniques (all default-on; each independently toggleable).
-	DiurnalShaping   bool `yaml:"diurnalShaping" default:"true"`   // scale rate by real per-hour volume
-	ReplayMutate     bool `yaml:"replayMutate" default:"true"`     // mutate replayed queries so they aren't byte-identical
-	FingerprintMatch bool `yaml:"fingerprintMatch" default:"true"` // stamp EDNS shape sampled from real clients
-	SplitUpstream    bool `yaml:"splitUpstream" default:"true"`    // vary decoy client identity to diverge group routing
-	MissChaffPct     uint `yaml:"missChaffPct" default:"15"`       // % of decoys that are likely-NXDOMAIN random labels
-	ClusterPct       uint `yaml:"clusterPct" default:"20"`         // % of timer emissions that fire a small related burst (secondary to CompanionPct)
+	DiurnalShaping   bool `default:"true" yaml:"diurnalShaping"`   // scale rate by real per-hour volume
+	ReplayMutate     bool `default:"true" yaml:"replayMutate"`     // mutate replayed queries so they aren't byte-identical
+	FingerprintMatch bool `default:"true" yaml:"fingerprintMatch"` // stamp EDNS shape sampled from real clients
+	SplitUpstream    bool `default:"true" yaml:"splitUpstream"`    // vary decoy client identity to diverge group routing
+	MissChaffPct     uint `default:"15"   yaml:"missChaffPct"`     // % of decoys that are likely-NXDOMAIN random labels
+	ClusterPct       uint `default:"20"   yaml:"clusterPct"`       // % of timer emissions that fire a small related burst (secondary to CompanionPct)
 
 	// Reactive obfuscation: track live real traffic instead of the 7-day historical shape.
-	ReactiveVolume bool `yaml:"reactiveVolume" default:"true"` // rate tracks live recent real QPS (± jitter); historical diurnal is the cold-start fallback (only used when personaCover is off)
-	CompanionPct   uint `yaml:"companionPct" default:"40"`     // % of real queries that trigger a browse-style companion cluster derived from that domain
+	ReactiveVolume bool `default:"true" yaml:"reactiveVolume"` // rate tracks live recent real QPS (± jitter); historical diurnal is the cold-start fallback (only used when personaCover is off)
+	CompanionPct   uint `default:"40"   yaml:"companionPct"`   // % of real queries that trigger a browse-style companion cluster derived from that domain
 
 	// Structural emission (7G/#1/#5): shape the SEQUENCE and TEXTURE of decoy
 	// emissions after real browsing instead of IID picks.
-	CohortPct        uint `yaml:"cohortPct" default:"55"`          // % of structural emissions that replay a whole RECORDED page-load cohort (real timing/texture, incl. blocked members) instead of a synthetic single/cluster; falls back to the synthetic path at cold start
-	SessionCoherence bool `yaml:"sessionCoherence" default:"true"` // walk plausible session chains (NextInSession/SessionSeed) instead of IID domain picks
-	StepPct          uint `yaml:"stepPct" default:"70"`            // within a session, % chance to advance to a topically-plausible successor vs. reseeding a fresh session
-	RevisitCadence   bool `yaml:"revisitCadence" default:"true"`   // re-emit corpus/replay domains on their learned revisit interval (jittered) instead of flat random
+	CohortPct        uint `default:"55"   yaml:"cohortPct"`        // % of structural emissions that replay a whole RECORDED page-load cohort (real timing/texture, incl. blocked members) instead of a synthetic single/cluster; falls back to the synthetic path at cold start
+	SessionCoherence bool `default:"true" yaml:"sessionCoherence"` // walk plausible session chains (NextInSession/SessionSeed) instead of IID domain picks
+	StepPct          uint `default:"70"   yaml:"stepPct"`          // within a session, % chance to advance to a topically-plausible successor vs. reseeding a fresh session
+	RevisitCadence   bool `default:"true" yaml:"revisitCadence"`   // re-emit corpus/replay domains on their learned revisit interval (jittered) instead of flat random
 
 	// Compensating persona cover (#8): TOTAL egress tracks a household diurnal
 	// target curve, so decoy_rate(t) = max(0, targetCurve(t) − recentRealQPM).
@@ -76,16 +77,16 @@ type DecoyConfig struct {
 	// Residual: real usage ABOVE the peak ceiling still spikes total egress — the
 	// curve hides level only up to targetQpmPeak, by design (a truly constant
 	// max-rate cover would cost fixed bandwidth we don't pay on a home box).
-	PersonaCover bool `yaml:"personaCover" default:"true"`
+	PersonaCover bool `default:"true" yaml:"personaCover"`
 	// PersonaProfile selects the persona-curve preset the compensating cover aims
 	// for: "home" (peak/trough 40/6), "enterprise" (300/60, office-diurnal over a
 	// 24/7 IoT floor), or "auto" (home baseline; the engine may escalate toward the
 	// enterprise curve from observed client classes). The explicit TargetQPM* fields
 	// still override the preset (see EffectivePersonaCurve). "auto" is the default so
 	// a home box behaves exactly as before this field existed.
-	PersonaProfile  string  `yaml:"personaProfile" default:"auto"`
-	TargetQPMPeak   float64 `yaml:"targetQpmPeak" default:"40"`  // busy-hour target total egress (queries/min); the shipped home default
-	TargetQPMTrough float64 `yaml:"targetQpmTrough" default:"6"` // pre-dawn quiet target total egress (queries/min); the shipped home default
+	PersonaProfile  string  `default:"auto" yaml:"personaProfile"`
+	TargetQPMPeak   float64 `default:"40"   yaml:"targetQpmPeak"`   // busy-hour target total egress (queries/min); the shipped home default
+	TargetQPMTrough float64 `default:"6"    yaml:"targetQpmTrough"` // pre-dawn quiet target total egress (queries/min); the shipped home default
 
 	// Device-class awareness: classify each client from its real DNS behavior
 	// (iot / workstation / server / unknown) and shape its cover accordingly.
@@ -93,26 +94,26 @@ type DecoyConfig struct {
 
 	// Per-query realism + operational (device chatter, transport/qtype/failure
 	// diversity, per-client personas, adaptive back-off).
-	ChatterPct         uint `yaml:"chatterPct" default:"15"`           // % of emissions that are device background chatter (connectivity/NTP/telemetry + RFC1918 PTR) instead of browsing
-	TCPPct             uint `yaml:"tcpPct" default:"10"`               // % of decoys stamped as TCP transport (req.Protocol); see engine limitation — blocky→upstream transport is upstream-config-global, not per-query
-	FailChaffPct       uint `yaml:"failChaffPct" default:"8"`          // % of emissions that deliberately query a likely-NXDOMAIN name so decoys don't always succeed
-	PersonaAttribution bool `yaml:"personaAttribution" default:"true"` // attribute decoys to sampled real clients (stamp their ClientIP + fingerprint) so each client's on-wire profile stays consistent under noise
-	AdaptiveBackoff    bool `yaml:"adaptiveBackoff" default:"true"`    // reduce the decoy rate when the recent decoy resolve error rate spikes (upstream strain / rate-limiting) and recover slowly
+	ChatterPct         uint `default:"15"   yaml:"chatterPct"`         // % of emissions that are device background chatter (connectivity/NTP/telemetry + RFC1918 PTR) instead of browsing
+	TCPPct             uint `default:"10"   yaml:"tcpPct"`             // % of decoys stamped as TCP transport (req.Protocol); see engine limitation — blocky→upstream transport is upstream-config-global, not per-query
+	FailChaffPct       uint `default:"8"    yaml:"failChaffPct"`       // % of emissions that deliberately query a likely-NXDOMAIN name so decoys don't always succeed
+	PersonaAttribution bool `default:"true" yaml:"personaAttribution"` // attribute decoys to sampled real clients (stamp their ClientIP + fingerprint) so each client's on-wire profile stays consistent under noise
+	AdaptiveBackoff    bool `default:"true" yaml:"adaptiveBackoff"`    // reduce the decoy rate when the recent decoy resolve error rate spikes (upstream strain / rate-limiting) and recover slowly
 
 	// Wire-egress hardening.
-	ShadowTTL                bool    `yaml:"shadowTTL" default:"true"`              // suppress re-emitting a decoy (name,qtype) within its own observed answer TTL
-	DualStackPct             uint    `yaml:"dualStackPct" default:"55"`             // % of A/AAAA decoys that also emit the sibling record (browser dual-stack)
-	OffHoursFloorQPM         float64 `yaml:"offHoursFloorQPM" default:"0.5"`        // always-on Poisson floor rate outside active hours (never gate fully to zero)
-	ActiveHoursEdgeJitterMin int     `yaml:"activeHoursEdgeJitterMin" default:"30"` // ± minutes of per-day jitter on the active-hours window edges
+	ShadowTTL                bool    `default:"true" yaml:"shadowTTL"`                // suppress re-emitting a decoy (name,qtype) within its own observed answer TTL
+	DualStackPct             uint    `default:"55"   yaml:"dualStackPct"`             // % of A/AAAA decoys that also emit the sibling record (browser dual-stack)
+	OffHoursFloorQPM         float64 `default:"0.5"  yaml:"offHoursFloorQPM"`         // always-on Poisson floor rate outside active hours (never gate fully to zero)
+	ActiveHoursEdgeJitterMin int     `default:"30"   yaml:"activeHoursEdgeJitterMin"` // ± minutes of per-day jitter on the active-hours window edges
 
 	// Corpus pre-warming: proactively pull TRENDING/RISING domains into the noise
 	// corpus before the user first visits them, so a genuinely new domain is
 	// already covered by chaff. Offline-first: with no PrewarmURL it mines the
 	// embedded Tranco list's mid-popularity band (ranks ~1k-50k, the domains a
 	// normal person is likely to newly encounter), rotating the slab each run.
-	PrewarmEnable        bool   `yaml:"prewarmEnable" default:"true"`
+	PrewarmEnable        bool   `default:"true"    yaml:"prewarmEnable"`
 	PrewarmURL           string `yaml:"prewarmURL"` // optional trending source (Tranco rising / CF Radar CSV/txt); empty = embedded band
-	PrewarmIntervalHours uint   `yaml:"prewarmIntervalHours" default:"12"`
+	PrewarmIntervalHours uint   `default:"12"      yaml:"prewarmIntervalHours"`
 }
 
 // DeviceClassConfig controls per-device-class decoy shaping. IoT devices beacon
@@ -123,10 +124,10 @@ type DecoyConfig struct {
 type DeviceClassConfig struct {
 	// Enable turns on classification + per-class shaping. Off = every client gets
 	// the browsing-shaped cover (pre-device-class behaviour).
-	Enable bool `yaml:"enable" default:"true"`
+	Enable bool `default:"true" yaml:"enable"`
 	// VendorTelemetry emits vendor-telemetry chaff (fixed beacon endpoints) for
 	// iot/server-classed clients instead of browse companions.
-	VendorTelemetry bool `yaml:"vendorTelemetry" default:"true"`
+	VendorTelemetry bool `default:"true" yaml:"vendorTelemetry"`
 	// VendorFamilies names which telemetry families to draw beacon domains from
 	// (e.g. "apple", "google", "amazon", "microsoft", "samsung", "tuya", "sonos").
 	// Empty = the engine's built-in default family set.
@@ -134,7 +135,7 @@ type DeviceClassConfig struct {
 	// PhantomDevicesPct is the share of vendor-telemetry chaff drawn from families
 	// NOT present in the real fleet, to obscure true fleet size and vendor mix.
 	// 0 = only mirror observed vendors.
-	PhantomDevicesPct uint `yaml:"phantomDevicesPct" default:"20"`
+	PhantomDevicesPct uint `default:"20" yaml:"phantomDevicesPct"`
 }
 
 // personaPreset is a (peak, trough) queries/min target curve.
@@ -178,13 +179,13 @@ func (c *DecoyConfig) EffectivePersonaCurve() (peak, trough float64) {
 
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.
 type TTLJitterConfig struct {
-	Enable     bool `yaml:"enable" default:"false"`
-	PercentPct uint `yaml:"percent" default:"10"` // +/- percent
+	Enable     bool `default:"false" yaml:"enable"`
+	PercentPct uint `default:"10"    yaml:"percent"` // +/- percent
 }
 
 // EDNSPaddingConfig enables EDNS(0) padding (RFC 7830) on encrypted-upstream queries.
 type EDNSPaddingConfig struct {
-	Enable bool `yaml:"enable" default:"false"`
+	Enable bool `default:"false" yaml:"enable"`
 }
 
 func (c *PrivacyConfig) validate(_ *logrus.Entry) error {
@@ -214,7 +215,7 @@ func (c *DecoyConfig) validate() error {
 	}
 
 	if c.ReplayWeight == 0 && c.CorpusWeight == 0 && c.ListWeight == 0 {
-		return fmt.Errorf("privacy.decoy: replayWeight, corpusWeight and listWeight must not all be zero when enabled")
+		return errors.New("privacy.decoy: replayWeight, corpusWeight and listWeight must not all be zero when enabled")
 	}
 
 	if c.DualStackPct > 100 {

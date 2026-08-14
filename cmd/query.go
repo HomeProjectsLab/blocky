@@ -13,10 +13,10 @@ import (
 // NewQueryCommand creates new command instance
 func NewQueryCommand() *cobra.Command {
 	c := &cobra.Command{
-		Use:               "query <domain>",
-		Args:              cobra.ExactArgs(1),
-		Short:             "performs DNS query",
-		RunE:              query,
+		Use:   "query <domain>",
+		Args:  cobra.ExactArgs(1),
+		Short: "performs DNS query",
+		RunE:  query,
 	}
 
 	c.Flags().StringP("type", "t", "A", "query type (A, AAAA, ...)")

@@ -3,11 +3,12 @@ package querylog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -224,7 +225,7 @@ func (s *DecoySource) SeedIfEmpty(r io.Reader) (int, error) {
 // blockResampleTries times; on exhaustion returns "". Empty string also when the
 // list is not seeded.
 func (s *DecoySource) SampleList() (string, error) {
-	for i := 0; i < blockResampleTries; i++ {
+	for range blockResampleTries {
 		domain, err := s.sampleListOnce()
 		if err != nil || domain == "" {
 			return domain, err
@@ -458,7 +459,7 @@ func (s *DecoySource) SampleClient() (ClientPersona, error) {
 		return ClientPersona{}, err
 	}
 
-	return ClientPersona{IP: row.ClientIP, Fp: row.fpRow.toFpSample()}, nil
+	return ClientPersona{IP: row.ClientIP, Fp: row.toFpSample()}, nil
 }
 
 // effectiveTLDP returns name's registrable domain (eTLD+1), or "" if it has none.
@@ -604,7 +605,7 @@ func pruneNoiseCorpus(tx *gorm.DB) error {
 //
 // PER-INSTANCE ONLY — this samples the box's own browsing history; never shared.
 func (s *DecoySource) SampleCorpus() (string, error) {
-	for i := 0; i < blockResampleTries; i++ {
+	for range blockResampleTries {
 		domain, err := s.sampleCorpusOnce()
 		if err != nil || domain == "" {
 			return domain, err
@@ -937,7 +938,7 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 		return 0, false // one visit after collapsing
 	}
 
-	sort.Slice(deltas, func(i, j int) bool { return deltas[i] < deltas[j] })
+	slices.Sort(deltas)
 
 	return deltas[len(deltas)/2], true // lower-median; noise cadence, not statistics
 }
@@ -1188,7 +1189,7 @@ func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 // set before first refresh still sticks.
 func (s *DecoySource) SetClientClassOverride(client, class string) error {
 	if client == "" {
-		return fmt.Errorf("client must not be empty")
+		return errors.New("client must not be empty")
 	}
 
 	if class == "auto" {
@@ -1238,7 +1239,7 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 		return ClientPersona{}, err
 	}
 
-	return ClientPersona{IP: row.ClientIP, Fp: row.fpRow.toFpSample()}, nil
+	return ClientPersona{IP: row.ClientIP, Fp: row.toFpSample()}, nil
 }
 
 // qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)

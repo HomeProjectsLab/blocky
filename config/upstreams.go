@@ -51,17 +51,17 @@ type DomainShardConfig struct {
 	// (a permanent, fingerprintable mapping). Trade-off: rotation spreads a
 	// domain's history across upstreams over time but loses upstream cache
 	// locality at each window boundary.
-	RotateHours uint `yaml:"rotateHours" default:"24"`
+	RotateHours uint `default:"24" yaml:"rotateHours"`
 }
 
 // UpstreamGroupConfig holds per-group settings overriding the global ones.
 type UpstreamGroupConfig struct {
 	// Strategy for this group; zero/absent falls back to the global Upstreams.Strategy.
-	Strategy UpstreamStrategy `yaml:"strategy" default:"parallel_best"`
+	Strategy UpstreamStrategy `default:"parallel_best" yaml:"strategy"`
 	// Minimum duration to stick to one upstream when strategy is time_hop.
-	HopMin Duration `yaml:"hopMin" default:"5m"`
+	HopMin Duration `default:"5m" yaml:"hopMin"`
 	// Maximum duration to stick to one upstream when strategy is time_hop.
-	HopMax Duration `yaml:"hopMax" default:"30m"`
+	HopMax Duration `default:"30m" yaml:"hopMax"`
 }
 
 // EffectiveStrategy returns the strategy for the given group: the group's

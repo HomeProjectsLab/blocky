@@ -92,7 +92,7 @@ var _ = Describe("Engine", func() {
 			cfg.ListWeight = 1
 			eng := NewEngine(cfg, src, nil)
 
-			for i := 0; i < 50; i++ {
+			for range 50 {
 				name := eng.nextQuery().name
 				Expect(name).Should(BeElementOf("list1.com", "list2.com"))
 			}
@@ -112,7 +112,7 @@ var _ = Describe("Engine", func() {
 			eng := NewEngine(cfg, src, nil)
 
 			replay, list := 0, 0
-			for i := 0; i < 2000; i++ {
+			for range 2000 {
 				name := eng.nextQuery().name
 				switch name {
 				case "replaytarget.example":
@@ -140,7 +140,7 @@ var _ = Describe("Engine", func() {
 			cfg.ListWeight = 1
 			eng := NewEngine(cfg, src, nil)
 
-			for i := 0; i < 50; i++ {
+			for range 50 {
 				name := eng.nextQuery().name
 				Expect(name).Should(Equal("liststatic.example"))
 			}
@@ -171,7 +171,7 @@ var _ = Describe("Engine", func() {
 				return &model.Response{Res: new(dns.Msg)}, nil
 			})
 
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				eng.emit(context.Background())
 			}
 
@@ -266,11 +266,11 @@ var _ = Describe("Engine", func() {
 			base := time.Now()
 			eng.now = func() time.Time { return base }
 
-			for i := 0; i < 5; i++ {
+			for range 5 {
 				feedReal(eng, context.Background(), "real.example", false)
 			}
 			// decoy-flagged events must not count (feedback guard)
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				feedReal(eng, context.Background(), "decoy.example", true)
 			}
 
@@ -310,12 +310,12 @@ var _ = Describe("Engine", func() {
 			Expect(quietQPM).Should(Equal(4.0))
 
 			// busy: many real events in the window → much higher rate
-			for i := 0; i < 120; i++ {
+			for range 120 {
 				feedReal(eng, context.Background(), "real.example", false)
 			}
 
 			seen := map[float64]struct{}{}
-			for i := 0; i < 30; i++ {
+			for range 30 {
 				n, qpm := eng.reactiveQPM()
 				Expect(n).Should(Equal(120))
 				// 120 real queries in a 60s window ≈ 120 QPM ± jitter, well above quiet
@@ -365,7 +365,7 @@ var _ = Describe("Engine", func() {
 		It("derives www.<eTLD+1> and a capped burst from the domain", func() {
 			eng, _ := newCapturingEngine()
 
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				burst := eng.companionsFor("sub.example.com")
 				Expect(len(burst)).Should(BeNumerically(">=", 2))
 				Expect(len(burst)).Should(BeNumerically("<=", 4))
@@ -425,7 +425,7 @@ var _ = Describe("Engine", func() {
 		It("bounds the randomized companion delay", func() {
 			eng, _ := newCapturingEngine()
 
-			for i := 0; i < 100; i++ {
+			for range 100 {
 				d := eng.companionDelay()
 				Expect(d).Should(BeNumerically(">=", companionDelayMinMs*time.Millisecond))
 				Expect(d).Should(BeNumerically("<", (companionDelayMinMs+companionDelaySpreadMs)*time.Millisecond))

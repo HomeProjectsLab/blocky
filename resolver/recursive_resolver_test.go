@@ -251,7 +251,7 @@ var _ = Describe("RecursiveResolver", Label("recursiveResolver"), func() {
 
 			sut.fallback = failIfCalled()
 
-			domain := fmt.Sprintf("does-not-exist-%08x.example.com.", rand.Uint32()) //nolint:gosec
+			domain := fmt.Sprintf("does-not-exist-%08x.example.com.", rand.Uint32())
 
 			resp, err := sut.Resolve(ctx, newRequest(domain, A))
 			Expect(err).Should(Succeed())

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -275,7 +276,7 @@ func (u *Updater) latestTrancoID(ctx context.Context) (string, error) {
 	}
 
 	if resp.ListID == "" {
-		return "", fmt.Errorf("tranco latest response has empty list_id")
+		return "", errors.New("tranco latest response has empty list_id")
 	}
 
 	return resp.ListID, nil
@@ -327,7 +328,7 @@ func trancoZipToDomains(zipBytes []byte) ([]byte, error) {
 		return out.Bytes(), nil
 	}
 
-	return nil, fmt.Errorf("no csv in tranco zip")
+	return nil, errors.New("no csv in tranco zip")
 }
 
 // --- blocklistproject ------------------------------------------------------
@@ -440,7 +441,7 @@ func (u *Updater) latestBlocklistCommit(ctx context.Context) (string, error) {
 	}
 
 	if resp.SHA == "" {
-		return "", fmt.Errorf("github commit response has empty sha")
+		return "", errors.New("github commit response has empty sha")
 	}
 
 	return resp.SHA, nil

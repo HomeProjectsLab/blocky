@@ -99,7 +99,7 @@ func upsertAggregates(tx *gorm.DB, entries []*logEntry) error {
 		}
 
 		h.Cnt++
-		h.SumDurationMs += uint64(max(e.DurationMs, 0)) //nolint:gosec // negative durations clamped
+		h.SumDurationMs += uint64(max(e.DurationMs, 0))
 		h.addLatency(e.DurationMs)
 
 		etldp := e.EffectiveTLDP

@@ -52,7 +52,7 @@ var _ = Describe("Per-query realism (task 2)", func() {
 			eng := NewEngine(cfg, &mockSource{}, nil)
 
 			sawPTR, sawHost := false, false
-			for i := 0; i < 500; i++ {
+			for range 500 {
 				q := eng.chatterQuery()
 				if q.qtype == dns.TypePTR {
 					sawPTR = true
@@ -92,7 +92,7 @@ var _ = Describe("Per-query realism (task 2)", func() {
 			eng := NewEngine(cfg, nil, nil)
 
 			seen := map[uint16]struct{}{}
-			for i := 0; i < 5000; i++ {
+			for range 5000 {
 				seen[eng.realQtype()] = struct{}{}
 			}
 
@@ -108,7 +108,7 @@ var _ = Describe("Per-query realism (task 2)", func() {
 		It("yields a likely-NXDOMAIN name under a real TLD", func() {
 			eng := NewEngine(cfg, nil, nil)
 
-			for i := 0; i < 200; i++ {
+			for range 200 {
 				name := eng.deadName()
 				label, tld, ok := strings.Cut(name, ".")
 				Expect(ok).Should(BeTrue())
@@ -164,14 +164,14 @@ var _ = Describe("Per-query realism (task 2)", func() {
 			Expect(eng.backoffFactor()).Should(Equal(1.0))
 
 			// A burst of decoy errors drives the multiplier down.
-			for i := 0; i < backoffWindow; i++ {
+			for range backoffWindow {
 				eng.noteOutcome(true)
 			}
 			lowered := eng.backoffFactor()
 			Expect(lowered).Should(BeNumerically("<", 1.0))
 
 			// Sustained success recovers it back toward 1.
-			for i := 0; i < 200; i++ {
+			for range 200 {
 				eng.noteOutcome(false)
 			}
 			Expect(eng.backoffFactor()).Should(BeNumerically(">", lowered))
@@ -181,7 +181,7 @@ var _ = Describe("Per-query realism (task 2)", func() {
 		It("is a no-op when disabled", func() {
 			eng := NewEngine(cfg, &mockSource{}, nil)
 			eng.cfg.AdaptiveBackoff = false
-			for i := 0; i < backoffWindow; i++ {
+			for range backoffWindow {
 				eng.noteOutcome(true)
 			}
 			Expect(eng.backoffFactor()).Should(Equal(1.0))

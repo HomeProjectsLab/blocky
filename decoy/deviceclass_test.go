@@ -5,6 +5,7 @@ package decoy
 import (
 	"context"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +36,8 @@ func allVendorDomains() map[string]bool {
 func domainFamily(name string) string {
 	name = strings.TrimSuffix(name, ".")
 	for fam, hosts := range vendorTelemetry {
-		for _, h := range hosts {
-			if h == name {
-				return fam
-			}
+		if slices.Contains(hosts, name) {
+			return fam
 		}
 	}
 
@@ -66,7 +65,7 @@ var _ = Describe("Device-class personas (task E)", func() {
 
 			return &model.Response{Res: new(dns.Msg)}, nil
 		})
-		eng.rnd = rand.New(rand.NewSource(1)) //nolint:gosec // deterministic test
+		eng.rnd = rand.New(rand.NewSource(1))
 
 		return eng, func() []*model.Request {
 			mu.Lock()
@@ -81,7 +80,7 @@ var _ = Describe("Device-class personas (task E)", func() {
 		eng, snap := capture(src)
 
 		vendor := allVendorDomains()
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			eng.emit(context.Background())
 		}
 
@@ -104,7 +103,7 @@ var _ = Describe("Device-class personas (task E)", func() {
 			server[d] = true
 		}
 
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			eng.emit(context.Background())
 		}
 
@@ -127,7 +126,7 @@ var _ = Describe("Device-class personas (task E)", func() {
 		src := &mockSource{persona: querylog.ClientPersona{IP: "10.0.0.11"}, class: querylog.ClassWorkstation, listDomain: "browse.example"}
 		eng, snap := capture(src)
 
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			eng.emit(context.Background())
 		}
 
@@ -160,7 +159,7 @@ var _ = Describe("Device-class personas (task E)", func() {
 
 		fams := map[string]bool{}
 		phantom := false
-		for i := 0; i < 400; i++ {
+		for range 400 {
 			fam := domainFamily(eng.beaconQuery().name)
 			Expect(fam).ShouldNot(BeEmpty())
 			fams[fam] = true

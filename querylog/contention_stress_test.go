@@ -40,9 +40,11 @@ func (h *qlLockHook) Fire(e *logrus.Entry) error {
 	for _, s := range []string{"database is locked", "database table is locked", "SQLITE_BUSY", "database is busy"} {
 		if containsFoldQL(m, s) {
 			h.n.Add(1)
+
 			break
 		}
 	}
+
 	return nil
 }
 
@@ -51,17 +53,20 @@ func containsFoldQL(s, sub string) bool {
 		if b >= 'A' && b <= 'Z' {
 			return b + 32
 		}
+
 		return b
 	}
 outer:
 	for i := 0; i+len(sub) <= len(s); i++ {
-		for j := 0; j < len(sub); j++ {
+		for j := range len(sub) {
 			if lower(s[i+j]) != lower(sub[j]) {
 				continue outer
 			}
 		}
+
 		return true
 	}
+
 	return false
 }
 
@@ -92,22 +97,26 @@ func TestStressContention(t *testing.T) {
 
 	// seed a small decoy list + blocklist so the samplers hit real rows.
 	seedLines := ""
-	for i := 0; i < 2000; i++ {
-		seedLines += fmt.Sprintf("d%d.example.com\n", i)
+	var seedLinesSb95 strings.Builder
+	for i := range 2000 {
+		seedLinesSb95.WriteString(fmt.Sprintf("d%d.example.com\n", i))
 	}
+	seedLines += seedLinesSb95.String()
 	if _, err := src.SeedIfEmpty(strings.NewReader(seedLines)); err != nil {
 		t.Fatalf("seed decoy: %v", err)
 	}
 	blLines := ""
-	for i := 0; i < 2000; i++ {
-		blLines += fmt.Sprintf("blocked%d.ads.example\n", i)
+	var blLinesSb102 strings.Builder
+	for i := range 2000 {
+		blLinesSb102.WriteString(fmt.Sprintf("blocked%d.ads.example\n", i))
 	}
+	blLines += blLinesSb102.String()
 	if _, err := src.SeedBlocklistIfEmpty("ads", strings.NewReader(blLines)); err != nil {
 		t.Fatalf("seed blocklist: %v", err)
 	}
 
 	// prime some real log rows so cohort/session/replay samplers return data.
-	for i := 0; i < 3000; i++ {
+	for i := range 3000 {
 		writer.Write(realEntry(i))
 	}
 	if err := writer.Flush(); err != nil {
@@ -148,7 +157,7 @@ func TestStressContention(t *testing.T) {
 
 	// 1) writer ingest: constant Write() so every 50ms flush carries a big batch
 	//    (raw insert + aggregates + noise_corpus upsert + prune, one tx each).
-	for w := 0; w < 6; w++ {
+	for w := range 6 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -163,7 +172,7 @@ func TestStressContention(t *testing.T) {
 
 	// 2) DecoySource WRITE path: AddToCorpus on its own connection, concurrent
 	//    with the writer's noise_corpus upsert — the exact two-writer scenario.
-	for w := 0; w < 4; w++ {
+	for w := range 4 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -177,7 +186,7 @@ func TestStressContention(t *testing.T) {
 	}
 
 	// 3) DecoySource READ/sample path: the decoy engine's hot sampling.
-	for w := 0; w < 8; w++ {
+	for w := range 8 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -217,7 +226,7 @@ func TestStressContention(t *testing.T) {
 		t.Fatalf("reader: %v", err)
 	}
 	defer reader.Close()
-	for w := 0; w < 4; w++ {
+	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

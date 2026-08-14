@@ -70,7 +70,7 @@ var _ = Describe("DecoySource", func() {
 			Expect(e).Should(Succeed())
 			Expect(n).Should(Equal(3))
 
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				d, e := source.SampleList()
 				Expect(e).Should(Succeed())
 				Expect(d).Should(BeElementOf("a.com", "b.com", "c.com"))
@@ -177,7 +177,7 @@ var _ = Describe("DecoySource", func() {
 			Expect(source.db.Raw("SELECT COUNT(*) FROM noise_corpus").Scan(&n).Error).Should(Succeed())
 			Expect(n).Should(Equal(int64(2))) // only the two real, non-blocked domains
 
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				d, e := source.SampleCorpus()
 				Expect(e).Should(Succeed())
 				Expect(d).Should(BeElementOf("corpus1.com", "corpus2.com"))
@@ -198,7 +198,7 @@ var _ = Describe("DecoySource", func() {
 			base := time.Now().Add(-time.Hour)
 
 			entries := make([]*logEntry, 0, 8)
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				entries = append(entries, &logEntry{
 					QuestionName: "c" + strconv.Itoa(i) + ".com",
 					RequestTS:    base.Add(time.Duration(i) * time.Minute), // c0 oldest, c7 newest
@@ -239,7 +239,7 @@ var _ = Describe("DecoySource", func() {
 			_, e := source.SeedIfEmpty(strings.NewReader("bad.com\ngood1.com\ngood2.com\ngood3.com\n"))
 			Expect(e).Should(Succeed())
 
-			for i := 0; i < 100; i++ {
+			for range 100 {
 				d, e := source.SampleList()
 				Expect(e).Should(Succeed())
 				Expect(d).ShouldNot(Equal("bad.com"))
@@ -271,7 +271,7 @@ var _ = Describe("DecoySource", func() {
 
 			topDecile := 0
 			const draws = 2000
-			for i := 0; i < draws; i++ {
+			for range draws {
 				d, e := src.SampleList()
 				Expect(e).Should(Succeed())
 				rank, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(d, "r"), ".com"))
@@ -362,7 +362,7 @@ var _ = Describe("DecoySource", func() {
 			// never mixed (exclusion holds regardless of which seed was picked).
 			var burst []CohortMember
 
-			for i := 0; i < 60; i++ {
+			for range 60 {
 				mem, e := src.SampleCohort()
 				Expect(e).Should(Succeed())
 
@@ -409,7 +409,7 @@ var _ = Describe("DecoySource", func() {
 				{RequestTS: now.Add(4*time.Hour + time.Minute), ClientName: "h1", QuestionName: "c.com", EffectiveTLDP: "c.com"},
 			})
 
-			for i := 0; i < 30; i++ {
+			for range 30 {
 				nxt, e := src.NextInSession("a.com")
 				Expect(e).Should(Succeed())
 				Expect(nxt).Should(BeElementOf("b.com", "c.com"))
@@ -500,7 +500,7 @@ var _ = Describe("DecoySource", func() {
 		// crafted rows for seedLog.
 		beacon := func(client, ip string, domains []string, n int, start time.Time, period time.Duration) []realRow {
 			rows := make([]realRow, 0, n)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				d := domains[i%len(domains)]
 				rows = append(rows, realRow{
 					RequestTS: start.Add(time.Duration(i) * period), ClientIP: ip, ClientName: client,
@@ -521,7 +521,7 @@ var _ = Describe("DecoySource", func() {
 
 			// workstation: many distinct browsing domains, mixed qtypes, bursty.
 			qtypes := []string{"A", "AAAA", "HTTPS"}
-			for i := 0; i < 60; i++ {
+			for i := range 60 {
 				d := fmt.Sprintf("site%d.com", i)
 				// cluster three per burst then jump ahead → high inter-arrival CoV
 				rows = append(rows, realRow{
@@ -533,7 +533,7 @@ var _ = Describe("DecoySource", func() {
 
 			// server: registry/update-heavy.
 			srv := []string{"docker.io", "ghcr.io", "deb.debian.org", "registry.npmjs.org", "github.com"}
-			for i := 0; i < 50; i++ {
+			for i := range 50 {
 				d := srv[i%len(srv)]
 				rows = append(rows, realRow{
 					RequestTS: now.Add(-4*time.Hour + time.Duration(i)*3*time.Minute),

@@ -219,12 +219,12 @@ var _ = Describe("Stats UI API", func() {
 			var event, data string
 			for scanner.Scan() {
 				line := scanner.Text()
-				if strings.HasPrefix(line, "event: ") {
-					event = strings.TrimPrefix(line, "event: ")
+				if after, ok := strings.CutPrefix(line, "event: "); ok {
+					event = after
 				}
 
-				if strings.HasPrefix(line, "data: ") {
-					data = strings.TrimPrefix(line, "data: ")
+				if after, ok := strings.CutPrefix(line, "data: "); ok {
+					data = after
 
 					break
 				}

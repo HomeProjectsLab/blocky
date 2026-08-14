@@ -23,6 +23,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -104,7 +105,7 @@ func fetchTranco(url string) ([]string, error) {
 		return parseCSV(rc)
 	}
 
-	return nil, fmt.Errorf("no csv found in tranco zip")
+	return nil, errors.New("no csv found in tranco zip")
 }
 
 func parseCSV(r io.Reader) ([]string, error) {

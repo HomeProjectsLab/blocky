@@ -148,7 +148,7 @@ func (r *RecursiveResolver) Resolve(ctx context.Context, request *model.Request)
 			"RESOLVED (recursive:iterative, DNSSEC bogus)"), nil
 	}
 
-	switch status {
+	switch status { //nolint:exhaustive // every other zdns status means "no answer" and takes the fallback path
 	case zdns.StatusNoError, zdns.StatusNXDomain:
 		// clean answer (incl. NOERROR with empty answer section): never fall back
 		return r.buildResponse(logger, request, res, status), nil

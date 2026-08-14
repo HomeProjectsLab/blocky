@@ -197,7 +197,7 @@ var _ = Describe("Structural emission", func() {
 
 	Describe("compensating persona cover (#8)", func() {
 		feed := func(eng *Engine, n int) {
-			for i := 0; i < n; i++ {
+			for range n {
 				eng.recordReal()
 			}
 		}

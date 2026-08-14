@@ -2,7 +2,7 @@ package prewarm
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -108,7 +108,7 @@ var _ = Describe("Prewarm worker", func() {
 		cfg.PrewarmURL = "http://trending.example/list"
 		w := New(cfg, adder)
 		w.get = func(_ context.Context, _ string) ([]byte, error) {
-			return nil, fmt.Errorf("boom")
+			return nil, errors.New("boom")
 		}
 
 		w.tick(context.Background())

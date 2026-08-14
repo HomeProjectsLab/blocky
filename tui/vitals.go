@@ -61,7 +61,7 @@ func parseLoadavg(s string) (float64, bool) {
 func parseMeminfo(s string) (usedFrac float64, totalKB int64, ok bool) {
 	var total, avail int64
 
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 {
 			continue

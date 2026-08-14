@@ -216,8 +216,8 @@ func (r *Reader) Buckets(from, to time.Time, step int64) ([]Bucket, error) {
 
 // TopItem is one entry of the /api/ui/stats/top response.
 type TopItem struct {
-	Name  string `gorm:"column:name"  json:"name"`
-	Count int64  `gorm:"column:c"     json:"count"`
+	Name  string `gorm:"column:name" json:"name"`
+	Count int64  `gorm:"column:c"    json:"count"`
 }
 
 // Top returns the n most frequent values of col ("domain", "blocked",
@@ -311,7 +311,7 @@ func (r *Reader) Search(filter SearchFilter) (total int64, items []QueryItem, er
 
 	from := filter.From
 	if from.IsZero() {
-		from = to.Add(-24 * time.Hour) //nolint:mnd
+		from = to.Add(-24 * time.Hour)
 	}
 
 	q := r.db.Model(&logEntry{}).Where("request_ts >= ? AND request_ts <= ?", from, to)
@@ -611,7 +611,7 @@ func (r *Reader) DecoyTopDomains(from, to time.Time, n int) ([]TopItem, error) {
 // time-bounded); a non-positive step falls back to one hour.
 func (r *Reader) DecoyBuckets(from, to time.Time, step int64) ([]Bucket, error) {
 	if step <= 0 {
-		step = 3600 //nolint:mnd // one-hour fallback
+		step = 3600
 	}
 
 	var rows []struct {

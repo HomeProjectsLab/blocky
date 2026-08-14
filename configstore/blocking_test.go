@@ -1,6 +1,8 @@
 package configstore
 
 import (
+	"strings"
+
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/lists"
 
@@ -197,6 +199,7 @@ func stripQueryLog(raw string) string {
 	out := ""
 	skip := false
 
+	var outSb200 strings.Builder
 	for _, line := range splitLines(raw) {
 		if skip {
 			if len(line) > 0 && line[0] != ' ' {
@@ -212,8 +215,9 @@ func stripQueryLog(raw string) string {
 			continue
 		}
 
-		out += line + "\n"
+		outSb200.WriteString(line + "\n")
 	}
+	out += outSb200.String()
 
 	return out
 }

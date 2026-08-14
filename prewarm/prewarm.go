@@ -183,10 +183,7 @@ func (w *Worker) embeddedBand() ([]string, error) {
 	if w.offset >= len(band) {
 		w.offset = 0
 	}
-	end := w.offset + w.perRun
-	if end > len(band) {
-		end = len(band)
-	}
+	end := min(w.offset+w.perRun, len(band))
 	slab := band[w.offset:end]
 	w.offset = end
 

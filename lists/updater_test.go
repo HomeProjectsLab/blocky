@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -38,7 +39,7 @@ func key(s, c string) string { return s + "|" + c }
 func readLines(r io.Reader) []string {
 	b, _ := io.ReadAll(r)
 	var out []string
-	for _, l := range strings.Split(string(b), "\n") {
+	for l := range strings.SplitSeq(string(b), "\n") {
 		if l != "" {
 			out = append(out, l)
 		}
@@ -60,7 +61,7 @@ func (f *fakeStore) SetListMeta(source, category, version string) error {
 func (f *fakeStore) ReplaceDecoy(r io.Reader) (int, error) {
 	f.decoyCalls++
 	if f.failDecoy {
-		return 0, fmt.Errorf("boom")
+		return 0, errors.New("boom")
 	}
 	f.decoyReplaced = readLines(r)
 
@@ -181,7 +182,7 @@ var _ = Describe("List updater", func() {
 					return []byte(`{"list_id":"ID2"}`), nil
 				}
 
-				return nil, fmt.Errorf("network down")
+				return nil, errors.New("network down")
 			}
 
 			u.checkTranco(context.Background())
@@ -239,11 +240,11 @@ var _ = Describe("List updater", func() {
 			u.get = func(_ context.Context, url string) ([]byte, error) {
 				Expect(url).To(ContainSubstring("api.github.com"))
 
-				return []byte(fmt.Sprintf(`{"sha":%q}`, embCommit)), nil
+				return fmt.Appendf(nil, `{"sha":%q}`, embCommit), nil
 			}
 
 			u.checkBlocklists(context.Background())
-			Expect(len(store.blReplaced)).To(Equal(replacedBefore)) // nothing re-fetched
+			Expect(store.blReplaced).To(HaveLen(replacedBefore)) // nothing re-fetched
 		})
 	})
 

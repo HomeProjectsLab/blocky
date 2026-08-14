@@ -74,6 +74,7 @@ func containsFold(s, sub string) bool {
 		if b >= 'A' && b <= 'Z' {
 			return b + 32
 		}
+
 		return b
 	}
 	if len(lsub) == 0 {
@@ -81,13 +82,15 @@ func containsFold(s, sub string) bool {
 	}
 outer:
 	for i := 0; i+len(lsub) <= len(ls); i++ {
-		for j := 0; j < len(lsub); j++ {
+		for j := range lsub {
 			if lower(ls[i+j]) != lower(lsub[j]) {
 				continue outer
 			}
 		}
+
 		return true
 	}
+
 	return false
 }
 
@@ -97,6 +100,7 @@ func envDur(k string, def time.Duration) time.Duration {
 			return d
 		}
 	}
+
 	return def
 }
 
@@ -106,6 +110,7 @@ func envInt(k string, def int) int {
 			return n
 		}
 	}
+
 	return def
 }
 
@@ -117,6 +122,7 @@ func freePort(tb testing.TB) int {
 	}
 	p := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
+
 	return p
 }
 
@@ -158,8 +164,10 @@ func (r *reservoir) percentiles() (p50, p95, p99 float64) {
 		if i >= len(s) {
 			i = len(s) - 1
 		}
+
 		return s[i]
 	}
+
 	return at(50), at(95), at(99)
 }
 
@@ -168,6 +176,7 @@ func fdCount() int {
 	if err != nil {
 		return -1
 	}
+
 	return len(entries)
 }
 
@@ -255,6 +264,7 @@ func TestStress(t *testing.T) {
 		d.ChatterPct = 15
 		d.PrewarmEnable = true
 		d.PrewarmIntervalHours = 12
+
 		return cfg
 	}
 
@@ -277,6 +287,7 @@ func TestStress(t *testing.T) {
 		srv, err := NewServer(srvCtx, buildCfg(), nil)
 		if err != nil {
 			cancel()
+
 			return nil, err
 		}
 		errCh := make(chan error, 16)
@@ -288,6 +299,7 @@ func TestStress(t *testing.T) {
 				}
 			}
 		}()
+
 		return &gen{srv: srv, cancel: cancel}, nil
 	}
 
@@ -306,6 +318,7 @@ func TestStress(t *testing.T) {
 	getCur := func() *gen {
 		curMu.RLock()
 		defer curMu.RUnlock()
+
 		return cur
 	}
 
@@ -325,7 +338,7 @@ func TestStress(t *testing.T) {
 	names := makeNames(200)
 
 	// --- DNS flood -----------------------------------------------------------
-	for i := 0; i < nClients; i++ {
+	for i := range nClients {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -346,6 +359,7 @@ func TestStress(t *testing.T) {
 				if err != nil {
 					cnt.dialErr.Add(1)
 					time.Sleep(25 * time.Millisecond) // don't spin during rebuild downtime
+
 					continue
 				}
 				lat.add(float64(el.Microseconds()) / 1000.0)
@@ -369,7 +383,7 @@ func TestStress(t *testing.T) {
 		"/api/ui/system", "/api/ui/clients",
 	}
 	var apiOK, apiErr atomic.Int64
-	for i := 0; i < nHTTP; i++ {
+	for i := range nHTTP {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -381,11 +395,12 @@ func TestStress(t *testing.T) {
 				if err != nil {
 					apiErr.Add(1)
 					time.Sleep(25 * time.Millisecond) // don't spin during rebuild downtime
+
 					continue
 				}
 				_, _ = readAllDiscard(resp)
 				_ = resp.Body.Close()
-				if resp.StatusCode >= 500 && resp.StatusCode != 503 {
+				if resp.StatusCode >= 500 && resp.StatusCode != http.StatusServiceUnavailable {
 					apiErr.Add(1)
 				} else {
 					apiOK.Add(1)
@@ -395,16 +410,15 @@ func TestStress(t *testing.T) {
 	}
 
 	// --- SSE subscribers (held open, reconnect after rebuild kills them) -----
-	for i := 0; i < nSSE; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range nSSE {
+		wg.Go(func() {
 			for ctxAll.Err() == nil {
 				req, _ := http.NewRequestWithContext(ctxAll, http.MethodGet, "http://"+httpAddr+"/api/ui/stream", nil)
 				hc := &http.Client{Timeout: 0}
 				resp, err := hc.Do(req)
 				if err != nil {
 					time.Sleep(200 * time.Millisecond)
+
 					continue
 				}
 				// blocking reads; the request carries ctxAll, and a rebuild closes
@@ -417,14 +431,12 @@ func TestStress(t *testing.T) {
 				}
 				_ = resp.Body.Close()
 			}
-		}()
+		})
 	}
 
 	// --- rebuild loop (supervisor-style apply under load) --------------------
 	var downtimeNs atomic.Int64
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		tk := time.NewTicker(rebuildEvery)
 		defer tk.Stop()
 		for {
@@ -442,6 +454,7 @@ func TestStress(t *testing.T) {
 				ng, err := start()
 				if err != nil {
 					t.Logf("rebuild NewServer failed: %v", err)
+
 					continue
 				}
 				tStart := time.Since(t0) - tStop
@@ -451,13 +464,11 @@ func TestStress(t *testing.T) {
 				t.Logf("rebuild #%d: stop=%s start(NewServer+Start)=%s", rebuilt.Load(), tStop.Round(time.Millisecond), tStart.Round(time.Millisecond))
 			}
 		}
-	}()
+	})
 
 	// --- runtime upstream swap loop ------------------------------------------
 	var swaps, swapErr atomic.Int64
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		tk := time.NewTicker(swapEvery)
 		defer tk.Stop()
 		for {
@@ -479,7 +490,7 @@ func TestStress(t *testing.T) {
 				}
 			}
 		}
-	}()
+	})
 
 	// --- sampler: goroutines + heap + FDs over time --------------------------
 	type sample struct {
@@ -491,9 +502,7 @@ func TestStress(t *testing.T) {
 	}
 	var samples []sample
 	sampleStart := time.Now()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		tk := time.NewTicker(2 * time.Second)
 		defer tk.Stop()
 		for {
@@ -512,7 +521,7 @@ func TestStress(t *testing.T) {
 				})
 			}
 		}
-	}()
+	})
 
 	t.Logf("stress running: %s, clients=%d http=%d sse=%d rebuild=%s swap=%s qpm=%.0f db=%s",
 		duration, nClients, nHTTP, nSSE, rebuildEvery, swapEvery, qpm, dbPath)
@@ -597,7 +606,7 @@ func startMockUpstream(t *testing.T) (config.Upstream, func()) {
 		tl   net.Listener
 		port int
 	)
-	for try := 0; try < 20; try++ {
+	for range 20 {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("mock tcp listen: %v", err)
@@ -606,9 +615,11 @@ func startMockUpstream(t *testing.T) (config.Upstream, func()) {
 		u, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
 		if err != nil {
 			_ = l.Close() // udp port taken, try another
+
 			continue
 		}
 		tl, pc, port = l, u, p
+
 		break
 	}
 	if tl == nil {
@@ -637,6 +648,7 @@ func startMockUpstream(t *testing.T) (config.Upstream, func()) {
 	go func() { _ = tcpSrv.ActivateAndServe() }()
 
 	up := config.Upstream{Net: config.NetProtocolTcpUdp, Host: "127.0.0.1", Port: uint16(port)}
+
 	return up, func() {
 		_ = udpSrv.Shutdown()
 		_ = tcpSrv.Shutdown()
@@ -661,11 +673,12 @@ func waitReady(t *testing.T, addr string, timeout time.Duration) {
 
 func makeNames(n int) []string {
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out = append(out, fmt.Sprintf("host%d.example%d.com.", i, i%37))
 	}
 	// a few well-known shapes + likely-blocked candidates for variety
 	out = append(out, "doubleclick.net.", "google.com.", "cloudflare.com.", "www.bild.de.")
+
 	return out
 }
 

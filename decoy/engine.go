@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -480,7 +481,7 @@ func (e *Engine) reactiveQPM() (int, float64) {
 
 	realQPM := float64(n) / realWindow.Seconds() * 60.0
 
-	jitter := float64(e.rnd.Intn(2*reactiveJitterQPM+1) - reactiveJitterQPM) //nolint:gosec // noise, not crypto
+	jitter := float64(e.rnd.Intn(2*reactiveJitterQPM+1) - reactiveJitterQPM)
 
 	qpm := realQPM + jitter
 	if qpm < minReactiveQPM {
@@ -630,8 +631,8 @@ func (e *Engine) activeEdges(t time.Time) (int, int) {
 	e.edgeMu.Lock()
 	if day != e.edgeDay {
 		e.edgeDay = day
-		e.startOff = e.rnd.Intn(2*j+1) - j //nolint:gosec // noise timing, not crypto
-		e.endOff = e.rnd.Intn(2*j+1) - j   //nolint:gosec // noise timing, not crypto
+		e.startOff = e.rnd.Intn(2*j+1) - j
+		e.endOff = e.rnd.Intn(2*j+1) - j
 	}
 	so, eo := e.startOff, e.endOff
 	e.edgeMu.Unlock()
@@ -730,7 +731,7 @@ func (e *Engine) emit(ctx context.Context) {
 		return
 	}
 
-	if q.replay && e.cfg.ReplayMutate && e.rnd.Intn(2) == 0 { //nolint:mnd // 0.5 mutation probability
+	if q.replay && e.cfg.ReplayMutate && e.rnd.Intn(2) == 0 {
 		q = e.mutate(q) // technique 2: never a byte-identical echo
 	}
 
@@ -788,10 +789,9 @@ func (e *Engine) emitCohort(ctx context.Context) bool {
 func (e *Engine) emitBurstTimed(ctx context.Context, qs []decoyQuery) {
 	prev := 0
 	for _, q := range qs {
-		wait := q.delayMs - prev
-		if wait < 0 {
-			wait = 0 // out-of-order/clock-skew guard
-		}
+		wait := max(q.delayMs-prev,
+			// out-of-order/clock-skew guard
+			0)
 
 		prev = q.delayMs
 
@@ -1065,7 +1065,7 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 		// #4: real stubs retry on timeout — occasionally re-issue the failed decoy.
 		// ponytail: single immediate retry, no separate backoff; the request object
 		// is reused (a retry is byte-identical to the original by design).
-		if e.rnd.Intn(2) == 0 { //nolint:mnd // ~50% retry on failure
+		if e.rnd.Intn(2) == 0 {
 			resp, err = e.resolve(ctx, req)
 		}
 	}
@@ -1228,7 +1228,7 @@ func (e *Engine) clientIP() net.IP {
 // embedded deviceChatter set, ~20% a PTR reverse lookup of a random RFC1918
 // address (real hosts reverse-resolve LAN peers and their own gateway).
 func (e *Engine) chatterQuery() decoyQuery {
-	if e.rnd.Intn(5) == 0 { //nolint:mnd // ~20% PTR reverse lookup
+	if e.rnd.Intn(5) == 0 {
 		return decoyQuery{name: e.randPTRName(), qtype: dns.TypePTR, source: provChatter}
 	}
 
@@ -1354,7 +1354,7 @@ func (e *Engine) beaconQuery() decoyQuery {
 	hosts := vendorTelemetry[e.beaconFamily()]
 
 	qtype := dns.TypeA
-	if e.rnd.Intn(5) == 0 { //nolint:mnd // ~20% AAAA — keep qtype diversity low
+	if e.rnd.Intn(5) == 0 {
 		qtype = dns.TypeAAAA
 	}
 
@@ -1408,13 +1408,7 @@ func knownFamilies(names []string) []string {
 }
 
 func containsStr(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(ss, s)
 }
 
 // emitServer fires one SERVER-shaped lookup attributed to persona: a registry/
@@ -1692,7 +1686,7 @@ func (e *Engine) companionsFor(domain string) []decoyQuery {
 		{name: clusterCompanions[e.rnd.Intn(len(clusterCompanions))], qtype: e.realQtype(), source: provCompanion},
 	}
 
-	fill := e.pickCompanions(2) //nolint:mnd // 0..2 more third-party siblings
+	fill := e.pickCompanions(2)
 	if d, err := e.source.SampleList(); err == nil && d != "" {
 		fill = append(fill, decoyQuery{name: d, qtype: e.realQtype(), source: provCompanion})
 	}
@@ -1710,7 +1704,7 @@ func (e *Engine) clusterOf(q decoyQuery) []decoyQuery {
 	fill := append([]decoyQuery{
 		{name: "www." + q.name, qtype: dns.TypeA, source: q.source}, // same site as the anchor
 		{name: q.name, qtype: dns.TypeAAAA, source: q.source},
-	}, e.pickCompanions(2)...) //nolint:mnd // up to 2 pool companions
+	}, e.pickCompanions(2)...)
 
 	return e.assembleBurst(&q, nil, fill)
 }
@@ -1771,10 +1765,7 @@ func (e *Engine) assembleBurst(lead *decoyQuery, keep, fill []decoyQuery) []deco
 func (e *Engine) pickCompanions(max int) []decoyQuery {
 	idx := e.rnd.Perm(len(clusterCompanions))
 
-	k := e.rnd.Intn(max + 1)
-	if k > len(idx) {
-		k = len(idx)
-	}
+	k := min(e.rnd.Intn(max+1), len(idx))
 
 	out := make([]decoyQuery, 0, k)
 	for _, i := range idx[:k] {
@@ -1809,10 +1800,10 @@ var labelSyllables = []string{
 // chaff): 2..3 syllables, occasionally a trailing digit, giving a realistic ~5-12
 // char hostname shape rather than a flat random string.
 func (e *Engine) randLabel() string {
-	n := 2 + e.rnd.Intn(2) //nolint:mnd // 2..3 syllables
+	n := 2 + e.rnd.Intn(2)
 
 	var b strings.Builder
-	for i := 0; i < n; i++ {
+	for range n {
 		b.WriteString(labelSyllables[e.rnd.Intn(len(labelSyllables))])
 	}
 

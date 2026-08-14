@@ -26,10 +26,10 @@ const (
 // NewStatsCommand creates new command instance
 func NewStatsCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:               "stats",
-		Args:              cobra.NoArgs,
-		Short:             "shows DNS statistics",
-		RunE:              stats,
+		Use:   "stats",
+		Args:  cobra.NoArgs,
+		Short: "shows DNS statistics",
+		RunE:  stats,
 	}
 }
 

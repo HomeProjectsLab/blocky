@@ -110,7 +110,7 @@ var _ = Describe("Obfuscation techniques", func() {
 			base := decoyQuery{name: "replaytarget.example", qtype: dns.TypeA, replay: true}
 
 			sawQtypeFlip, sawNameChange := false, false
-			for i := 0; i < 500; i++ {
+			for range 500 {
 				m := eng.mutate(base)
 				if m.qtype != base.qtype {
 					sawQtypeFlip = true
@@ -194,7 +194,7 @@ var _ = Describe("Obfuscation techniques", func() {
 			cfg.FailChaffPct = 0 // no lone fail-chaff emission
 			cfg.ClusterPct = 100
 
-			for trial := 0; trial < 25; trial++ {
+			for range 25 {
 				var captured []*model.Request
 				eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {
 					captured = append(captured, req)
@@ -225,7 +225,7 @@ var _ = Describe("Obfuscation techniques", func() {
 			cfg.SplitUpstream = true
 			eng.cfg = cfg
 			seen := map[string]bool{}
-			for i := 0; i < 200; i++ {
+			for range 200 {
 				seen[eng.clientIP().String()] = true
 			}
 			Expect(len(seen)).Should(BeNumerically(">", 1))
