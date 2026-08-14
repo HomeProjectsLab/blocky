@@ -1,0 +1,20 @@
+[Unit]
+Description=blocky appliance container stack (resolver + dashboard + Watchtower)
+Documentation=https://github.com/HomeProjectsLab/blocky
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# bootstrap.sh installs Docker on first boot, seeds the config database from
+# the boot-partition appliance.yml, then brings the compose stack up. Every
+# step is idempotent, so retrying on a not-yet-ready network is safe.
+ExecStart=/opt/blocky/bootstrap.sh
+ExecStop=/usr/bin/docker compose -f /opt/blocky/compose.yml down
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target

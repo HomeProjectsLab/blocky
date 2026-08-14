@@ -33,25 +33,50 @@ balenaEtcher (both read `.img.xz` directly), or on the command line with
 
 1. Raspberry Pi OS expands the root filesystem (stock `init_resize`, untouched).
 2. Wired ethernet comes up via DHCP (RPi OS default — no wifi/country setup).
-3. `blocky.service` seeds its config once from `/boot/firmware/appliance.yml`
-   (into `/var/lib/blocky`) and starts serving. It binds the privileged ports
-   :53 and :80 via `AmbientCapabilities=CAP_NET_BIND_SERVICE` — **no root**.
-4. `blocky-dashboard.service` renders the console dashboard on **tty1 (HDMI)**.
+3. `blocky-stack.service` runs `/opt/blocky/bootstrap.sh`, which installs Docker
+   (one time, a few minutes on a Pi 3), seeds the config database once from
+   `/boot/firmware/appliance.yml`, and brings the compose stack up.
+4. The dashboard container renders the console UI on **tty1 (HDMI)**.
 
 Then point your LAN's DHCP DNS (or each device) at the Pi's IP. The web UI is at
 `http://<pi-ip>/`.
 
+## Updates are pull-based — no SSH needed
+
+The appliance runs from containers and a **Watchtower** sidecar polls
+`ghcr.io/homeprojectslab/blocky:latest` **every 30 s**. Push a new image and the
+Pi restarts itself onto it within the poll interval — which is why the box needs
+no inbound access at all.
+
+Two consequences worth knowing:
+
+- **The ghcr package must be public**, otherwise the Pi cannot pull it
+  anonymously and the stack never starts. The first CI push creates a *private*
+  package — flip it to public once in the repo's package settings.
+- A 30 s interval is ~2,900 registry checks/day. Only the manifest digest is
+  fetched so it is cheap, but if you ever hit rate limits, raise `--interval`
+  in `compose.yml`.
+
 ## What's on the image
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `/usr/local/bin/blocky` | the arm64 binary |
-| `/etc/systemd/system/blocky.service` | resolver + ad-blocker + noise machine (`--db-dir /var/lib/blocky`) |
-| `/etc/systemd/system/blocky-dashboard.service` | htop-style console dashboard on tty1 |
+| `/opt/blocky/compose.yml` | resolver + dashboard + Watchtower stack |
+| `/opt/blocky/bootstrap.sh` | first-boot Docker install, config seed, `compose up` |
+| `/etc/systemd/system/blocky-stack.service` | brings the stack up at boot |
 | `/boot/firmware/appliance.yml` | first-boot seed config (port 80, recursive default, noise on) |
+| `/usr/local/bin/blocky` | native binary, kept only as an offline rescue tool — nothing starts it |
 
 Edit `appliance.yml` on the boot partition before first boot to change ports,
 upstreams, or privacy defaults. After first boot, use the web UI.
+
+### Why host networking
+
+`compose.yml` runs the resolver with `network_mode: host`, and that is
+load-bearing rather than a shortcut: under bridge networking every LAN client
+would arrive as the Docker gateway address, which silently breaks per-client
+blocking segmentation, client fingerprinting, device-class personas and the
+per-client stats. It also avoids a userland proxy hop on every DNS packet.
 
 ## arm64 note
 

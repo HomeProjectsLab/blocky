@@ -1,0 +1,61 @@
+# blocky appliance — container stack for the Raspberry Pi image.
+#
+# Updates are pull-based: push a new image to ghcr, Watchtower notices within
+# its poll interval and restarts the container. No SSH into the appliance.
+services:
+  blocky:
+    image: ghcr.io/homeprojectslab/blocky:latest
+    container_name: blocky
+    # Host networking is REQUIRED, not a shortcut: with bridge networking every
+    # LAN client would arrive as the docker gateway address, which silently
+    # destroys per-client blocking segmentation, client fingerprinting, device
+    # -class personas and the client stats. It also avoids a userland proxy hop
+    # on every DNS packet.
+    network_mode: host
+    restart: unless-stopped
+    command: ["serve", "--db-dir", "/data"]
+    volumes:
+      - /var/lib/blocky:/data
+      - /boot/firmware/appliance.yml:/appliance.yml:ro
+    cap_add:
+      - NET_BIND_SERVICE # bind :53 and :80 without running as root
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+    healthcheck:
+      test: ["CMD", "/app/blocky", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # Console dashboard on the HDMI output (tty1). Same image, so it is updated
+  # in lockstep with the resolver. /dev/tty1 is mapped to /dev/tty because that
+  # is what the TUI opens.
+  blocky-dashboard:
+    image: ghcr.io/homeprojectslab/blocky:latest
+    container_name: blocky-dashboard
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - blocky
+    command: ["dashboard", "--api-url", "http://localhost:80"]
+    stdin_open: true
+    tty: true
+    environment:
+      - TERM=linux
+    devices:
+      - /dev/tty1:/dev/tty
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # --label-enable: only touch containers that opt in above, so Watchtower
+    # never restarts itself or anything else the operator adds later.
+    command: --interval 30 --cleanup --label-enable
+    labels:
+      - com.centurylinklabs.watchtower.enable=false

@@ -129,14 +129,17 @@ mount "$BOOTLP" "$BOOT_MNT"
 mount "$ROOTLP" "$ROOT_MNT"
 
 # --- 4. inject ----------------------------------------------------------------
-echo ">> injecting blocky + units + config…"
+echo ">> injecting blocky stack + units + config…"
+# The appliance runs from containers so Watchtower can update it in place
+# (no SSH into the box). The native binary is still injected as a rescue tool
+# for offline debugging, but nothing starts it.
 install -Dm755 "$BIN" "$ROOT_MNT/usr/local/bin/blocky"
-install -Dm644 "$HERE/systemd/blocky.service"           "$ROOT_MNT/etc/systemd/system/blocky.service"
-install -Dm644 "$HERE/systemd/blocky-dashboard.service" "$ROOT_MNT/etc/systemd/system/blocky-dashboard.service"
+install -Dm755 "$HERE/bootstrap.sh" "$ROOT_MNT/opt/blocky/bootstrap.sh"
+install -Dm644 "$HERE/compose.yml"  "$ROOT_MNT/opt/blocky/compose.yml"
+install -Dm644 "$HERE/systemd/blocky-stack.service" "$ROOT_MNT/etc/systemd/system/blocky-stack.service"
 install -d "$ROOT_MNT/etc/systemd/system/multi-user.target.wants"
-ln -sf ../blocky.service           "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky.service"
-ln -sf ../blocky-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-dashboard.service"
-ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # dashboard owns tty1
+ln -sf ../blocky-stack.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-stack.service"
+ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # dashboard container owns tty1
 install -Dm644 "$HERE/appliance.yml" "$BOOT_MNT/appliance.yml"
 
 # verify what we placed
