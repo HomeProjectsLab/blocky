@@ -137,9 +137,13 @@ install -Dm755 "$BIN" "$ROOT_MNT/usr/local/bin/blocky"
 install -Dm755 "$HERE/bootstrap.sh" "$ROOT_MNT/opt/blocky/bootstrap.sh"
 install -Dm644 "$HERE/compose.yml"  "$ROOT_MNT/opt/blocky/compose.yml"
 install -Dm644 "$HERE/systemd/blocky-stack.service" "$ROOT_MNT/etc/systemd/system/blocky-stack.service"
+# The console dashboard runs as a HOST unit bound to tty1, NOT a container: a
+# container with tty:true draws into a dockerd-held PTY that never reaches HDMI.
+install -Dm644 "$HERE/systemd/blocky-dashboard.service" "$ROOT_MNT/etc/systemd/system/blocky-dashboard.service"
 install -d "$ROOT_MNT/etc/systemd/system/multi-user.target.wants"
-ln -sf ../blocky-stack.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-stack.service"
-ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # dashboard container owns tty1
+ln -sf ../blocky-stack.service     "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-stack.service"
+ln -sf ../blocky-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-dashboard.service"
+ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # host blocky-dashboard.service owns tty1
 # The user is seeded via userconf.txt, so RPi's first-boot account dialog has
 # nothing to do — but it stays enabled and spams "Failed to start userconfig"
 # every 10s on the console. Mask it.
