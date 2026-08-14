@@ -140,6 +140,10 @@ install -Dm644 "$HERE/systemd/blocky-stack.service" "$ROOT_MNT/etc/systemd/syste
 install -d "$ROOT_MNT/etc/systemd/system/multi-user.target.wants"
 ln -sf ../blocky-stack.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-stack.service"
 ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # dashboard container owns tty1
+# The user is seeded via userconf.txt, so RPi's first-boot account dialog has
+# nothing to do — but it stays enabled and spams "Failed to start userconfig"
+# every 10s on the console. Mask it.
+ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/userconfig.service"
 install -Dm644 "$HERE/appliance.yml" "$BOOT_MNT/appliance.yml"
 
 # Headless user account. Raspberry Pi OS bookworm REQUIRES a user or it drops to
