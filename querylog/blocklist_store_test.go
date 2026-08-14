@@ -57,6 +57,7 @@ var _ = Describe("Blocklist store", func() {
 		})
 
 		It("dedups duplicate domains within a category", func() {
+			//nolint:dupword // the repeated domain is exactly what this test feeds in
 			n, err := source.ReplaceBlocklist("ads", strings.NewReader("dup.com\ndup.com\nother.com\n"))
 			Expect(err).Should(Succeed())
 			Expect(n).To(Equal(3)) // rows attempted

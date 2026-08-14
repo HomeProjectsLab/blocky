@@ -35,6 +35,7 @@ func registerBlockingUIEndpoints(router *chi.Mux, store *configstore.Store, stat
 
 type blockingAPI struct {
 	*uiAPI
+
 	stats blocklistStatser
 }
 

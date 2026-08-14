@@ -446,8 +446,9 @@ func (s *DecoySource) SampleClient() (ClientPersona, error) {
 	since := time.Now().Add(-decoyReplayWindow)
 
 	var row struct {
-		ClientIP string `gorm:"column:client_ip"`
 		fpRow
+
+		ClientIP string `gorm:"column:client_ip"`
 	}
 
 	err := s.db.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
@@ -1225,8 +1226,9 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 	since := time.Now().Add(-decoyReplayWindow)
 
 	var row struct {
-		ClientIP string `gorm:"column:client_ip"`
 		fpRow
+
+		ClientIP string `gorm:"column:client_ip"`
 	}
 
 	err = s.db.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries

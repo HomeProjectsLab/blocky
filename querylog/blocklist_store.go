@@ -2,6 +2,7 @@ package querylog
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -48,7 +49,7 @@ func (s *DecoySource) GetListMeta(source, category string) (string, error) {
 
 	err := s.db.Where("source = ? AND category = ?", source, category).Take(&m).Error
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", nil
 		}
 

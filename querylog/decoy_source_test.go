@@ -379,7 +379,7 @@ var _ = Describe("DecoySource", func() {
 			Expect(burst).ShouldNot(BeNil(), "expected to sample h1's 3-member cohort within 60 draws")
 			Expect(burst[0].Domain).Should(Equal("page.com")) // primary first
 			Expect(burst[0].DelayMs).Should(Equal(0))
-			Expect(burst[0].Qtype).Should(Equal(uint16(1)))  // A
+			Expect(burst[0].Qtype).Should(Equal(uint16(1))) // A
 			Expect(burst[1].Domain).Should(Equal("cdn.page.com"))
 			Expect(burst[1].Qtype).Should(Equal(uint16(28))) // AAAA
 			Expect(burst[1].DelayMs).Should(BeNumerically("~", 300, 5))
@@ -570,7 +570,7 @@ var _ = Describe("DecoySource", func() {
 					iot = r
 				}
 			}
-			Expect(iot.Class).Should(Equal(ClassIoT))     // auto unchanged
+			Expect(iot.Class).Should(Equal(ClassIoT)) // auto unchanged
 			Expect(iot.Override).Should(Equal(ClassServer))
 			Expect(iot.Effective).Should(Equal(ClassServer))
 

@@ -89,7 +89,7 @@ var _ = Describe("ParallelBestConfig", func() {
 			It("should compute defaults", func() {
 				cfg.Timeout = -1
 
-				cfg.validate(logger)
+				Expect(cfg.validate(logger)).Should(Succeed())
 
 				Expect(cfg.Timeout).Should(BeNumerically(">", 0))
 
@@ -98,7 +98,7 @@ var _ = Describe("ParallelBestConfig", func() {
 			})
 
 			It("should not override valid user values", func() {
-				cfg.validate(logger)
+				Expect(cfg.validate(logger)).Should(Succeed())
 
 				Expect(hook.Messages).ShouldNot(ContainElement(ContainSubstring("timeout")))
 			})
@@ -116,7 +116,7 @@ var _ = Describe("ParallelBestConfig", func() {
 					cfg.QUIC.MaxIdleTimeout = 0
 					cfg.QUIC.KeepAlivePeriod = Duration(15 * time.Second)
 
-					cfg.validate(logger)
+					Expect(cfg.validate(logger)).Should(Succeed())
 
 					Expect(cfg.QUIC.MaxIdleTimeout).Should(BeNumerically(">", 0))
 					Expect(hook.Messages).Should(ContainElement(ContainSubstring("maxIdleTimeout")))
@@ -126,7 +126,7 @@ var _ = Describe("ParallelBestConfig", func() {
 					cfg.QUIC.MaxIdleTimeout = Duration(30 * time.Second)
 					cfg.QUIC.KeepAlivePeriod = 0
 
-					cfg.validate(logger)
+					Expect(cfg.validate(logger)).Should(Succeed())
 
 					Expect(cfg.QUIC.KeepAlivePeriod).Should(BeNumerically(">", 0))
 					Expect(hook.Messages).Should(ContainElement(ContainSubstring("keepAlivePeriod")))
@@ -136,7 +136,7 @@ var _ = Describe("ParallelBestConfig", func() {
 					cfg.QUIC.MaxIdleTimeout = Duration(10 * time.Second)
 					cfg.QUIC.KeepAlivePeriod = Duration(10 * time.Second)
 
-					cfg.validate(logger)
+					Expect(cfg.validate(logger)).Should(Succeed())
 
 					Expect(hook.Messages).Should(ContainElement(ContainSubstring("keep-alive won't prevent idle timeout")))
 				})

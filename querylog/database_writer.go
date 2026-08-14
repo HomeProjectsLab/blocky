@@ -224,6 +224,9 @@ func (d *DatabaseWriter) periodicFlush(ctx context.Context) {
 			// ctx is cancelled, so log via a fresh context
 			err := d.doDBWrite()
 
+			// Deliberately detached: ctx is already cancelled here, so deriving
+			// from it would drop the shutdown log line we specifically want.
+			//nolint:contextcheck // see above
 			util.LogOnError(context.Background(), "can't write entries to the database on shutdown: ", err)
 
 			return

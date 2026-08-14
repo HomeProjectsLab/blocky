@@ -128,8 +128,11 @@ func upsertAggregates(tx *gorm.DB, entries []*logEntry) error {
 
 		err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
-				{Name: "hour"}, {Name: "client_name"}, {Name: "response_type"},
-				{Name: "transport"}, {Name: "fp_hash"},
+				{Name: "hour"},
+				{Name: "client_name"},
+				{Name: "response_type"},
+				{Name: "transport"},
+				{Name: "fp_hash"},
 			},
 			DoUpdates: clause.Assignments(map[string]any{
 				"cnt":             gorm.Expr("cnt + excluded.cnt"),

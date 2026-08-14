@@ -469,7 +469,7 @@ func TestStress(t *testing.T) {
 				if g == nil {
 					continue
 				}
-				sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+				sctx, c := context.WithTimeout(ctxAll, 5*time.Second)
 				err := g.srv.SwapUpstreams(sctx, "default", []config.Upstream{mockUp})
 				c()
 				if err != nil {
