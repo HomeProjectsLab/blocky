@@ -190,32 +190,48 @@ method=auto
 method=auto
 EOF
 	chmod 600 "$prof"  # NetworkManager ignores world-readable keyfiles
-	# Regulatory domain as a cfg80211 module param: persistent, applied at module
-	# load, so the radio isn't restricted/soft-blocked before NM associates.
+	# Regulatory domain as a cfg80211 module param (channel compliance).
 	if [ -n "${WIFI_COUNTRY:-}" ]; then
 		echo "options cfg80211 ieee80211_regdom=${WIFI_COUNTRY}" \
 			> "$ROOT_MNT/etc/modprobe.d/cfg80211.conf"
 	fi
-	# Insurance: on some images the WiFi radio is rfkill soft-blocked until a
-	# country is set, and NetworkManager then silently never associates. Unblock
-	# it early (before NetworkManager) so association can't be gated on rfkill.
-	cat > "$ROOT_MNT/etc/systemd/system/blocky-rfkill-unblock.service" <<'EOF'
+
+	# THE fix for "WiFi never associates" on a Pi 3: the radio ships rfkill
+	# soft-blocked until a country is set, and systemd-rfkill PERSISTS + restores
+	# that block on every boot — NetworkManager then logs "Wi-Fi disabled by radio
+	# killswitch; disabled by state file" and wlan0 stays unavailable. An
+	# unblock-before-NM oneshot loses the race (systemd-rfkill, socket-activated by
+	# NM, restores the block afterwards). Two durable layers instead:
+	#
+	# 1) Pre-seed the SAVED rfkill state as unblocked (0) so systemd-rfkill has
+	#    nothing to re-block. The device id is stable for the Pi 3B SDIO radio.
+	install -d "$ROOT_MNT/var/lib/systemd/rfkill"
+	printf '0\n' > "$ROOT_MNT/var/lib/systemd/rfkill/platform-3f300000.mmcnr:wlan"
+
+	# 2) Set the WiFi country the RPi-blessed way at first boot: raspi-config
+	#    do_wifi_country sets the regulatory country persistently AND unblocks the
+	#    radio, so it won't be re-blocked. Runs before NetworkManager; idempotent.
+	if [ -n "${WIFI_COUNTRY:-}" ]; then
+		cat > "$ROOT_MNT/etc/systemd/system/blocky-wifi-country.service" <<EOF
 [Unit]
-Description=Unblock WiFi radio for the blocky appliance
+Description=Set WiFi regulatory country and unblock the radio (blocky appliance)
 DefaultDependencies=no
 Before=network-pre.target NetworkManager.service
 Wants=network-pre.target
+ConditionPathExists=/usr/bin/raspi-config
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/rfkill unblock wifi
+ExecStart=/usr/bin/raspi-config nonint do_wifi_country ${WIFI_COUNTRY}
+ExecStart=-/usr/sbin/rfkill unblock all
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
-	ln -sf ../blocky-rfkill-unblock.service \
-		"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-rfkill-unblock.service"
+		ln -sf ../blocky-wifi-country.service \
+			"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-wifi-country.service"
+	fi
 fi
 
 # verify what we placed
