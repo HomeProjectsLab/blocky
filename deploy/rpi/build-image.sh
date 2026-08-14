@@ -142,6 +142,44 @@ ln -sf ../blocky-stack.service "$ROOT_MNT/etc/systemd/system/multi-user.target.w
 ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # dashboard container owns tty1
 install -Dm644 "$HERE/appliance.yml" "$BOOT_MNT/appliance.yml"
 
+# Optional WiFi: when WIFI_SSID/WIFI_PSK are provided at BUILD time, bake a
+# NetworkManager keyfile profile (bookworm uses NetworkManager, not
+# wpa_supplicant) plus the regulatory country. Credentials are passed via env so
+# they never land in the committed repo. No env => wired-only, as before.
+if [ -n "${WIFI_SSID:-}" ] && [ -n "${WIFI_PSK:-}" ]; then
+	echo ">> injecting WiFi profile for SSID '$WIFI_SSID' (country ${WIFI_COUNTRY:-unset})"
+	install -d -m700 "$ROOT_MNT/etc/NetworkManager/system-connections"
+	prof="$ROOT_MNT/etc/NetworkManager/system-connections/${WIFI_SSID}.nmconnection"
+	cat > "$prof" <<EOF
+[connection]
+id=${WIFI_SSID}
+type=wifi
+autoconnect=true
+autoconnect-priority=10
+
+[wifi]
+mode=infrastructure
+ssid=${WIFI_SSID}
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=${WIFI_PSK}
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+EOF
+	chmod 600 "$prof"  # NetworkManager ignores world-readable keyfiles
+	# Regulatory domain as a cfg80211 module param: persistent, applied at module
+	# load, so the radio isn't restricted/soft-blocked before NM associates.
+	if [ -n "${WIFI_COUNTRY:-}" ]; then
+		echo "options cfg80211 ieee80211_regdom=${WIFI_COUNTRY}" \
+			> "$ROOT_MNT/etc/modprobe.d/cfg80211.conf"
+	fi
+fi
+
 # verify what we placed
 echo ">> injected tree:"; ls -l "$ROOT_MNT/usr/local/bin/blocky" \
 	"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/" "$BOOT_MNT/appliance.yml"
