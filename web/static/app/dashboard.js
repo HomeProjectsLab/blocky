@@ -20,6 +20,7 @@ function cssTok(name) {
 
 let range = "24h";
 let chart = null;
+let reqSeq = 0; // bumped per loadAll; loaders ignore responses from stale ranges
 
 function window_() {
     const to = new Date();
@@ -27,9 +28,10 @@ function window_() {
     return { from: from.toISOString(), to: to.toISOString() };
 }
 
-async function loadOverview() {
+async function loadOverview(token) {
     const w = window_();
     const o = await getJSON("/api/ui/stats/overview", w);
+    if (token !== reqSeq) return;
     setText("t-queries", fmtNum(o.queries));
     setText("t-blocked", fmtPct(o.blocked, o.queries));
     setText("t-cached", fmtPct(o.cached, o.queries));
@@ -37,18 +39,20 @@ async function loadOverview() {
     setText("t-p95", fmtMs(o.p95Ms));
 }
 
-async function loadLatency() {
+async function loadLatency(token) {
     const w = window_();
     const l = await getJSON("/api/ui/stats/latency", w);
+    if (token !== reqSeq) return;
     setText("t-lp50", fmtMs(l.p50));
     setText("t-lp90", fmtMs(l.p90));
     setText("t-lp95", fmtMs(l.p95));
     setText("t-lp99", fmtMs(l.p99));
 }
 
-async function loadBuckets() {
+async function loadBuckets(token) {
     const w = window_();
     const res = await getJSON("/api/ui/stats/buckets", { ...w, step: STEPS[range] });
+    if (token !== reqSeq) return;
     const buckets = res.buckets || [];
     const el = document.getElementById("qps-chart");
     const empty = document.getElementById("qps-empty");
@@ -100,9 +104,10 @@ function renderTop(elID, items) {
 
 // One request for all four panels: keeps the dashboard under the browser's
 // 6-connections-per-origin cap (the SSE stream already holds one slot).
-async function loadTop() {
+async function loadTop(token) {
     const cols = Object.keys(TOP_PANELS);
     const res = await getJSON("/api/ui/stats/top", { ...window_(), col: cols.join(","), n: 10 });
+    if (token !== reqSeq) return;
     const columns = res.columns || {};
     for (const col of cols) renderTop(TOP_PANELS[col], columns[col]);
 }
@@ -116,10 +121,17 @@ function setText(id, text) {
 }
 
 function loadAll() {
+    const token = ++reqSeq;
     const jobs = [
-        loadOverview(), loadLatency(), loadBuckets(), loadTop(),
+        loadOverview(token), loadLatency(token), loadBuckets(token), loadTop(token),
     ];
-    for (const j of jobs) j.catch((err) => console.error(err));
+    for (const j of jobs) j.catch((err) => {
+        console.error(err);
+        if (token !== reqSeq) return; // a newer range is already loading
+        const empty = document.getElementById("qps-empty");
+        empty.textContent = "Couldn't load dashboard data — the backend may be unavailable (query log not in sqlite mode, or a config apply in progress).";
+        empty.hidden = false;
+    });
 }
 
 document.getElementById("range-row").addEventListener("click", (ev) => {

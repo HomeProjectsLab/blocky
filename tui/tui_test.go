@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -11,12 +12,13 @@ func TestMeterBar(t *testing.T) {
 		w    int
 		want string
 	}{
-		{0, 100, 10, "          "},   // empty
-		{100, 100, 10, "||||||||||"}, // full
-		{50, 100, 10, "|||||     "},  // half
-		{200, 100, 10, "||||||||||"}, // clamps >max
-		{-5, 100, 10, "          "},  // clamps <0
-		{50, 0, 10, "          "},    // max=0 → empty, no divide-by-zero
+		{0, 100, 10, "          "},        // empty
+		{100, 100, 10, "||||||||||"},      // full
+		{50, 100, 10, "|||||     "},       // half
+		{200, 100, 10, "||||||||||"},      // clamps >max
+		{-5, 100, 10, "          "},       // clamps <0
+		{50, 0, 10, "          "},         // max=0 → empty, no divide-by-zero
+		{math.NaN(), 1, 10, "          "}, // NaN frac must not panic strings.Repeat
 	}
 	for _, c := range cases {
 		if got := meterBar(c.v, c.m, c.w); got != c.want {

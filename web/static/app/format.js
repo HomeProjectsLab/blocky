@@ -37,6 +37,16 @@ export function fmtUptime(seconds) {
     return `up ${m}m`;
 }
 
+// CSV field escaper. Neutralizes spreadsheet formula injection (CWE-1236) by
+// prefixing ' to any value whose first char is a formula trigger, then quotes
+// per RFC 4180 when the value contains comma/quote/newline.
+export function csvField(v) {
+    if (Array.isArray(v)) v = v.join(";");
+    let s = v == null ? "" : String(v);
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 // Status band for a query item: structure encodes meaning, fixed everywhere.
 export function band(item) {
     if (item.rcode && item.rcode !== "NOERROR" && item.rcode !== "NXDOMAIN") return "error";

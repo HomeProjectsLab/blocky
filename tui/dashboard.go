@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 )
 
 // timeNow is indirected so the clock can be pinned in tests.
@@ -261,8 +262,14 @@ func (d *Dashboard) buildSnapshot() *snapshot {
 
 func drawText(s tcell.Screen, x, y int, style tcell.Style, text string) {
 	for _, r := range text {
+		w := runewidth.RuneWidth(r)
+		if w == 0 {
+			// combining mark: attach to the previous cell, don't advance.
+			continue
+		}
+
 		s.SetContent(x, y, r, nil, style)
-		x++
+		x += w
 	}
 }
 
@@ -466,22 +473,24 @@ func clamp(f, max float64) float64 {
 
 func pct(f float64) string { return fmt.Sprintf("%.0f%%", f*100) }
 
-// trunc clips s to at most n columns. It counts by RUNES, not bytes, and slices
-// on a rune boundary — the rendered glyphs (block-font banners, box glyphs,
-// ASCII/punycode names) are all width-1, so a byte-slice would cut a multi-byte
-// glyph mid-sequence and emit U+FFFD (the artifact this replaced).
+// trunc clips s to at most n display columns. Width is measured with
+// runewidth so East-Asian-wide/emoji runes (2 cols) and combining marks
+// (0 cols) are counted correctly and the slice lands on a rune boundary —
+// a byte-slice would cut a multi-byte glyph mid-sequence and emit U+FFFD,
+// and a rune-count would let a wide name overrun the field/panel border.
 func trunc(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
 
-	runes := 0
-	for i := range s {
-		if runes == n {
+	cols := 0
+	for i, r := range s {
+		w := runewidth.RuneWidth(r)
+		if cols+w > n {
 			return s[:i]
 		}
 
-		runes++
+		cols += w
 	}
 
 	return s
@@ -494,8 +503,8 @@ func hhmmss(ts string) string {
 		return t.Format("15:04:05")
 	}
 
-	if len(ts) >= 8 {
-		return ts[len(ts)-8:]
+	if r := []rune(ts); len(r) >= 8 {
+		return string(r[len(r)-8:])
 	}
 
 	return ts

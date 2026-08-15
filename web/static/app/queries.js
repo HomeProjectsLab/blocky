@@ -1,6 +1,6 @@
 // queries.js — query explorer: filter form, paginated table, CSV export.
 import { getJSON } from "./api.js";
-import { fmtDateTime, band } from "./format.js";
+import { fmtDateTime, band, csvField } from "./format.js";
 
 const LIMIT = 50;
 
@@ -86,13 +86,8 @@ nextBtn.addEventListener("click", () => { offset += LIMIT; load(); });
 document.getElementById("csv-btn").addEventListener("click", () => {
     const cols = ["ts", "client", "clientNames", "question", "qtype", "rtype",
         "rcode", "answer", "durationMs", "transport", "fpHash", "reason", "decoy", "decoySource"];
-    const escCSV = (v) => {
-        if (Array.isArray(v)) v = v.join(";");
-        const s = v == null ? "" : String(v);
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines = [cols.join(",")].concat(
-        rows.map((r) => cols.map((c) => escCSV(r[c])).join(",")));
+        rows.map((r) => cols.map((c) => csvField(r[c])).join(",")));
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);

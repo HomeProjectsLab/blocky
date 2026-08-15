@@ -23,6 +23,7 @@ const SRC_COLOR = Object.fromEntries(SOURCES.map((s) => [s.key, s.color]));
 
 let range = "24h";
 let chart = null;
+let reqSeq = 0; // bumped per loadAll; loaders ignore responses from stale ranges
 
 function window_() {
     const to = new Date();
@@ -30,8 +31,9 @@ function window_() {
     return { from: from.toISOString(), to: to.toISOString() };
 }
 
-async function loadOverview() {
+async function loadOverview(token) {
     const o = await getJSON("/api/ui/noise/overview", window_());
+    if (token !== reqSeq) return;
     setText("n-decoys", fmtNum(o.decoys));
     setText("n-distinct", fmtNum(o.distinctDomains));
     const mix = Object.entries(o.bySource || {}).sort((a, b) => b[1] - a[1]);
@@ -39,9 +41,10 @@ async function loadOverview() {
     setText("n-srccount", String(mix.length));
 }
 
-async function loadBuckets() {
+async function loadBuckets(token) {
     const w = window_();
     const res = await getJSON("/api/ui/noise/buckets", { ...w, step: STEPS[range] });
+    if (token !== reqSeq) return;
     const buckets = res.buckets || [];
     const el = document.getElementById("noise-chart");
     const empty = document.getElementById("noise-empty");
@@ -64,8 +67,9 @@ async function loadBuckets() {
     });
 }
 
-async function loadBars(path, elID) {
+async function loadBars(path, elID, token) {
     const res = await getJSON(path, window_());
+    if (token !== reqSeq) return;
     const items = res.items || [];
     const ol = document.getElementById(elID);
     if (items.length === 0) {
@@ -91,12 +95,19 @@ function setText(id, text) {
 }
 
 function loadAll() {
+    const token = ++reqSeq;
     const jobs = [
-        loadOverview(), loadBuckets(),
-        loadBars("/api/ui/noise/sourcemix", "n-sourcemix"),
-        loadBars("/api/ui/noise/top", "n-topdomains"),
+        loadOverview(token), loadBuckets(token),
+        loadBars("/api/ui/noise/sourcemix", "n-sourcemix", token),
+        loadBars("/api/ui/noise/top", "n-topdomains", token),
     ];
-    for (const j of jobs) j.catch((err) => console.error(err));
+    for (const j of jobs) j.catch((err) => {
+        console.error(err);
+        if (token !== reqSeq) return; // a newer range is already loading
+        const empty = document.getElementById("noise-empty");
+        empty.textContent = "Couldn't load noise data — the backend may be unavailable (query log not in sqlite mode, or a config apply in progress).";
+        empty.hidden = false;
+    });
 }
 
 document.getElementById("range-row").addEventListener("click", (ev) => {

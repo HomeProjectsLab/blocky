@@ -129,7 +129,10 @@ function domainList(domains) {
     return ol;
 }
 
+let detailChart = null;
+
 async function openDetail(name) {
+    if (detailChart) { detailChart.destroy(); detailChart = null; }
     title.textContent = name;
     detail.innerHTML = '<p class="empty">Loading…</p>';
     drawer.hidden = false;
@@ -159,9 +162,9 @@ async function openDetail(name) {
         const xs = d.history.map((h) => h.ts);
         const ys = d.history.map((h) => (h.counts && h.counts.queries) || 0);
         // defer so the element has a width
-        requestAnimationFrame(() => lineChart(chartEl, {
+        requestAnimationFrame(() => { detailChart = lineChart(chartEl, {
             labels: ["queries"], colors: ["var(--c-resolved)"], data: [xs, ys], fmtVal: fmtNum,
-        }));
+        }); });
     }
 
     detail.append(section("Fingerprint · who this client is"));

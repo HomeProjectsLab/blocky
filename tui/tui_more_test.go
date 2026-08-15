@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -190,6 +191,10 @@ func TestTruncBoundaries(t *testing.T) {
 		{"hello", 0, ""},      // zero width
 		{"hello", -3, ""},     // negative width
 		{"", 5, ""},           // empty input
+		// wide runes cost 2 columns each: 12-col budget fits 6, not 12.
+		{strings.Repeat("客", 10), 12, strings.Repeat("客", 6)},
+		// odd budget can't fit a trailing 2-col rune: stops one short.
+		{strings.Repeat("客", 10), 5, strings.Repeat("客", 2)},
 	}
 	for _, c := range cases {
 		if got := trunc(c.s, c.n); got != c.want {
@@ -220,6 +225,11 @@ func TestHHMMSS(t *testing.T) {
 	}
 	if got := hhmmss(""); got != "" {
 		t.Errorf("hhmmss empty = %q", got)
+	}
+	// non-parseable ts with a multibyte tail must slice on rune boundaries,
+	// never mid-sequence -> output stays valid UTF-8 (no U+FFFD).
+	if got := hhmmss("bad-time-€€€"); !utf8.ValidString(got) {
+		t.Errorf("hhmmss multibyte tail = %q, not valid UTF-8", got)
 	}
 }
 

@@ -66,6 +66,10 @@ func meterBarWith(value, max float64, width int, fill, empty rune) string {
 		frac = 1
 	}
 
+	if frac != frac { // NaN: comparisons above are false, guard before the int cast.
+		frac = 0
+	}
+
 	filled := int(frac*float64(width) + 0.5)
 
 	return strings.Repeat(string(fill), filled) + strings.Repeat(string(empty), width-filled)
