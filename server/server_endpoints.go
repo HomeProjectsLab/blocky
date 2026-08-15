@@ -209,6 +209,8 @@ func createHTTPRouter(
 
 	registerBlockingUIEndpoints(router, store, blStats)
 
+	registerLocalDNSUIEndpoints(router, store)
+
 	statsAPI := registerStatsUIEndpoints(router, cfg, qlHub, store, classifier)
 
 	configureDebugHandler(router)
@@ -297,6 +299,7 @@ var uiPages = []struct {
 	{"/clients", "clients", "Clients"},
 	{"/upstreams", "upstreams", "Upstreams"},
 	{"/blocking", "blocking", "Blocking"},
+	{"/localdns", "localdns", "Local DNS"},
 	{"/privacy", "privacy", "Privacy"},
 	{"/settings", "settings", "Settings"},
 	{"/system", "system", "System"},

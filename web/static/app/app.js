@@ -11,6 +11,7 @@ const pageModules = {
     noise: "./noise.js",
     upstreams: "./upstreams.js",
     blocking: "./blocking.js",
+    localdns: "./localdns.js",
     clients: "./clients.js",
     privacy: "./privacy.js",
     settings: "./settings.js",

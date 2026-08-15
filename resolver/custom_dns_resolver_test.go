@@ -60,7 +60,7 @@ var _ = Describe("CustomDNSResolver", func() {
 					"cname.recursive.": {&dns.CNAME{Target: "cname.recursive", Hdr: zoneHdr}},
 					"srv.":             {&dns.SRV{Priority: 0, Weight: 5, Port: 12345, Target: "service", Hdr: zoneHdr}},
 					"txt.":             {&dns.TXT{Txt: []string{"space", "separated", "value"}, Hdr: zoneHdr}},
-					"mx.domain.":       {&dns.MX{Mx: "mx.domain", Hdr: zoneHdr}},
+					"mx.domain.":       {&dns.MX{Mx: "mx.domain", Hdr: dns.RR_Header{Ttl: zoneTTL, Rrtype: dns.TypeMX}}},
 				},
 			},
 			CustomTTL:           config.Duration(time.Duration(TTL) * time.Second),
@@ -433,12 +433,18 @@ var _ = Describe("CustomDNSResolver", func() {
 						))
 			})
 		})
-		When("An unsupported DNS query type is queried from the resolver but found in the config mapping ", func() {
-			It("an error should be returned", func() {
+		When("A generic RR type (e.g. MX) is queried and found in the config mapping ", func() {
+			It("should be served generically", func() {
 				By("MX query", func() {
-					_, err := sut.Resolve(ctx, newRequest("mx.domain", MX))
-					Expect(err).Should(HaveOccurred())
-					Expect(err.Error()).Should(ContainSubstring("unsupported customDNS RR type *dns.MX"))
+					Expect(sut.Resolve(ctx, newRequest("mx.domain.", MX))).
+						Should(
+							SatisfyAll(
+								WithTransform(ToAnswer, ContainElements(
+									BeDNSRecord("mx.domain.", MX, "mx.domain"))),
+								HaveResponseType(ResponseTypeCUSTOMDNS),
+								HaveReason("CUSTOM DNS"),
+								HaveReturnCode(dns.RcodeSuccess),
+							))
 				})
 			})
 		})

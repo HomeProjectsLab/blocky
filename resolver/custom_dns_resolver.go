@@ -204,9 +204,18 @@ func (r *CustomDNSResolver) processDNSEntry(
 		return r.processSRV(*v, question, v.Header().Ttl)
 	case *dns.CNAME:
 		return r.processCNAME(ctx, logger, request, *v, resolvedCnames, question, v.Header().Ttl)
-	}
+	default:
+		// Serve any other static RR type (MX/CAA/NS/PTR/…) generically.
+		if entry.Header().Rrtype == question.Qtype {
+			rr := dns.Copy(entry)
+			rr.Header().Name = question.Name
 
-	return nil, fmt.Errorf("unsupported customDNS RR type %T", entry)
+			return []dns.RR{rr}, nil
+		}
+		// present-but-wrong-type → empty (NOT an error); lets mixed-type
+		// domains + filterUnmappedTypes work.
+		return nil, nil
+	}
 }
 
 // Resolve uses internal mapping to resolve the query

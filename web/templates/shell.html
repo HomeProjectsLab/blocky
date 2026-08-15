@@ -19,6 +19,7 @@
             <a href="/clients" {{if eq .Page "clients"}}aria-current="page"{{end}}>Clients</a>
             <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
             <a href="/blocking" {{if eq .Page "blocking"}}aria-current="page"{{end}}>Blocking</a>
+            <a href="/localdns" {{if eq .Page "localdns"}}aria-current="page"{{end}}>Local DNS</a>
             <a href="/privacy" {{if eq .Page "privacy"}}aria-current="page"{{end}}>Privacy</a>
             <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
             <a href="/system" {{if eq .Page "system"}}aria-current="page"{{end}}>System</a>
@@ -265,6 +266,27 @@
         <div class="drawer-head"><h2 id="cl-drawer-title">Client</h2><button id="cl-drawer-close" aria-label="Close detail">✕</button></div>
         <div id="cl-detail"></div>
     </aside>
+{{else if eq .Page "localdns"}}
+    <div class="page-head">
+        <h1>Local DNS</h1>
+        <div class="ctl-row"><button id="ld-save">Save</button><button id="ld-apply" hidden>Apply changes — briefly restarts DNS resolution (~1s); in-flight lookups may retry.</button></div>
+    </div>
+    <p class="empty" id="ld-status" hidden></p>
+    <section class="panel">
+        <p class="empty">Overrides win over blocklists and bypass DNS-rebinding protection — this box answers authoritatively for these names.</p>
+        <div class="wire-scroll">
+            <table class="wire" id="ld-table">
+                <thead><tr><th>Name</th><th>Type</th><th>TTL</th><th>Value</th><th></th></tr></thead>
+                <tbody id="ld-body"></tbody>
+            </table>
+        </div>
+        <div class="ctl-row"><button id="ld-add" class="btn-sub">+ Add record</button></div>
+    </section>
+    <details class="panel">
+        <summary>Advanced: raw zone text</summary>
+        <textarea id="ld-raw" spellcheck="false" rows="10" aria-label="Raw zone text"></textarea>
+        <div class="ctl-row"><button id="ld-raw-save">Save raw zone</button></div>
+    </details>
 {{else if eq .Page "privacy"}}
     <div class="page-head">
         <h1>Privacy</h1>
