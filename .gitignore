@@ -21,3 +21,4 @@ coverage/
 blocky
 # baked Pi appliance image (produced by 'make image', not committed)
 blocky-rpi3-*.img.xz
+*.img
