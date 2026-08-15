@@ -93,19 +93,33 @@ function fpPanel(fingerprints) {
 
 function escapeHTML(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
-// DNS-native identity chips: distinct IP(s) (deduped against the name/PTR),
-// server-side device/vendor guess, and a NAT-aggregate warning badge.
+// DNS-native identity chips: distinct IP(s) (deduped against the name/PTR) plus
+// the multi-facet device recognition (OS badge + vendor/model/app chips). These
+// are a *traffic heuristic* — a DNS signature, suggestive not proof — distinct
+// from the behaviour-classifier device class shown in the classes table above.
+// R3 NAT-gate: a shared/NAT identity NEVER shows per-device facets (the union of
+// every device behind one address is meaningless) — it shows "shared / N devices".
+const HEUR = "traffic heuristic — DNS signature, suggestive not proof";
 function identityHTML(c) {
     const chips = [];
     const ips = (c.ips || []).filter((ip) => ip && ip !== c.name);
     for (const ip of ips) chips.push(`<span class="chip">${escapeHTML(ip)}</span>`);
-    if (c.deviceGuess) chips.push(`<span class="chip cc-iot">${escapeHTML(c.deviceGuess)}</span>`);
-    if (c.natAggregate) {
-        const n = c.fpCount || 0;
-        chips.push(`<span class="chip cc-server" title="Many devices share this one address — traffic here can't be split further per-device.">⚠ NAT · ${fmtNum(n)} devices</span>`);
-    } else if (c.fpCount) {
-        chips.push(`<span class="chip">${fmtNum(c.fpCount)} device fingerprints</span>`);
+
+    if (c.shared || c.natAggregate) {
+        const label = c.sharedLabel || `shared / ${fmtNum(c.fpCount || 0)} devices`;
+        chips.push(`<span class="chip cc-server" title="Many devices share this one address — traffic here can't be split per-device.">⚠ ${escapeHTML(label)}</span>`);
+        return chips.join(" ");
     }
+
+    if (c.os) chips.push(`<span class="chip os-badge" title="OS · ${HEUR}">${escapeHTML(c.os)}</span>`);
+    for (const v of c.vendor || []) chips.push(`<span class="chip" title="Vendor · ${HEUR}">${escapeHTML(v)}</span>`);
+    for (const m of c.model || []) chips.push(`<span class="chip" title="Model · ${HEUR}">${escapeHTML(m)}</span>`);
+    for (const a of c.apps || []) chips.push(`<span class="chip" title="App · ${HEUR}">${escapeHTML(a)}</span>`);
+    // Fallback: legacy single-label guess if no structured facet surfaced.
+    if (!c.os && !(c.vendor || []).length && !(c.apps || []).length && c.deviceGuess) {
+        chips.push(`<span class="chip os-badge" title="${HEUR}">${escapeHTML(c.deviceGuess)}</span>`);
+    }
+    if (c.fpCount) chips.push(`<span class="chip">${fmtNum(c.fpCount)} fingerprints</span>`);
     return chips.join(" ");
 }
 
@@ -184,7 +198,7 @@ const ccMsg = document.getElementById("cc-msg");
 const CLASS_OPTS = ["auto", "iot", "workstation", "server", "unknown"];
 
 function classChip(cls) {
-    return `<span class="chip cc-${cls || "unknown"}">${escapeHTML(cls || "unknown")}</span>`;
+    return `<span class="chip cc-${cls || "unknown"}" title="device class · behaviour classifier — inferred from how this client queries DNS">${escapeHTML(cls || "unknown")}</span>`;
 }
 
 function overrideSelect(client, override) {

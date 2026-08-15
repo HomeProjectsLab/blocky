@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -433,15 +434,26 @@ func drawClients(s tcell.Screen, x, y, maxY int, base tcell.Style, clients []Cli
 			ip = c.IPs[0]
 		}
 
-		var sub string
-		switch {
-		case ip != "" && c.DeviceGuess != "":
-			sub = ip + " " + c.DeviceGuess
-		case ip != "":
-			sub = ip
-		default:
-			sub = c.DeviceGuess
+		// R3 NAT-gate: a shared address shows "shared / N devices", never the
+		// (meaningless) union of every device's facets behind it. Otherwise show
+		// the compact OS / vendor / app identity — a traffic heuristic.
+		var parts []string
+		if ip != "" {
+			parts = append(parts, ip)
 		}
+		if c.Shared {
+			parts = append(parts, c.SharedLabel)
+		} else if c.OS != "" || len(c.Vendor) > 0 || len(c.Apps) > 0 {
+			if c.OS != "" {
+				parts = append(parts, c.OS)
+			}
+			parts = append(parts, c.Vendor...)
+			parts = append(parts, c.Model...)
+			parts = append(parts, c.Apps...)
+		} else if c.DeviceGuess != "" {
+			parts = append(parts, c.DeviceGuess)
+		}
+		sub := strings.Join(parts, " · ")
 
 		if sub != "" && y <= maxY {
 			drawText(s, x, y, dim, "  "+trunc(sub, width-2))

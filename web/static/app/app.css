@@ -416,6 +416,8 @@ dl.kv dd { margin: 0; color: var(--ink); }
 .chip.cc-server      { color: var(--c-blocked);  border-color: var(--c-blocked); }
 .chip.cc-workstation { color: var(--c-cached);   border-color: var(--c-cached); }
 .chip.cc-unknown     { color: var(--ink2);       border-color: var(--grid); }
+/* OS badge: the primary identity facet, filled so it reads first among the plain vendor/app chips */
+.chip.os-badge { color: var(--bg0); background: var(--c-resolved); border-color: var(--c-resolved); font-weight: 600; }
 select.cc-override { font-size: 12px; padding: 0.15rem 0.3rem; }
 #cc-msg { display: inline-block; margin-top: 0.4rem; }
 

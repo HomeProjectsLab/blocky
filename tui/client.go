@@ -96,7 +96,13 @@ type ClientInfo struct {
 	LastSeen     string   `json:"lastSeen"`
 	NatAggregate bool     `json:"natAggregate"`
 	FpCount      int      `json:"fpCount"`
+	OS           string   `json:"os"`
+	Vendor       []string `json:"vendor"`
+	Model        []string `json:"model"`
+	Apps         []string `json:"apps"`
 	DeviceGuess  string   `json:"deviceGuess"`
+	Shared       bool     `json:"shared"`
+	SharedLabel  string   `json:"sharedLabel"`
 }
 
 // Client is a thin JSON client for the blocky /api/ui/* endpoints.

@@ -75,8 +75,40 @@ func TestDrawClientsRendersHeadAndSubLine(t *testing.T) {
 	}
 
 	sub := mtRow(sc, 1)
-	if sub != "  192.168.1.5 iPhone" {
-		t.Errorf("sub line = %q, want %q", sub, "  192.168.1.5 iPhone")
+	if sub != "  192.168.1.5 · iPhone" {
+		t.Errorf("sub line = %q, want %q", sub, "  192.168.1.5 · iPhone")
+	}
+}
+
+func TestDrawClientsFacetLine(t *testing.T) {
+	sc := mtScreen(t, 60, 10)
+	clients := []ClientInfo{
+		{Name: "phone", IPs: []string{"192.168.1.5"}, OS: "iOS", Vendor: []string{"Apple"}, Apps: []string{"Netflix"}},
+	}
+	drawClients(sc, 0, 0, 9, tcell.StyleDefault, clients, 40)
+	sc.Show()
+
+	if sub := mtRow(sc, 1); sub != "  192.168.1.5 · iOS · Apple · Netflix" {
+		t.Errorf("facet sub line = %q", sub)
+	}
+}
+
+// R3 NAT-gate: a shared identity shows "shared / N devices", never per-device facets.
+func TestDrawClientsSharedSuppressesFacets(t *testing.T) {
+	sc := mtScreen(t, 60, 10)
+	clients := []ClientInfo{
+		{Name: "router", NatAggregate: true, FpCount: 9, Shared: true, SharedLabel: "shared / 9 devices",
+			OS: "iOS", Vendor: []string{"Apple"}}, // facets present but must be suppressed
+	}
+	drawClients(sc, 0, 0, 9, tcell.StyleDefault, clients, 40)
+	sc.Show()
+
+	sub := mtRow(sc, 1)
+	if !strings.Contains(sub, "shared / 9 devices") {
+		t.Errorf("sub = %q, want shared label", sub)
+	}
+	if strings.Contains(sub, "iOS") || strings.Contains(sub, "Apple") {
+		t.Errorf("sub = %q, facets must be suppressed for a shared client", sub)
 	}
 }
 
