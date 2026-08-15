@@ -189,79 +189,9 @@ fi
 printf '%s:%s\n' "$APPLIANCE_USER" "$USER_HASH" > "$BOOT_MNT/userconf.txt"
 echo ">> baked headless user '$APPLIANCE_USER' (locked password) — suppresses first-boot prompt"
 
-# Optional WiFi: when WIFI_SSID/WIFI_PSK are provided at BUILD time, bake a
-# NetworkManager keyfile profile (bookworm uses NetworkManager, not
-# wpa_supplicant) plus the regulatory country. Credentials are passed via env so
-# they never land in the committed repo. No env => wired-only, as before.
-if [ -n "${WIFI_SSID:-}" ] && [ -n "${WIFI_PSK:-}" ]; then
-	echo ">> injecting WiFi profile for SSID '$WIFI_SSID' (country ${WIFI_COUNTRY:-unset})"
-	install -d -m700 "$ROOT_MNT/etc/NetworkManager/system-connections"
-	prof="$ROOT_MNT/etc/NetworkManager/system-connections/${WIFI_SSID}.nmconnection"
-	cat > "$prof" <<EOF
-[connection]
-id=${WIFI_SSID}
-type=wifi
-autoconnect=true
-autoconnect-priority=10
-
-[wifi]
-mode=infrastructure
-ssid=${WIFI_SSID}
-
-[wifi-security]
-key-mgmt=wpa-psk
-psk=${WIFI_PSK}
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=auto
-EOF
-	chmod 600 "$prof"  # NetworkManager ignores world-readable keyfiles
-	# Regulatory domain as a cfg80211 module param (channel compliance).
-	if [ -n "${WIFI_COUNTRY:-}" ]; then
-		echo "options cfg80211 ieee80211_regdom=${WIFI_COUNTRY}" \
-			> "$ROOT_MNT/etc/modprobe.d/cfg80211.conf"
-	fi
-
-	# THE fix for "WiFi never associates" on a Pi 3: the radio ships rfkill
-	# soft-blocked until a country is set, and systemd-rfkill PERSISTS + restores
-	# that block on every boot — NetworkManager then logs "Wi-Fi disabled by radio
-	# killswitch; disabled by state file" and wlan0 stays unavailable. An
-	# unblock-before-NM oneshot loses the race (systemd-rfkill, socket-activated by
-	# NM, restores the block afterwards). Two durable layers instead:
-	#
-	# 1) Pre-seed the SAVED rfkill state as unblocked (0) so systemd-rfkill has
-	#    nothing to re-block. The device id is stable for the Pi 3B SDIO radio.
-	install -d "$ROOT_MNT/var/lib/systemd/rfkill"
-	printf '0\n' > "$ROOT_MNT/var/lib/systemd/rfkill/platform-3f300000.mmcnr:wlan"
-
-	# 2) Set the WiFi country the RPi-blessed way at first boot: raspi-config
-	#    do_wifi_country sets the regulatory country persistently AND unblocks the
-	#    radio, so it won't be re-blocked. Runs before NetworkManager; idempotent.
-	if [ -n "${WIFI_COUNTRY:-}" ]; then
-		cat > "$ROOT_MNT/etc/systemd/system/jungleblock-wifi-country.service" <<EOF
-[Unit]
-Description=Set WiFi regulatory country and unblock the radio (JungleBlock appliance)
-DefaultDependencies=no
-Before=network-pre.target NetworkManager.service
-Wants=network-pre.target
-ConditionPathExists=/usr/bin/raspi-config
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/raspi-config nonint do_wifi_country ${WIFI_COUNTRY}
-ExecStart=-/usr/sbin/rfkill unblock all
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-		ln -sf ../jungleblock-wifi-country.service \
-			"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-wifi-country.service"
-	fi
-fi
+# WiFi provisioning removed 2026-08-15 — this is a wired-only appliance. It now
+# lives on a dedicated routed switch port; a dual-homed WiFi radio caused DNS
+# reply asymmetry. WIFI_SSID/WIFI_PSK env vars are intentionally ignored.
 
 # verify what we placed
 echo ">> injected tree:"; ls -l "$ROOT_MNT/usr/local/bin/jungleblock" \
