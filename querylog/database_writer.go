@@ -318,6 +318,21 @@ func (d *DatabaseWriter) Write(entry *LogEntry) {
 	d.pendingEntries = append(d.pendingEntries, e)
 }
 
+// CloseDB closes the underlying database connection so a retired writer doesn't
+// leak an FD (+ the -wal/-shm files and gorm's session cache) on every config
+// apply. Deliberately NOT named Close: the query-log resolver's ctx-cancel path
+// (closeWriter) closes io.Closer writers immediately, but the DB must stay open
+// until AFTER the retire/shutdown flush — closing early would make that flush hit
+// a closed connection. Callers close it via the bundle's post-flush path.
+func (d *DatabaseWriter) CloseDB() error {
+	sqlDB, err := d.db.DB()
+	if err != nil {
+		return err
+	}
+
+	return sqlDB.Close()
+}
+
 func (d *DatabaseWriter) CleanUp() {
 	deletionDate := time.Now().AddDate(0, 0, int(-d.logRetentionDays)) //nolint:gosec // G115: correct via two's complement
 

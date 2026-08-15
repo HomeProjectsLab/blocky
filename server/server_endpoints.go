@@ -40,33 +40,42 @@ const (
 	jsonContentType    = "application/json"
 )
 
-func (s *Server) createOpenAPIInterfaceImpl() (impl api.StrictServerInterface, err error) {
-	bControl, err := resolver.GetFromChainWithType[api.BlockingControl](s.queryResolver)
-	if err != nil {
-		return nil, fmt.Errorf("no blocking API implementation found %w", err)
+// createOpenAPIInterfaceImpl wires the OpenAPI handlers to the LIVE resolver
+// chain via getter closures instead of freezing the sub-interfaces at build
+// time: after a config apply the getters resolve against s.live, so a request
+// picks up the new chain immediately and never touches the retired one. Because
+// the lookups are per-call, construction can no longer fail on a bad chain —
+// hence no error return.
+func (s *Server) createOpenAPIInterfaceImpl() api.StrictServerInterface {
+	get := func() resolver.ChainedResolver { return s.live.Load().resolver }
+
+	control := func() api.BlockingControl {
+		r, _ := resolver.GetFromChainWithType[api.BlockingControl](get())
+
+		return r
 	}
 
-	refresher, err := resolver.GetFromChainWithType[api.ListRefresher](s.queryResolver)
-	if err != nil {
-		return nil, fmt.Errorf("no refresh API implementation found %w", err)
+	refresher := func() api.ListRefresher {
+		r, _ := resolver.GetFromChainWithType[api.ListRefresher](get())
+
+		return r
 	}
 
-	cacheControl, err := resolver.GetFromChainWithType[api.CacheControl](s.queryResolver)
-	if err != nil {
-		return nil, fmt.Errorf("no cache API implementation found %w", err)
+	cacheControl := func() api.CacheControl {
+		r, _ := resolver.GetFromChainWithType[api.CacheControl](get())
+
+		return r
 	}
 
-	// Statistics are optional: if no provider is in the chain, degrade to a nil
-	// provider (the /api/stats endpoint returns 503) instead of failing
-	// construction of the entire API.
-	statsProvider, err := resolver.GetFromChainWithType[api.StatsProvider](s.queryResolver)
-	if err != nil {
-		log.Log().Warnf("no stats API implementation found, /api/stats will be unavailable: %v", err)
+	// Statistics are optional: if no provider is in the chain the getter returns
+	// nil and the /api/stats endpoint answers 503 (GetStats nil-guards).
+	stats := func() api.StatsProvider {
+		r, _ := resolver.GetFromChainWithType[api.StatsProvider](get())
 
-		statsProvider = nil
+		return r
 	}
 
-	return api.NewOpenAPIInterfaceImpl(bControl, s, refresher, cacheControl, statsProvider), nil
+	return api.NewOpenAPIInterfaceImpl(control, s, refresher, cacheControl, stats)
 }
 
 func (s *Server) registerDoHEndpoints(router *chi.Mux, cfg *config.Config) {

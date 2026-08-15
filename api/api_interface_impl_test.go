@@ -40,7 +40,13 @@ var _ = Describe("API implementation tests", func() {
 		listRefreshMock = NewMockListRefresher(GinkgoT())
 		cacheControlMock = NewMockCacheControl(GinkgoT())
 		statsMock = NewMockStatsProvider(GinkgoT())
-		sut = NewOpenAPIInterfaceImpl(blockingControlMock, querierMock, listRefreshMock, cacheControlMock, statsMock)
+		sut = NewOpenAPIInterfaceImpl(
+			func() BlockingControl { return blockingControlMock },
+			querierMock,
+			func() ListRefresher { return listRefreshMock },
+			func() CacheControl { return cacheControlMock },
+			func() StatsProvider { return statsMock },
+		)
 	})
 
 	Describe("RegisterOpenAPIEndpoints", func() {

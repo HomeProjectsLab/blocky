@@ -42,6 +42,10 @@ func (s *httpServer) String() string {
 }
 
 func (s *httpServer) Serve(ctx context.Context, l net.Listener) error {
+	// ctx is the server-lifetime context (Server.Start is called once with
+	// serverCtx), so the http.Server is closed only on real shutdown — a config
+	// apply swaps the resolver bundle without ever cancelling this ctx, keeping
+	// :80/:443 hot across the apply.
 	go func() {
 		<-ctx.Done()
 

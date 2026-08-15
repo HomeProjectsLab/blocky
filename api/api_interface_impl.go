@@ -76,19 +76,23 @@ func ctxWithHTTPRequestMiddleware(handler StrictHandlerFunc, operationID string)
 	}
 }
 
+// The control/refresher/cacheControl/stats deps are getter funcs, not frozen
+// interfaces: the server resolves them against its LIVE resolver chain per call,
+// so a config apply that swaps the chain is picked up immediately and no method
+// ever routes to a retired resolver. querier is the persistent server, unchanged.
 type OpenAPIInterfaceImpl struct {
-	control      BlockingControl
+	control      func() BlockingControl
 	querier      Querier
-	refresher    ListRefresher
-	cacheControl CacheControl
-	stats        StatsProvider
+	refresher    func() ListRefresher
+	cacheControl func() CacheControl
+	stats        func() StatsProvider
 }
 
-func NewOpenAPIInterfaceImpl(control BlockingControl,
+func NewOpenAPIInterfaceImpl(control func() BlockingControl,
 	querier Querier,
-	refresher ListRefresher,
-	cacheControl CacheControl,
-	statsProvider StatsProvider,
+	refresher func() ListRefresher,
+	cacheControl func() CacheControl,
+	statsProvider func() StatsProvider,
 ) *OpenAPIInterfaceImpl {
 	return &OpenAPIInterfaceImpl{
 		control:      control,
@@ -119,7 +123,7 @@ func (i *OpenAPIInterfaceImpl) DisableBlocking(ctx context.Context,
 		groups = strings.Split(*request.Params.Groups, ",")
 	}
 
-	err = i.control.DisableBlocking(ctx, duration, groups)
+	err = i.control().DisableBlocking(ctx, duration, groups)
 	if err != nil {
 		return DisableBlocking400TextResponse(log.EscapeInput(err.Error())), nil
 	}
@@ -129,14 +133,14 @@ func (i *OpenAPIInterfaceImpl) DisableBlocking(ctx context.Context,
 
 func (i *OpenAPIInterfaceImpl) EnableBlocking(ctx context.Context, _ EnableBlockingRequestObject,
 ) (EnableBlockingResponseObject, error) {
-	i.control.EnableBlocking(ctx)
+	i.control().EnableBlocking(ctx)
 
 	return EnableBlocking200Response{}, nil
 }
 
 func (i *OpenAPIInterfaceImpl) BlockingStatus(_ context.Context, _ BlockingStatusRequestObject,
 ) (BlockingStatusResponseObject, error) {
-	blStatus := i.control.BlockingStatus()
+	blStatus := i.control().BlockingStatus()
 
 	result := ApiBlockingStatus{
 		Enabled: blStatus.Enabled,
@@ -156,7 +160,7 @@ func (i *OpenAPIInterfaceImpl) BlockingStatus(_ context.Context, _ BlockingStatu
 func (i *OpenAPIInterfaceImpl) ListRefresh(ctx context.Context,
 	_ ListRefreshRequestObject,
 ) (ListRefreshResponseObject, error) {
-	err := i.refresher.RefreshLists(ctx)
+	err := i.refresher().RefreshLists(ctx)
 	if err != nil {
 		return ListRefresh500TextResponse(log.EscapeInput(err.Error())), nil
 	}
@@ -197,18 +201,19 @@ func (i *OpenAPIInterfaceImpl) Query(ctx context.Context, request QueryRequestOb
 func (i *OpenAPIInterfaceImpl) CacheFlush(ctx context.Context,
 	_ CacheFlushRequestObject,
 ) (CacheFlushResponseObject, error) {
-	i.cacheControl.FlushCaches(ctx)
+	i.cacheControl().FlushCaches(ctx)
 
 	return CacheFlush200Response{}, nil
 }
 
 func (i *OpenAPIInterfaceImpl) GetStats(_ context.Context, _ GetStatsRequestObject,
 ) (GetStatsResponseObject, error) {
-	if i.stats == nil || !i.stats.StatsEnabled() {
+	sp := i.stats()
+	if sp == nil || !sp.StatsEnabled() {
 		return GetStats503TextResponse("statistics are disabled"), nil
 	}
 
-	return GetStats200JSONResponse(toAPIStats(i.stats.Stats())), nil
+	return GetStats200JSONResponse(toAPIStats(sp.Stats())), nil
 }
 
 func toAPIStats(r stats.Result) ApiStats {

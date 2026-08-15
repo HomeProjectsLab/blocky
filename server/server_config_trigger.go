@@ -17,7 +17,7 @@ func registerPrintConfigurationTrigger(ctx context.Context, s *Server) {
 		for {
 			select {
 			case <-signals:
-				s.printConfiguration()
+				s.printConfiguration(s.live.Load())
 
 			case <-ctx.Done():
 				return

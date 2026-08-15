@@ -193,7 +193,7 @@ var _ = Describe("Running DNS server", func() {
 		BeforeEach(func() {
 			mockClientName.Store("")
 			// reset client cache
-			clientNamesResolver, err := resolver.GetFromChainWithType[*resolver.ClientNamesResolver](sut.queryResolver)
+			clientNamesResolver, err := resolver.GetFromChainWithType[*resolver.ClientNamesResolver](srvResolver(sut))
 			Expect(err).Should(Succeed())
 
 			clientNamesResolver.FlushCache()
@@ -573,9 +573,9 @@ var _ = Describe("Running DNS server", func() {
 			})
 			When("Internal error occurs", func() {
 				BeforeEach(func() {
-					bak := sut.queryResolver
-					sut.queryResolver = nil // trigger a panic
-					DeferCleanup(func() { sut.queryResolver = bak })
+					bak := srvResolver(sut)
+					setSrvResolver(sut, nil) // trigger a panic
+					DeferCleanup(func() { setSrvResolver(sut, bak) })
 				})
 
 				It("should return 'ServFail'", func() {
@@ -617,7 +617,7 @@ var _ = Describe("Running DNS server", func() {
 			mockResolver.EXPECT().Resolve(mock.Anything, mock.MatchedBy(func(req *model.Request) bool {
 				return expectedIP.Equal(req.ClientIP) && req.Protocol == model.RequestProtocolTCP
 			})).Return(&model.Response{Res: response}, nil).Once()
-			srv.queryResolver = mockResolver
+			setSrvResolver(srv, mockResolver)
 
 			rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 			Expect(err).Should(Succeed())
@@ -653,7 +653,7 @@ var _ = Describe("Running DNS server", func() {
 			mockResolver.EXPECT().Resolve(mock.Anything, mock.MatchedBy(func(req *model.Request) bool {
 				return expectedIP.Equal(req.ClientIP) && req.Protocol == model.RequestProtocolTCP
 			})).Return(&model.Response{Res: response}, nil).Once()
-			srv.queryResolver = mockResolver
+			setSrvResolver(srv, mockResolver)
 
 			rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 			Expect(err).Should(Succeed())
@@ -702,7 +702,7 @@ var _ = Describe("Running DNS server", func() {
 			mockResolver.EXPECT().Resolve(mock.Anything, mock.MatchedBy(func(req *model.Request) bool {
 				return expectedIP.Equal(req.ClientIP) && req.Protocol == model.RequestProtocolTCP
 			})).Return(&model.Response{Res: response}, nil).Once()
-			srv.queryResolver = mockResolver
+			setSrvResolver(srv, mockResolver)
 
 			rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 			Expect(err).Should(Succeed())
@@ -735,7 +735,7 @@ var _ = Describe("Running DNS server", func() {
 			mockResolver.EXPECT().Resolve(mock.Anything, mock.MatchedBy(func(req *model.Request) bool {
 				return expectedIP.Equal(req.ClientIP) && req.Protocol == model.RequestProtocolTCP
 			})).Return(&model.Response{Res: response}, nil).Once()
-			srv.queryResolver = mockResolver
+			setSrvResolver(srv, mockResolver)
 
 			rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 			Expect(err).Should(Succeed())
@@ -1156,12 +1156,9 @@ var _ = Describe("Running DNS server", func() {
 					return &model.Response{Res: chain(req), RType: model.ResponseTypeRESOLVED, Reason: "RESOLVED"}, nil
 				})
 
-			return &Server{
-				queryResolver: m,
-				cfg: &config.Config{Upstreams: config.Upstreams{
-					Timeout: config.Duration(time.Second),
-				}},
-			}
+			return newBundleServer(m, &config.Config{Upstreams: config.Upstreams{
+				Timeout: config.Duration(time.Second),
+			}})
 		}
 
 		// chainAddingEdns0 simulates a chain member adding EDNS0 to the request (like DNSSEC/ECS)
@@ -1441,12 +1438,9 @@ var _ = Describe("Running DNS server", func() {
 					return &model.Response{Res: res, RType: model.ResponseTypeRESOLVED, Reason: "RESOLVED"}, nil
 				})
 
-			return &Server{
-				queryResolver: m,
-				cfg: &config.Config{Upstreams: config.Upstreams{
-					Timeout: config.Duration(time.Second),
-				}},
-			}
+			return newBundleServer(m, &config.Config{Upstreams: config.Upstreams{
+				Timeout: config.Duration(time.Second),
+			}})
 		}
 
 		When("the response fits the client buffer uncompressed", func() {
@@ -1597,12 +1591,9 @@ var _ = Describe("Running DNS server", func() {
 			m := resolver.NewMockChainedResolver(GinkgoT())
 			m.EXPECT().Resolve(mock.Anything, mock.Anything).Return(nil, resolver.ErrRateLimited)
 
-			s := &Server{
-				queryResolver: m,
-				cfg: &config.Config{Upstreams: config.Upstreams{
-					Timeout: config.Duration(time.Second),
-				}},
-			}
+			s := newBundleServer(m, &config.Config{Upstreams: config.Upstreams{
+				Timeout: config.Duration(time.Second),
+			}})
 			req := &model.Request{
 				Req:      util.NewMsgWithQuestion("example.com.", A),
 				Protocol: model.RequestProtocolUDP,

@@ -90,82 +90,116 @@ func startServer(_ *cobra.Command, _ []string) error {
 	return runSupervisor(store)
 }
 
-// runSupervisor runs the build/start/wait server cycle until a termination
-// signal arrives or the server fails fatally. Each ApplyRequested signal stops
-// the running server and rebuilds it from the store; when the new config can't
-// be applied, it rolls back to the last successfully applied one.
+// runSupervisor builds and starts the server, then serves until a termination
+// signal or fatal error. Each ApplyRequested signal rebuilds ONLY the resolver
+// chain and swaps it atomically behind the live listeners (Server.ApplyConfig) —
+// :80/:53 keep serving across the apply. A bad config is logged and dropped; the
+// running config keeps serving.
+//
+// A config that changes the listeners/router (ports, TLS, HTTP/3, query-log
+// target) can't be hot-swapped: ListenersCompatible guards this and the outer
+// loop does a full rebuild (brief downtime). If that rebuild fails it rolls back
+// to the last applied config so the box never ends up with nothing serving.
 func runSupervisor(store *configstore.Store) error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 
-	var lastGood *config.Config
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("unable to load configuration: %w", err)
+	}
 
+	lastGood := cfg
+
+	// (re)build loop — each iteration binds fresh listeners for cfg; a normal
+	// config apply never reaches here, it hot-swaps inside the inner serve loop.
 	for {
-		cfg, err := store.LoadConfig()
-		if err != nil {
-			if lastGood == nil {
-				return fmt.Errorf("unable to load configuration: %w", err)
-			}
-
-			log.Log().Errorf("stored config is invalid, keeping the running config: %v", err)
-			cfg = lastGood
-		}
-
 		log.Configure(&cfg.Log)
-
 		warnMissingPrivilegedPortCapability(cfg.Ports)
 
-		srvCtx, cancelFn := context.WithCancel(context.Background())
+		serverCtx, shutdown := context.WithCancel(context.Background())
 
-		srv, err := server.NewServer(srvCtx, cfg, store)
+		srv, err := server.NewServer(serverCtx, cfg, store)
 		if err != nil {
-			if lastGood == nil || cfg == lastGood {
-				cancelFn()
+			shutdown()
 
+			if cfg == lastGood {
 				return fmt.Errorf("can't start server: %w", err)
 			}
 
 			log.Log().Errorf("can't apply new config, rolling back to last applied config: %v", err)
-
 			cfg = lastGood
 
-			srv, err = server.NewServer(srvCtx, cfg, store)
-			if err != nil {
-				cancelFn()
-
-				return fmt.Errorf("can't start server with last applied config: %w", err)
-			}
+			continue
 		}
 
 		lastGood = cfg
 
 		errChan := make(chan error, errChanSize)
-
-		srv.Start(srvCtx, errChan)
+		srv.Start(serverCtx, errChan)
 		store.MarkApplied()
-
 		evt.Bus().Publish(evt.ApplicationStarted, util.Version, util.BuildTime)
 
+		restartCfg, err := serve(store, srv, serverCtx, &lastGood, errChan)
+
+		shutdown()
+		stopServerGracefully(srv)
+
+		if restartCfg == nil {
+			// signal (nil err) or fatal server error
+			return err
+		}
+
+		// listener-affecting change: rebuild with the new config (rolling back
+		// to lastGood above if the rebuild fails)
+		cfg = restartCfg
+	}
+}
+
+// serve runs the inner event loop for one running server: it hot-swaps the
+// resolver chain on every compatible apply and reports back to runSupervisor
+// only when the process must stop (returns nil restartCfg) or when a
+// listener-affecting apply requires a full rebuild (returns the new config).
+// lastGood is updated in place on each successful hot-swap so a later failed
+// rebuild rolls back to the genuinely last-applied config.
+func serve(
+	store *configstore.Store, srv *server.Server, serverCtx context.Context,
+	lastGood **config.Config, errChan <-chan error,
+) (*config.Config, error) {
+	for {
 		select {
 		case <-signals:
 			log.Log().Infof("Terminating...")
 
-			// Cancel background operations (periodic refresh, etc.)
-			cancelFn()
-			stopServerGracefully(srv)
-
-			return nil
+			return nil, nil
 
 		case err := <-errChan:
 			log.Log().Error("server start failed: ", err)
-			cancelFn()
 
-			return err
+			return nil, err
 
 		case <-store.ApplyRequested():
-			log.Log().Info("configuration change requested, restarting server")
+			newCfg, err := store.LoadConfig()
+			if err != nil {
+				log.Log().Errorf("stored config is invalid, keeping the running config: %v", err)
 
-			cancelFn()
-			stopServerGracefully(srv)
+				continue
+			}
+
+			if !server.ListenersCompatible(*lastGood, newCfg) {
+				log.Log().Info("listener-affecting config changed; full restart")
+
+				return newCfg, nil
+			}
+
+			if err := srv.ApplyConfig(serverCtx, newCfg); err != nil {
+				log.Log().Errorf("can't apply new config, keeping the running config: %v", err)
+
+				continue
+			}
+
+			*lastGood = newCfg
+			store.MarkApplied()
+			log.Log().Info("configuration applied without dropping listeners")
 		}
 	}
 }

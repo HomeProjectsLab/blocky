@@ -8,10 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/0xERR0R/blocky/cache"
@@ -50,35 +52,62 @@ const (
 	networkTCPTLS = "tcp-tls"
 )
 
-// Server controls the endpoints for DNS and HTTP
-type Server struct {
-	dnsServers    []*dns.Server
-	queryResolver resolver.ChainedResolver
-	cfg           *config.Config
+// retireGrace is how long a retired resolver bundle's background loops are
+// stopped before its io resources (redis bridge/conn, log buffers) are closed,
+// so in-flight Resolve() calls that captured the old chain can finish. Mirrors
+// resolver.replaceUpstreamsCloseDelay. Var, not const, so tests can shorten it.
+//
+//nolint:gochecknoglobals
+var retireGrace = 10 * time.Second
 
-	servers          map[net.Listener]*httpServer
-	http3Server      *http3Server     // nil when disabled
-	http3PacketConns []net.PacketConn // one per address in ports.https
-	closers          []io.Closer
-	store            *configstore.Store             // nil = config endpoints respond 503
-	upstreamTree     *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
-	logFlushers      []interface{ Flush() error }   // query-log resolvers flushed synchronously in Stop
-	qlHub            *querylog.Hub                  // live query stream fan-out; nil unless sqlite query log
-	decoyEngine      *decoy.Engine                  // background noise generator; nil unless privacy.decoy.enable
-	decoySource      *querylog.DecoySource          // closed in Stop; shared by decoy engine + list updater
-	listUpdater      *lists.Updater                 // background list refresher; nil unless lists.updater.enable
-	prewarm          *prewarm.Worker                // corpus pre-warmer; nil unless privacy.decoy.enable + prewarmEnable
+// resolverBundle is everything a config apply rebuilds. It is published behind
+// Server.live via an atomic.Pointer and is read-only after publication: never
+// mutate a bundle that has been stored.
+type resolverBundle struct {
+	resolver     resolver.ChainedResolver
+	cfg          *config.Config
+	upstreamTree *resolver.UpstreamTreeResolver // nil = no live upstream swap (single group / recursive)
+	ctx          context.Context                // this bundle's background context (child of serverCtx)
+	cancel       context.CancelFunc             // cancels ctx; stops this bundle's background loops
+	closers      []io.Closer                    // redis bridge/conn, closed after retireGrace on retire
+	logFlushers  []interface{ Flush() error }   // query-log resolvers, flushed on retire
+	dbClosers    []func() error                 // query-log DB conns, closed AFTER the flush on retire/shutdown
+	decoyEngine  *decoy.Engine                  // background noise generator; nil unless privacy.decoy.enable
+	listUpdater  *lists.Updater                 // background list refresher; nil unless lists.updater.enable
+	prewarm      *prewarm.Worker                // corpus pre-warmer; nil unless privacy.decoy.enable
+}
+
+// Server controls the endpoints for DNS and HTTP.
+//
+// The listeners, HTTP router, DNS servers, query-log hub and decoy source are
+// built once in NewServer and torn down only on real shutdown. Everything a
+// config apply rebuilds lives behind the atomic live pointer, so an apply swaps
+// the resolver chain without dropping :80/:53. See ApplyConfig.
+type Server struct {
+	// persistent — built once, torn down only on real shutdown
+	dnsServers        []*dns.Server
+	servers           map[net.Listener]*httpServer
+	http3Server       *http3Server          // nil when disabled
+	http3PacketConns  []net.PacketConn      // one per address in ports.https
+	store             *configstore.Store    // nil = config endpoints respond 503
+	qlHub             *querylog.Hub         // live query stream fan-out; survives applies; nil unless sqlite query log
+	decoySource       *querylog.DecoySource // sqlite path is stable; survives applies; closed in Stop
+	persistentClosers []io.Closer           // stats RO reader etc.; closed in Stop
+
+	// swappable — the whole point: an apply rebuilds this and swaps it atomically
+	live atomic.Pointer[resolverBundle]
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
 // without rebuilding the server. Errors when no tree is present in the chain
 // (e.g. single-group config, where the tree collapses to its only branch).
 func (s *Server) SwapUpstreams(ctx context.Context, group string, upstreams []config.Upstream) error {
-	if s.upstreamTree == nil {
+	tree := s.live.Load().upstreamTree
+	if tree == nil {
 		return errors.New("no upstream tree in the running resolver chain")
 	}
 
-	return s.upstreamTree.ReplaceUpstreams(ctx, group, upstreams)
+	return tree.ReplaceUpstreams(ctx, group, upstreams)
 }
 
 func logger() *logrus.Entry {
@@ -136,7 +165,12 @@ func newTLSConfig(cfg *config.Config) (*tls.Config, error) {
 	return res, nil
 }
 
-// NewServer creates new server instance with passed config
+// NewServer creates a new server instance with the passed config. It builds the
+// persistent parts (listeners, DNS servers, HTTP router, query-log hub, decoy
+// source) once and the first resolver bundle behind the atomic live pointer. A
+// later config apply rebuilds only the bundle (see ApplyConfig); the listeners
+// are never in the apply path. ctx is the server-lifetime context, cancelled
+// only on real shutdown.
 //
 //nolint:funlen
 func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store) (server *Server, err error) {
@@ -164,65 +198,25 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		return nil, fmt.Errorf("failed to create HTTP/HTTPS listeners: %w", err)
 	}
 
+	// registered once for the process, not per apply, to avoid duplicate-registration surprises
 	metrics.RegisterEventListeners()
-
-	bootstrap, err := resolver.NewBootstrap(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create bootstrap resolver: %w", err)
-	}
-
-	var redisConn *goredis.Client
-	if cfg.Redis.IsEnabled() {
-		redisConn, err = redis.New(ctx, &cfg.Redis)
-		if err != nil {
-			if cfg.Redis.Required {
-				return nil, fmt.Errorf("failed to create required Redis client: %w", err)
-			}
-
-			logger().WithError(err).Warn("Redis is enabled but optional and could not be initialized, continuing without Redis")
-		}
-	}
-
-	redisResult, err := createRedisCacheDecorator(ctx, redisConn, cfg.Redis.Required)
-	if err != nil {
-		return nil, err
-	}
-
-	// The shared list/decoy source must exist BEFORE the resolver chain is
-	// built: the blocking resolver's "blocklist:<category>" sources stream from
-	// it while their list caches load during construction.
-	decoySource, err := openDecoySource(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	// Seed the enabled blocklist categories BEFORE the resolver chain is built:
-	// the blocking resolver imports its blocklist:<category> sources during
-	// construction, so the rows must already exist (the background updater seeds
-	// asynchronously in Start, which is too late — blocking would load 0 domains).
-	// SeedBlocklistIfEmpty makes this a fast no-op on every launch after the first.
-	if decoySource != nil && cfg.Lists.Updater.Enable && blockingUsesBlocklistSources(cfg) {
-		seeder := lists.NewUpdater(cfg.Lists.Updater, decoySource, false)
-		seeder.SetEnabledCategories(enabledBlocklistCategories(store))
-
-		if err := seeder.SeedBlocklistFloor(); err != nil {
-			return nil, fmt.Errorf("can't seed blocklist floor: %w", err)
-		}
-	}
-
-	queryResolver, queryError := createQueryResolver(ctx, cfg, bootstrap, redisResult.decorator)
-	if queryError != nil {
-		return nil, queryError
-	}
+	metrics.RegisterMetric(lists.ListUpdateTotal)
 
 	server = &Server{
 		dnsServers:       dnsServers,
-		queryResolver:    queryResolver,
-		cfg:              cfg,
 		servers:          make(map[net.Listener]*httpServer),
 		http3PacketConns: http3PacketConns,
 		store:            store,
-		decoySource:      decoySource,
+	}
+
+	// The shared list/decoy source keys on the sqlite path, which a normal apply
+	// never moves, so it is persistent (a query-log/decoy change takes the full
+	// restart fallback, see ListenersCompatible). It must exist BEFORE the
+	// resolver chain is built: the blocking resolver's "blocklist:<category>"
+	// sources stream from it while their list caches load during construction.
+	server.decoySource, err = openDecoySource(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	// live query stream: only the sqlite query log target feeds the UI, so the
@@ -231,42 +225,23 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		server.qlHub = querylog.NewHub()
 	}
 
-	// retain the upstream tree for live upstream swaps (it is the chain's
-	// non-chained tail, so GetFromChainWithType can't reach it)
-	resolver.ForEach(queryResolver, func(res resolver.Resolver) {
-		if tree, ok := res.(*resolver.UpstreamTreeResolver); ok {
-			server.upstreamTree = tree
-		}
+	// build the first resolver bundle on a per-apply child context
+	resolverCtx, cancel := context.WithCancel(ctx)
 
-		if fl, ok := res.(interface{ Flush() error }); ok {
-			server.logFlushers = append(server.logFlushers, fl)
-		}
+	bundle, err := server.buildResolverBundle(resolverCtx, cancel, cfg)
+	if err != nil {
+		cancel()
 
-		if qlr, ok := res.(*resolver.QueryLoggingResolver); ok && server.qlHub != nil {
-			qlr.SetHub(server.qlHub)
-		}
-	})
-
-	if err := server.setupDecoyEngine(cfg); err != nil {
 		return nil, err
 	}
 
-	if redisResult.bridge != nil {
-		server.closers = append(server.closers, redisResult.bridge)
-	}
+	server.live.Store(bundle)
 
-	if redisConn != nil {
-		server.closers = append(server.closers, redisConn)
-	}
-
-	server.printConfiguration()
+	server.printConfiguration(bundle)
 
 	server.registerDNSHandlers(ctx)
 
-	openAPIImpl, err := server.createOpenAPIInterfaceImpl()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OpenAPI interface implementation: %w", err)
-	}
+	openAPIImpl := server.createOpenAPIInterfaceImpl()
 
 	var blStats blocklistStatser
 
@@ -278,7 +253,7 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 	}
 
 	httpRouter, statsCloser := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats, classifier)
-	server.closers = append(server.closers, statsCloser) // close the stats reader on Stop (else each apply leaks an RO conn)
+	server.persistentClosers = append(server.persistentClosers, statsCloser) // stats RO reader, closed in Stop
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(http3PacketConns) > 0 {
@@ -306,7 +281,206 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		}
 	}
 
-	return server, err
+	return server, nil
+}
+
+// buildResolverBundle builds a complete, ready-to-publish resolver bundle off to
+// the side: no listener or socket is touched. All the fallible per-apply work
+// (bootstrap, redis, blocklist seed, resolver chain, decoy engine) happens here,
+// so any error returns before the caller swaps — leaving the old bundle serving.
+// On the error path anything already opened (redis conn/bridge) is closed to
+// avoid a leak-on-failed-apply. ctx/cancel own the bundle's background loops.
+func (s *Server) buildResolverBundle(
+	ctx context.Context, cancel context.CancelFunc, cfg *config.Config,
+) (*resolverBundle, error) {
+	var deferredClosers []io.Closer
+
+	fail := func(err error) (*resolverBundle, error) {
+		closeAll(deferredClosers)
+
+		return nil, err
+	}
+
+	bootstrap, err := resolver.NewBootstrap(ctx, cfg)
+	if err != nil {
+		return fail(fmt.Errorf("failed to create bootstrap resolver: %w", err))
+	}
+
+	var redisConn *goredis.Client
+	if cfg.Redis.IsEnabled() {
+		redisConn, err = redis.New(ctx, &cfg.Redis)
+		if err != nil {
+			if cfg.Redis.Required {
+				return fail(fmt.Errorf("failed to create required Redis client: %w", err))
+			}
+
+			logger().WithError(err).Warn("Redis is enabled but optional and could not be initialized, continuing without Redis")
+		}
+	}
+
+	if redisConn != nil {
+		deferredClosers = append(deferredClosers, redisConn)
+	}
+
+	redisResult, err := createRedisCacheDecorator(ctx, redisConn, cfg.Redis.Required)
+	if err != nil {
+		return fail(err)
+	}
+
+	if redisResult.bridge != nil {
+		deferredClosers = append(deferredClosers, redisResult.bridge)
+	}
+
+	// Seed the enabled blocklist categories BEFORE the resolver chain is built:
+	// the blocking resolver imports its blocklist:<category> sources during
+	// construction, so the rows must already exist (the background updater seeds
+	// asynchronously in Start, which is too late — blocking would load 0 domains).
+	// SeedBlocklistFloor makes this a fast no-op on every launch after the first.
+	if s.decoySource != nil && cfg.Lists.Updater.Enable && blockingUsesBlocklistSources(cfg) {
+		seeder := lists.NewUpdater(cfg.Lists.Updater, s.decoySource, false)
+		seeder.SetEnabledCategories(enabledBlocklistCategories(s.store))
+
+		if err := seeder.SeedBlocklistFloor(); err != nil {
+			return fail(fmt.Errorf("can't seed blocklist floor: %w", err))
+		}
+	}
+
+	queryResolver, err := createQueryResolver(ctx, cfg, bootstrap, redisResult.decorator)
+	if err != nil {
+		return fail(err)
+	}
+
+	bundle := &resolverBundle{
+		resolver: queryResolver,
+		cfg:      cfg,
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+
+	// retain the upstream tree for live upstream swaps (it is the chain's
+	// non-chained tail, so GetFromChainWithType can't reach it), collect the
+	// query-log flushers, and re-attach the persistent hub so open /api/ui/stream
+	// SSE connections stay on the same hub across the swap
+	resolver.ForEach(queryResolver, func(res resolver.Resolver) {
+		if tree, ok := res.(*resolver.UpstreamTreeResolver); ok {
+			bundle.upstreamTree = tree
+		}
+
+		if fl, ok := res.(interface{ Flush() error }); ok {
+			bundle.logFlushers = append(bundle.logFlushers, fl)
+		}
+
+		if qlr, ok := res.(*resolver.QueryLoggingResolver); ok {
+			if s.qlHub != nil {
+				qlr.SetHub(s.qlHub)
+			}
+
+			// close the query-log DB conn when this bundle retires, else every
+			// apply leaks an sqlite (or remote DB) connection
+			if c := qlr.WriterDBCloser(); c != nil {
+				bundle.dbClosers = append(bundle.dbClosers, c)
+			}
+		}
+	})
+
+	decoyEngine, listUpdater, prewarmWorker := s.buildDecoyEngine(cfg)
+	bundle.decoyEngine = decoyEngine
+	bundle.listUpdater = listUpdater
+	bundle.prewarm = prewarmWorker
+
+	if redisResult.bridge != nil {
+		bundle.closers = append(bundle.closers, redisResult.bridge)
+	}
+
+	if redisConn != nil {
+		bundle.closers = append(bundle.closers, redisConn)
+	}
+
+	return bundle, nil
+}
+
+// ApplyConfig rebuilds the resolver chain (and its background deps) from cfg and
+// swaps it in atomically behind the live listeners — :80/:53 never drop. The
+// ordering avoids half-built reads (live only ever holds a fully built bundle),
+// use-after-close (old io closes after retireGrace so in-flight Resolve() calls
+// finish) and leaks (old.cancel + delayed closeAll reap every old goroutine and
+// conn). On any build error the old bundle stays live and the error is returned.
+func (s *Server) ApplyConfig(serverCtx context.Context, cfg *config.Config) error {
+	resolverCtx, cancel := context.WithCancel(serverCtx)
+
+	newBundle, err := s.buildResolverBundle(resolverCtx, cancel, cfg)
+	if err != nil {
+		cancel()
+
+		return err
+	}
+
+	old := s.live.Swap(newBundle)
+
+	s.startBundleBackground(newBundle)
+
+	s.printConfiguration(newBundle)
+
+	if old != nil {
+		// stop the old background loops immediately (they read s.resolve, which
+		// is already the new chain); close its io after a grace delay so in-flight
+		// Resolve() calls that captured the old chain can finish.
+		old.cancel()
+
+		time.AfterFunc(retireGrace, func() {
+			for _, fl := range old.logFlushers {
+				_ = fl.Flush()
+			}
+
+			// close DB conns AFTER the flush lands (the flush above needs them open)
+			for _, c := range old.dbClosers {
+				_ = c()
+			}
+
+			closeAll(old.closers)
+		})
+	}
+
+	return nil
+}
+
+// startBundleBackground starts a bundle's background goroutines on its own
+// context, so a later swap can stop exactly these via the bundle's cancel.
+func (s *Server) startBundleBackground(b *resolverBundle) {
+	if b.decoyEngine != nil {
+		go b.decoyEngine.Run(b.ctx)
+	}
+
+	if b.listUpdater != nil {
+		go b.listUpdater.Run(b.ctx)
+	}
+
+	if b.prewarm != nil {
+		go b.prewarm.Run(b.ctx)
+	}
+}
+
+// ListenersCompatible reports whether the running server can hot-swap to newCfg
+// without rebinding sockets or rebuilding the router. It returns false when a
+// change touches anything the persistent listeners/router/decoy source depend
+// on — the caller then falls back to a full restart (brief downtime, correct).
+//
+// ponytail: hot-swap covers resolver/blocking/lists/caching/upstreams/dnssec
+// config only. Ports (incl. proxy-protocol, freeBind, DoH path), TLS, HTTP/3 and
+// the query-log/decoy target take the full-restart fallback. Upgrade path:
+// rebind individual listeners live if that class of change ever becomes frequent.
+func ListenersCompatible(a, b *config.Config) bool {
+	return reflect.DeepEqual(a.Ports, b.Ports) &&
+		a.CertFile == b.CertFile &&
+		a.KeyFile == b.KeyFile &&
+		a.MinTLSServeVer == b.MinTLSServeVer &&
+		reflect.DeepEqual(a.HTTP3, b.HTTP3) &&
+		// the query-log hub, decoy source and stats reader are frozen into the
+		// router once and key on the sqlite target; a change to any of these
+		// makes them stale, so force a restart
+		reflect.DeepEqual(a.QueryLog, b.QueryLog) &&
+		a.Privacy.Decoy.Enable == b.Privacy.Decoy.Enable &&
+		a.Lists.Updater.Enable == b.Lists.Updater.Enable
 }
 
 func createServers(ctx context.Context, cfg *config.Config, tlsCfg *tls.Config) ([]*dns.Server, error) {
@@ -616,6 +790,15 @@ func createQueryResolver(
 		multierror.Prefix(dsErr, "dnssec resolver: "),
 	).ErrorOrNil()
 	if multiErr != nil {
+		// queryLogging is built eagerly (opens its DB) even when a sibling errors;
+		// close its DB so a repeatedly-failing apply doesn't leak a conn each time.
+		// Its goroutines are reaped by the caller's ctx cancel on the error path.
+		if queryLogging != nil {
+			if c := queryLogging.WriterDBCloser(); c != nil {
+				_ = c()
+			}
+		}
+
 		return nil, fmt.Errorf("failed to create query resolver components: %w", multiErr)
 	}
 
@@ -678,24 +861,24 @@ func (s *Server) registerDNSHandlers(ctx context.Context) {
 	}
 }
 
-func (s *Server) printConfiguration() {
+func (s *Server) printConfiguration(b *resolverBundle) {
 	logger().Info("current configuration:")
 
-	if s.cfg.Redis.IsEnabled() {
+	if b.cfg.Redis.IsEnabled() {
 		logger().Info("Redis:")
-		log.WithIndent(logger(), "  ", s.cfg.Redis.LogConfig)
+		log.WithIndent(logger(), "  ", b.cfg.Redis.LogConfig)
 	}
 
-	resolver.ForEach(s.queryResolver, func(res resolver.Resolver) {
+	resolver.ForEach(b.resolver, func(res resolver.Resolver) {
 		resolver.LogResolverConfig(res, logger())
 	})
 
 	logger().Info("listeners:")
-	log.WithIndent(logger(), "  ", s.cfg.Ports.LogConfig)
+	log.WithIndent(logger(), "  ", b.cfg.Ports.LogConfig)
 
 	if len(s.http3PacketConns) > 0 {
 		logger().Info("HTTP/3:")
-		log.WithIndent(logger(), "  ", s.cfg.HTTP3.LogConfig)
+		log.WithIndent(logger(), "  ", b.cfg.HTTP3.LogConfig)
 	}
 
 	logger().Info("runtime information:")
@@ -724,43 +907,51 @@ func toMB(b uint64) uint64 {
 	return b / bytesInKB / bytesInKB
 }
 
-// Start starts the server
-// setupDecoyEngine wires the decoy noise generator and the unified list updater.
-// Both live on one sqlite query-log connection (the decoy list, the blocklist
-// tables and the version meta all persist there), so the DecoySource is opened
-// once and shared. With any non-sqlite query-log target both stay disabled.
-func (s *Server) setupDecoyEngine(cfg *config.Config) error {
+// buildDecoyEngine wires the decoy noise generator and the unified list updater
+// for one resolver bundle. Both live on one sqlite query-log connection (the
+// decoy list, the blocklist tables and the version meta all persist there), so
+// the persistent DecoySource is shared. With any non-sqlite query-log target
+// both stay disabled. The returned workers are started on the bundle's context
+// by startBundleBackground so a later swap stops the old ones.
+func (s *Server) buildDecoyEngine(cfg *config.Config) (*decoy.Engine, *lists.Updater, *prewarm.Worker) {
 	needDecoy := cfg.Privacy.Decoy.Enable
 	needUpdater := cfg.Lists.Updater.Enable
 
 	if !needDecoy && !needUpdater {
-		return nil
+		return nil, nil, nil
 	}
 
 	if s.decoySource == nil {
 		logger().Warn("privacy.decoy / lists.updater require queryLog.type: sqlite; both disabled")
 
-		return nil
+		return nil, nil, nil
 	}
 
+	var (
+		decoyEngine   *decoy.Engine
+		listUpdater   *lists.Updater
+		prewarmWorker *prewarm.Worker
+	)
+
 	if needDecoy {
-		s.decoyEngine = decoy.NewEngine(cfg.Privacy.Decoy, s.decoySource, s.resolve)
+		// s.resolve reads the live bundle per call, so the noise generator always
+		// uses the current chain even across a swap.
+		decoyEngine = decoy.NewEngine(cfg.Privacy.Decoy, s.decoySource, s.resolve)
 		// Live real-query tap (reactive volume + browse-triggered companions).
 		// Nil in non-sqlite mode, but the decoy engine only runs in sqlite mode.
-		s.decoyEngine.SetHub(s.qlHub)
+		decoyEngine.SetHub(s.qlHub)
 		// Corpus pre-warmer: pull trending/mid-band domains in before first visit.
-		s.prewarm = prewarm.New(cfg.Privacy.Decoy, s.decoySource)
+		prewarmWorker = prewarm.New(cfg.Privacy.Decoy, s.decoySource)
 	}
 
 	if needUpdater {
-		metrics.RegisterMetric(lists.ListUpdateTotal)
-		s.listUpdater = lists.NewUpdater(cfg.Lists.Updater, s.decoySource, needDecoy)
+		listUpdater = lists.NewUpdater(cfg.Lists.Updater, s.decoySource, needDecoy)
 		// Seed only the categories the user has enabled, so a fresh box carries a
 		// few small lists instead of all ~5.4M embedded domains (~540MB).
-		s.listUpdater.SetEnabledCategories(enabledBlocklistCategories(s.store))
+		listUpdater.SetEnabledCategories(enabledBlocklistCategories(s.store))
 	}
 
-	return nil
+	return decoyEngine, listUpdater, prewarmWorker
 }
 
 // enabledBlocklistCategories returns the provider the list updater uses to
@@ -828,17 +1019,9 @@ func blockingUsesBlocklistSources(cfg *config.Config) bool {
 func (s *Server) Start(ctx context.Context, errCh chan<- error) {
 	logger().Info("Starting server")
 
-	if s.decoyEngine != nil {
-		go s.decoyEngine.Run(ctx)
-	}
-
-	if s.listUpdater != nil {
-		go s.listUpdater.Run(ctx)
-	}
-
-	if s.prewarm != nil {
-		go s.prewarm.Run(ctx)
-	}
+	// the first bundle's background loops run on the bundle's own context, so
+	// the first apply's old.cancel stops exactly these
+	s.startBundleBackground(s.live.Load())
 
 	for _, srv := range s.dnsServers {
 		go func() {
@@ -907,7 +1090,17 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	for _, c := range s.closers {
+	// per-apply io resources of the live bundle (redis bridge/conn)
+	if b := s.live.Load(); b != nil {
+		for _, c := range b.closers {
+			if err := c.Close(); err != nil {
+				logger().Warn("failed to close resource: ", err)
+			}
+		}
+	}
+
+	// persistent resources (stats RO reader, etc.)
+	for _, c := range s.persistentClosers {
 		if err := c.Close(); err != nil {
 			logger().Warn("failed to close resource: ", err)
 		}
@@ -925,11 +1118,20 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	// listeners are down — flush query log buffers synchronously so process
-	// exit can't race the writers' async goroutines
-	for _, fl := range s.logFlushers {
-		if err := fl.Flush(); err != nil {
-			logger().Warn("failed to flush query log on shutdown: ", err)
+	// listeners are down — flush the live bundle's query log buffers synchronously
+	// so process exit can't race the writers' async goroutines
+	if b := s.live.Load(); b != nil {
+		for _, fl := range b.logFlushers {
+			if err := fl.Flush(); err != nil {
+				logger().Warn("failed to flush query log on shutdown: ", err)
+			}
+		}
+
+		// close DB conns AFTER the flush lands
+		for _, c := range b.dbClosers {
+			if err := c(); err != nil {
+				logger().Warn("failed to close query log database: ", err)
+			}
 		}
 	}
 
@@ -1119,8 +1321,12 @@ func (s *Server) resolve(ctx context.Context, request *model.Request) (response 
 		}
 	}()
 
+	// load the live bundle once so this request uses one coherent chain+config
+	// even if an apply swaps mid-flight (hot DNS path: atomic pointer, no lock)
+	bundle := s.live.Load()
+
 	contextUpstreamTimeoutMultiplier := 100
-	timeoutDuration := time.Duration(contextUpstreamTimeoutMultiplier) * s.cfg.Upstreams.Timeout.ToDuration()
+	timeoutDuration := time.Duration(contextUpstreamTimeoutMultiplier) * bundle.cfg.Upstreams.Timeout.ToDuration()
 
 	ctx, cancel := context.WithTimeout(ctx, timeoutDuration)
 
@@ -1141,7 +1347,7 @@ func (s *Server) resolve(ctx context.Context, request *model.Request) (response 
 	default:
 		var err error
 
-		response, err = s.queryResolver.Resolve(ctx, request)
+		response, err = bundle.resolver.Resolve(ctx, request)
 		if err != nil {
 			var upstreamErr *resolver.UpstreamServerError
 

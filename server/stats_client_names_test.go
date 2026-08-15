@@ -52,7 +52,7 @@ var _ = Describe("Client identity for queries answered at the head of the chain"
 	topClients := func(srv *Server) func() []stats.NameCount {
 		GinkgoHelper()
 
-		provider, err := resolver.GetFromChainWithType[api.StatsProvider](srv.queryResolver)
+		provider, err := resolver.GetFromChainWithType[api.StatsProvider](srvResolver(srv))
 		Expect(err).Should(Succeed())
 
 		return func() []stats.NameCount {
@@ -66,7 +66,7 @@ var _ = Describe("Client identity for queries answered at the head of the chain"
 		) {
 			srv := newServer(ctx, adapt)
 
-			resp, err := srv.queryResolver.Resolve(ctx, &model.Request{
+			resp, err := srvResolver(srv).Resolve(ctx, &model.Request{
 				ClientIP:  clientIP,
 				Req:       util.NewMsgWithQuestion(question, qType),
 				RequestTS: time.Now(),
@@ -103,7 +103,7 @@ var _ = Describe("Client identity for queries answered at the head of the chain"
 
 		// the first query passes the limiter, the second one is dropped by it
 		for range 2 {
-			_, _ = srv.queryResolver.Resolve(ctx, &model.Request{
+			_, _ = srvResolver(srv).Resolve(ctx, &model.Request{
 				ClientIP:  clientIP,
 				Req:       util.NewMsgWithQuestion("example.com.", dns.Type(dns.TypeA)),
 				RequestTS: time.Now(),

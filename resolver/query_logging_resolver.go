@@ -379,6 +379,18 @@ func (r *QueryLoggingResolver) writeLog(ctx context.Context) {
 	}
 }
 
+// WriterDBCloser returns a func that closes the writer's persistent database
+// connection, or nil for writers without one (CSV/console/none/dnstap). Called
+// AFTER the final Flush on retire/shutdown — see DatabaseWriter.CloseDB for why
+// the DB is not closed on the ctx-cancel path.
+func (r *QueryLoggingResolver) WriterDBCloser() func() error {
+	if c, ok := r.writer.(interface{ CloseDB() error }); ok {
+		return c.CloseDB
+	}
+
+	return nil
+}
+
 // closeWriter lets writers that hold external resources (e.g. the dnstap socket)
 // flush and release them on shutdown. Writers without a Close — the DB/CSV/console
 // retention writers — are unaffected.
