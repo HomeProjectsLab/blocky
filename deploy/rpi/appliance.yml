@@ -1,4 +1,4 @@
-# blocky appliance seed config — imported once on first boot into /data/config.db.
+# JungleBlock appliance seed config — imported once on first boot into /data/config.db.
 # The Pi runs nothing else, so the web UI/API binds the standard HTTP port 80.
 ports:
   dns: 53

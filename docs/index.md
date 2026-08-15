@@ -1,14 +1,14 @@
-# Blocky
+# JungleBlock
 
 <figure>
   <img src="https://raw.githubusercontent.com/0xERR0R/blocky/main/docs/blocky.svg" width="200" />
 </figure>
 
-Blocky is a DNS proxy and ad-blocker for the local network written in Go with following features:
+JungleBlock is a DNS proxy and ad-blocker for the local network written in Go with following features:
 
 ```mermaid
 flowchart LR
-    C[Client devices] -->|DNS query| B(Blocky)
+    C[Client devices] -->|DNS query| B(JungleBlock)
     B -->|allowed query| U[Upstream resolvers]
     U -->|answer| B
     B -->|blocked domain| X[Blocked response]
@@ -55,7 +55,7 @@ flowchart LR
     * Uses random upstream resolvers from the configuration - increases your privacy through the distribution of your DNS
       traffic over multiple provider
     * Open source development
-    * Blocky does **NOT** collect any user data, telemetry, statistics etc.
+    * JungleBlock does **NOT** collect any user data, telemetry, statistics etc.
 
 - **Integration** - :notebook_with_decorative_cover: various integration
 
@@ -71,7 +71,7 @@ flowchart LR
     * Simple to maintain
     * Simple to backup
 
-- **Simple installation/configuration** - :cloud: blocky was designed for simple installation
+- **Simple installation/configuration** - :cloud: JungleBlock was designed for simple installation
 
     * Stateless (no database, no temporary files)
     * Docker image with Multi-arch support

@@ -28,8 +28,8 @@ const (
 // NewRootCommand creates a new root cli command instance
 func NewRootCommand() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "blocky",
-		Short: "blocky is a DNS proxy ",
+		Use:   "jungleblock",
+		Short: "JungleBlock is a DNS proxy ",
 		Long: `A fast and configurable DNS Proxy
 and ad-blocker for local network.
 
@@ -41,9 +41,9 @@ Complete documentation is available at https://github.com/0xERR0R/blocky`,
 	}
 
 	c.PersistentFlags().StringVar(&dbDir, "db-dir", defaultDBDir(),
-		"directory containing blocky's config database (config.db), created if missing (env "+dbDirEnvVar+")")
-	c.PersistentFlags().StringVar(&apiHost, "apiHost", defaultHost, "host of blocky (API)")
-	c.PersistentFlags().Uint16Var(&apiPort, "apiPort", defaultPort, "port of blocky (API)")
+		"directory containing JungleBlock's config database (config.db), created if missing (env "+dbDirEnvVar+")")
+	c.PersistentFlags().StringVar(&apiHost, "apiHost", defaultHost, "host of JungleBlock (API)")
+	c.PersistentFlags().Uint16Var(&apiPort, "apiPort", defaultPort, "port of JungleBlock (API)")
 
 	c.AddCommand(newRefreshCommand(),
 		NewQueryCommand(),

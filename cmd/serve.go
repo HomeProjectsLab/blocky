@@ -36,7 +36,7 @@ func newServeCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:          "serve",
 		Args:         cobra.NoArgs,
-		Short:        "start blocky DNS server (default command)",
+		Short:        "start JungleBlock DNS server (default command)",
 		RunE:         startServer,
 		SilenceUsage: true,
 	}

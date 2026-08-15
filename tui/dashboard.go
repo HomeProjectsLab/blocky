@@ -310,7 +310,7 @@ func (d *Dashboard) draw(s tcell.Screen) {
 }
 
 func (d *Dashboard) drawSplash(s tcell.Screen, w, h int) {
-	msg := "waiting for blocky at " + d.api.Base + " ..."
+	msg := "waiting for JungleBlock at " + d.api.Base + " ..."
 	drawText(s, (w-len(msg))/2, h/2, tcell.StyleDefault.Foreground(tcell.ColorYellow), msg)
 }
 

@@ -49,7 +49,7 @@ if (pageModules[page]) {
 (async () => {
     try {
         const sys = await getJSON("/api/ui/system");
-        document.getElementById("foot-version").textContent = `blocky ${sys.version}`;
+        document.getElementById("foot-version").textContent = `JungleBlock ${sys.version}`;
         document.getElementById("foot-uptime").textContent =
             `${fmtUptime(sys.uptimeSeconds)} · ${sys.queriesTotal} queries logged`;
     } catch { /* footer stays with server-rendered version */ }

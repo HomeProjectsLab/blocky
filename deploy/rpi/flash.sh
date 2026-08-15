@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Write a baked blocky appliance image to a removable device, with guardrails.
+# Write a baked JungleBlock appliance image to a removable device, with guardrails.
 #
 # Refuses to touch anything that isn't a hot-pluggable USB disk, anything that
 # currently backs a mounted filesystem, and (belt and braces) the disk holding

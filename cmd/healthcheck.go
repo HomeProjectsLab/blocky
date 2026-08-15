@@ -21,8 +21,8 @@ func NewHealthcheckCommand() *cobra.Command {
 		RunE:  healthcheck,
 	}
 
-	c.Flags().Uint16P("port", "p", defaultDNSPort, "blocky port")
-	c.Flags().StringP("bindip", "b", defaultIPAddress, "blocky host binding ip address")
+	c.Flags().Uint16P("port", "p", defaultDNSPort, "JungleBlock port")
+	c.Flags().StringP("bindip", "b", defaultIPAddress, "JungleBlock host binding ip address")
 
 	return c
 }

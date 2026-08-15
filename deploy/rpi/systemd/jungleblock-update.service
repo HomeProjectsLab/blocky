@@ -1,8 +1,8 @@
 [Unit]
-Description=blocky appliance auto-update (pull latest image, recreate if changed)
+Description=JungleBlock appliance auto-update (pull latest image, recreate if changed)
 Documentation=https://github.com/HomeProjectsLab/blocky
-Requires=blocky-stack.service
-After=blocky-stack.service network-online.target
+Requires=jungleblock-stack.service
+After=jungleblock-stack.service network-online.target
 Wants=network-online.target
 
 [Service]
@@ -11,8 +11,8 @@ Type=oneshot
 # too old for a modern Docker Engine, min API 1.40, so it crash-looped and never
 # updated). Uses the HOST docker CLI, so the API version always matches the
 # daemon. `up -d` recreates the container only when the pulled image changed.
-ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml pull --quiet blocky
-ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml up -d blocky
+ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml pull --quiet jungleblock
+ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml up -d jungleblock
 # Refresh the native binary (tty1 dashboard) from the freshly pulled image;
 # runs before the prune so the image is still present. ExecStartPost runs in
 # declaration order: pull → up → refresh → prune.

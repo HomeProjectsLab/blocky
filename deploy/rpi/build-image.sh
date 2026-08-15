@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Bake an unattended blocky appliance image for the Raspberry Pi 3 (arm64).
+# Bake an unattended JungleBlock appliance image for the Raspberry Pi 3 (arm64).
 #
 # It customises the official Raspberry Pi OS Lite (64-bit) image by PURE FILE
 # INJECTION into the loop-mounted partitions — no chroot, no qemu, nothing ARM
 # is ever executed at bake time. The result is a .img.xz you DD to an SD/USB:
-# plug into a Pi 3 with wired ethernet (DHCP), power on, and blocky serves DNS
+# plug into a Pi 3 with wired ethernet (DHCP), power on, and JungleBlock serves DNS
 # on :53 and the web UI on :80 out of the box, with the console dashboard on
 # the HDMI output.
 #
@@ -57,14 +57,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- 1. blocky arm64 binary (cross-compiled, no cgo, no ARM executed here) ----
-BIN="$WORK/blocky"
+# --- 1. jungleblock arm64 binary (cross-compiled, no cgo, no ARM executed here) ----
+BIN="$WORK/jungleblock"
 if [ -n "${BLOCKY_BIN:-}" ] && [ -f "${BLOCKY_BIN}" ]; then
 	echo ">> using prebuilt binary: $BLOCKY_BIN"
 	cp "$BLOCKY_BIN" "$BIN"
 else
 	need go
-	echo ">> building blocky (linux/arm64)…"
+	echo ">> building jungleblock (linux/arm64)…"
 	( cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 		go build -trimpath -ldflags="-s -w" -o "$BIN" . )
 fi
@@ -129,36 +129,36 @@ mount "$BOOTLP" "$BOOT_MNT"
 mount "$ROOTLP" "$ROOT_MNT"
 
 # --- 4. inject ----------------------------------------------------------------
-echo ">> injecting blocky stack + units + config…"
+echo ">> injecting JungleBlock stack + units + config…"
 # The appliance runs from containers so a new image can be pulled in place
 # (no SSH into the box). The native binary is still injected as a rescue tool
 # for offline debugging, but nothing starts it.
-install -Dm755 "$BIN" "$ROOT_MNT/usr/local/bin/blocky"
+install -Dm755 "$BIN" "$ROOT_MNT/usr/local/bin/jungleblock"
 install -Dm755 "$HERE/bootstrap.sh" "$ROOT_MNT/opt/blocky/bootstrap.sh"
 install -Dm644 "$HERE/compose.yml"  "$ROOT_MNT/opt/blocky/compose.yml"
-install -Dm644 "$HERE/systemd/blocky-stack.service" "$ROOT_MNT/etc/systemd/system/blocky-stack.service"
+install -Dm644 "$HERE/systemd/jungleblock-stack.service" "$ROOT_MNT/etc/systemd/system/jungleblock-stack.service"
 # The console dashboard runs as a HOST unit bound to tty1, NOT a container: a
 # container with tty:true draws into a dockerd-held PTY that never reaches HDMI.
-install -Dm644 "$HERE/systemd/blocky-dashboard.service" "$ROOT_MNT/etc/systemd/system/blocky-dashboard.service"
+install -Dm644 "$HERE/systemd/jungleblock-dashboard.service" "$ROOT_MNT/etc/systemd/system/jungleblock-dashboard.service"
 install -d "$ROOT_MNT/etc/systemd/system/multi-user.target.wants"
-ln -sf ../blocky-stack.service     "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-stack.service"
-ln -sf ../blocky-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-dashboard.service"
+ln -sf ../jungleblock-stack.service     "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-stack.service"
+ln -sf ../jungleblock-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-dashboard.service"
 
 # Auto-update (replaces the abandoned Watchtower container): a host systemd
-# timer pulls the latest image and recreates blocky if it changed.
+# timer pulls the latest image and recreates jungleblock if it changed.
 install -Dm755 "$HERE/refresh-native-binary.sh" "$ROOT_MNT/opt/blocky/refresh-native-binary.sh"
-install -Dm644 "$HERE/systemd/blocky-update.service" "$ROOT_MNT/etc/systemd/system/blocky-update.service"
-install -Dm644 "$HERE/systemd/blocky-update.timer"   "$ROOT_MNT/etc/systemd/system/blocky-update.timer"
+install -Dm644 "$HERE/systemd/jungleblock-update.service" "$ROOT_MNT/etc/systemd/system/jungleblock-update.service"
+install -Dm644 "$HERE/systemd/jungleblock-update.timer"   "$ROOT_MNT/etc/systemd/system/jungleblock-update.timer"
 install -d "$ROOT_MNT/etc/systemd/system/timers.target.wants"
-ln -sf ../blocky-update.timer "$ROOT_MNT/etc/systemd/system/timers.target.wants/blocky-update.timer"
-ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # host blocky-dashboard.service owns tty1
+ln -sf ../jungleblock-update.timer "$ROOT_MNT/etc/systemd/system/timers.target.wants/jungleblock-update.timer"
+ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # host jungleblock-dashboard.service owns tty1
 # The user is seeded via userconf.txt, so RPi's first-boot account dialog has
 # nothing to do — but it stays enabled and spams "Failed to start userconfig"
 # every 10s on the console. Mask it.
 ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/userconfig.service"
 # Larger UDP socket buffers + backlog: under sustained DNS load the listener
 # should QUEUE bursts in the kernel instead of dropping them — trading a little
-# latency for far fewer timeouts. blocky runs with host networking, so these host
+# latency for far fewer timeouts. JungleBlock runs with host networking, so these host
 # sysctls apply to its :53 socket (rmem_default is the buffer every UDP socket
 # gets without asking).
 install -d "$ROOT_MNT/etc/sysctl.d"
@@ -241,9 +241,9 @@ EOF
 	#    do_wifi_country sets the regulatory country persistently AND unblocks the
 	#    radio, so it won't be re-blocked. Runs before NetworkManager; idempotent.
 	if [ -n "${WIFI_COUNTRY:-}" ]; then
-		cat > "$ROOT_MNT/etc/systemd/system/blocky-wifi-country.service" <<EOF
+		cat > "$ROOT_MNT/etc/systemd/system/jungleblock-wifi-country.service" <<EOF
 [Unit]
-Description=Set WiFi regulatory country and unblock the radio (blocky appliance)
+Description=Set WiFi regulatory country and unblock the radio (JungleBlock appliance)
 DefaultDependencies=no
 Before=network-pre.target NetworkManager.service
 Wants=network-pre.target
@@ -258,13 +258,13 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-		ln -sf ../blocky-wifi-country.service \
-			"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-wifi-country.service"
+		ln -sf ../jungleblock-wifi-country.service \
+			"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-wifi-country.service"
 	fi
 fi
 
 # verify what we placed
-echo ">> injected tree:"; ls -l "$ROOT_MNT/usr/local/bin/blocky" \
+echo ">> injected tree:"; ls -l "$ROOT_MNT/usr/local/bin/jungleblock" \
 	"$ROOT_MNT/etc/systemd/system/multi-user.target.wants/" "$BOOT_MNT/appliance.yml"
 
 sync
@@ -293,7 +293,7 @@ cat <<EOF
 Flash it:  xzcat "$OUT" | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
        (or use Raspberry Pi Imager / balenaEtcher on the .img.xz)
 Then: plug the SD/USB into a Pi 3, connect wired ethernet, power on.
-  - blocky resolves DNS on :53 and serves the web UI on http://<pi-ip>:80
+  - JungleBlock resolves DNS on :53 and serves the web UI on http://<pi-ip>:80
   - the console dashboard shows on the HDMI output
   - point your LAN's DHCP DNS (or each device) at <pi-ip>
 EOF

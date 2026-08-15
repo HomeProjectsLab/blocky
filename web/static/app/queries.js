@@ -91,7 +91,7 @@ document.getElementById("csv-btn").addEventListener("click", () => {
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "blocky-queries.csv";
+    a.download = "jungleblock-queries.csv";
     a.click();
     URL.revokeObjectURL(a.href);
 });

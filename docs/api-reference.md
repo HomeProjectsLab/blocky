@@ -35,7 +35,7 @@ The change is staged, not live. To activate all staged changes with a single zer
 curl -X POST http://<pi-ip>/api/ui/config/apply
 ```
 
-`apply` triggers the supervisor's `RequestApply` — the resolver chain is rebuilt off to the side and swapped atomically; DNS listeners keep serving throughout. Poll `GET /api/ui/config/status` for the `dirty` flag (staged-but-unapplied) and `lastApplied` / `updatedAt` timestamps. A few changes (ports, TLS, HTTP3, Prometheus, query-log target, toggling the noise engine or updater) force a brief full restart instead of a hot-swap — see [architecture.md](./architecture.md#config-hot-swap).
+`apply` triggers the supervisor's `RequestApply` — the resolver chain is rebuilt off to the side and swapped atomically; DNS listeners keep serving throughout. Poll `GET /api/ui/config/status` for the `dirty` flag (staged-but-unapplied) and `lastApplied` / `updatedAt` timestamps. A few changes (ports, TLS, HTTP3, Prometheus, query-log target, toggling the noise engine or updater) force a brief full restart instead of a hot-swap — see [architecture.md](./architecture.md#config-store-hot-swap-zero-downtime).
 
 ```bash
 # Typical flow
@@ -117,7 +117,7 @@ Conditional-forwarding (send reverse-DNS + local names to your router) is config
 | GET | `/api/ui/noise/top` | Top fake / decoy domains |
 | GET | `/api/ui/noise/sourcemix` | Decoy source-mix breakdown |
 
-The noise endpoints surface the cover-traffic engine — the decoy DNS that makes real lookups unprofilable to an on-path observer. See [architecture.md](./architecture.md#noise-engine) for how decoys are generated.
+The noise endpoints surface the cover-traffic engine — the decoy DNS that makes real lookups unprofilable to an on-path observer. See [architecture.md](./architecture.md#the-noise-cover-traffic-engine) for how decoys are generated.
 
 ### Config, backup & restore
 

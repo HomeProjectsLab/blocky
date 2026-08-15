@@ -1,19 +1,19 @@
 [Unit]
-Description=blocky console dashboard (htop-style, HDMI tty1)
+Description=JungleBlock console dashboard (htop-style, HDMI tty1)
 # The stack unit brings the container up; the API answers a bit later (compose
 # healthcheck start_period=60s). We only need ordering here — readiness is the
 # restart loop below, not a hard dependency.
-After=blocky-stack.service
-Wants=blocky-stack.service
+After=jungleblock-stack.service
+Wants=jungleblock-stack.service
 # getty is masked in the image; this is belt-and-suspenders so a login prompt
 # can never repaint tty1 underneath the TUI.
 Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
-# Same binary the container runs, baked at /usr/local/bin/blocky. It is a pure
+# Same binary the container runs, baked at /usr/local/bin/jungleblock. It is a pure
 # API/SSE consumer and reaches the host-networked resolver at localhost:80.
-ExecStart=/usr/local/bin/blocky dashboard --api-url http://localhost:80
+ExecStart=/usr/local/bin/jungleblock dashboard --api-url http://localhost:80
 # If the API isn't up yet (containers still starting), the dashboard exits and
 # systemd restarts it until localhost:80 answers. This IS the readiness wait.
 Restart=always

@@ -4,7 +4,7 @@
 
 ### Prometheus export
 
-Blocky can optionally export metrics for [Prometheus](https://prometheus.io/).
+JungleBlock can optionally export metrics for [Prometheus](https://prometheus.io/).
 
 Following metrics will be exported:
 
@@ -51,24 +51,24 @@ or [at grafana.com](https://grafana.com/grafana/dashboards/13768)
 
 The dashboard is organized in sections (overview, traffic, latency, blocking & lists, cache & prefetching, DNSSEC,
 rate limiting, Go runtime) and uses only Grafana core panels, so no additional plugins are needed. The "Blocking
-control" buttons in the overview section enable or temporarily disable blocking via the blocky API.
+control" buttons in the overview section enable or temporarily disable blocking via the JungleBlock API.
 
 When importing the dashboard, set the "blocky API URL" input to the address under which your browser can reach the
-blocky HTTP API (e.g. `https://blocky.example.com` or `http://192.168.1.2:4000`) — it is used by the blocking
+JungleBlock HTTP API (e.g. `https://jungleblock.example.com` or `http://192.168.1.2:4000`) — it is used by the blocking
 control buttons.
 
 ### Requirements
 
 - Grafana 10.2 or newer: the blocking control buttons use canvas button elements with API calls. All other panels
   also work with older Grafana versions.
-- blocky newer than v0.31 if Grafana is served from a different origin than the blocky API: older blocky versions
-  reject the CORS preflight which Grafana sends for the blocking control buttons. Alternatively, expose the blocky
+- JungleBlock newer than v0.31 if Grafana is served from a different origin than the JungleBlock API: older versions
+  reject the CORS preflight which Grafana sends for the blocking control buttons. Alternatively, expose the JungleBlock
   API on the same origin as Grafana through your reverse proxy.
 
 ### Grafana and Prometheus example project
 
 This [repo](https://github.com/0xERR0R/blocky-grafana-prometheus-example) contains example docker-compose.yml with
-blocky, prometheus (with configured scraper for blocky) and grafana with prometheus datasource.
+JungleBlock, prometheus (with configured scraper for JungleBlock) and grafana with prometheus datasource.
 
 ## MySQL / MariaDB
 
@@ -78,7 +78,7 @@ or [at grafana.com](https://grafana.com/grafana/dashboards/14980)
 
 ![grafana-dashboard](grafana-query-dashboard.png).
 
-Please define the MySQL source in Grafana, which points to the database with blocky's log entries.
+Please define the MySQL source in Grafana, which points to the database with JungleBlock's log entries.
 
 ## Postgres
 

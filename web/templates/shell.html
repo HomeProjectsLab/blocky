@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{.Title}} · blocky*</title>
+    <title>{{.Title}} · JungleBlock*</title>
     <link rel="stylesheet" href="/static/vendor/uplot.min.css">
     <link rel="stylesheet" href="/static/app/app.css">
     <script>document.documentElement.dataset.theme = localStorage.theme || "";</script>
@@ -12,7 +12,7 @@
 {{if eq .Page "login"}}
 <main class="auth-main">
     <div class="auth-card">
-        <a class="wordmark" href="/">blocky<span class="wordmark-star">*</span></a>
+        <a class="wordmark" href="/">JungleBlock<span class="wordmark-star">*</span></a>
         <h1 id="auth-title">Sign in</h1>
         <form id="auth-form" autocomplete="on">
             <input type="password" id="auth-pw" autocomplete="current-password" placeholder="Password" required>
@@ -26,7 +26,7 @@
 {{else}}
 <header class="shell-header">
     <div class="shell-bar">
-        <a class="wordmark" href="/">blocky<span class="wordmark-star">*</span></a>
+        <a class="wordmark" href="/">JungleBlock<span class="wordmark-star">*</span></a>
         <nav class="shell-nav" aria-label="Main">
             <a href="/" {{if eq .Page "dashboard"}}aria-current="page"{{end}}>Dashboard</a>
             <a href="/live" {{if eq .Page "live"}}aria-current="page"{{end}}>Live</a>
@@ -377,7 +377,7 @@
 </main>
 
 <footer class="shell-footer">
-    <span id="foot-version">blocky {{.Version}}</span>
+    <span id="foot-version">JungleBlock {{.Version}}</span>
     <span id="foot-uptime"></span>
 </footer>
 

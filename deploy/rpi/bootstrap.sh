@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# First-boot bootstrap for the blocky appliance.
+# First-boot bootstrap for the JungleBlock appliance.
 #
 # Installs Docker if it isn't present, seeds the config database from the
 # boot-partition appliance.yml, then brings up the container stack. Safe to
@@ -10,9 +10,9 @@ set -euo pipefail
 STACK_DIR=/opt/blocky
 COMPOSE="$STACK_DIR/compose.yml"
 DATA=/var/lib/blocky
-IMAGE="ghcr.io/homeprojectslab/blocky:latest"
+IMAGE="ghcr.io/homeprojectslab/jungleblock:latest"
 
-log() { echo "[blocky-bootstrap] $*"; }
+log() { echo "[jungleblock-bootstrap] $*"; }
 
 # --- 1. DNS sanity ------------------------------------------------------------
 # Chicken-and-egg: this appliance IS the LAN resolver, but it isn't running yet.

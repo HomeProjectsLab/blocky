@@ -129,7 +129,7 @@ func panelTitle(s tcell.Screen, r Rect, snap *snapshot) {
 		setCell(s, x, r.Y, ' ', styBar)
 	}
 
-	left := fmt.Sprintf(" blocky %s  up %s  %s", snap.system.Version, fmtUptime(snap.system.UptimeSeconds), snap.base)
+	left := fmt.Sprintf(" JungleBlock %s  up %s  %s", snap.system.Version, fmtUptime(snap.system.UptimeSeconds), snap.base)
 	right := timeNow().Format("2006-01-02 15:04:05 ")
 
 	drawText(s, r.X, r.Y, styBar, trunc(left, r.W))

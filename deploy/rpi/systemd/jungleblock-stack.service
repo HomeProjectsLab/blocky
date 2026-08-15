@@ -1,5 +1,5 @@
 [Unit]
-Description=blocky appliance container stack (resolver; dashboard + auto-update are host units)
+Description=JungleBlock appliance container stack (resolver; dashboard + auto-update are host units)
 Documentation=https://github.com/HomeProjectsLab/blocky
 Wants=network-online.target
 After=network-online.target

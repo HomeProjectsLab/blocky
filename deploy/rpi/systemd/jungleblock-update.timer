@@ -1,5 +1,5 @@
 [Unit]
-Description=blocky appliance auto-update timer (checks ghcr for a newer image)
+Description=JungleBlock appliance auto-update timer (checks ghcr for a newer image)
 
 [Timer]
 # First check shortly after boot (bootstrap already pulled once), then every

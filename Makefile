@@ -4,9 +4,9 @@
 VERSION?=$(shell git describe --always --tags)
 BUILD_TIME?=$(shell date --iso-8601=seconds)
 DOC_PATH?="main"
-DOCKER_IMAGE_NAME=ghcr.io/homeprojectslab/blocky
+DOCKER_IMAGE_NAME=ghcr.io/homeprojectslab/jungleblock
 
-BINARY_NAME:=blocky
+BINARY_NAME:=jungleblock
 BIN_OUT_DIR?=bin
 
 GOARCH?=$(shell go env GOARCH)

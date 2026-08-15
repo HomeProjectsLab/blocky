@@ -50,7 +50,7 @@ func (u *uiAPI) exportConfig(rw http.ResponseWriter, _ *http.Request) {
 		host = "blocky"
 	}
 
-	name := fmt.Sprintf("blocky-backup-%s-%s.db", host, time.Now().Format("2006-01-02"))
+	name := fmt.Sprintf("jungleblock-backup-%s-%s.db", host, time.Now().Format("2006-01-02"))
 
 	rw.Header().Set(contentTypeHeader, "application/octet-stream")
 	rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, name))

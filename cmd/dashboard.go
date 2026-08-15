@@ -28,7 +28,7 @@ func newDashboardCommand() *cobra.Command {
 	}
 
 	c.Flags().StringVar(&apiURL, "api-url", "http://localhost:80",
-		"base URL of the blocky web API to read from")
+		"base URL of the JungleBlock web API to read from")
 	c.Flags().DurationVar(&refresh, "refresh", time.Second,
 		"meter refresh interval (the query stream updates live via SSE)")
 

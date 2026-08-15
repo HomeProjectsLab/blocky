@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  REGISTRY_IMAGE: ghcr.io/homeprojectslab/blocky
+  REGISTRY_IMAGE: ghcr.io/homeprojectslab/jungleblock
 
 jobs:
   # Hard gate: unit tests (e2e excluded via the Makefile label filter, so no
@@ -58,7 +58,7 @@ jobs:
 
   # Cross-compiled binaries. Always uploaded as workflow artifacts; on a v* tag
   # goreleaser also publishes them as (draft) GitHub Release assets. ldflags
-  # inject the real version + build time so `blocky version` is never "undefined".
+  # inject the real version + build time so `jungleblock version` is never "undefined".
   binaries:
     name: binaries
     needs: test
@@ -80,7 +80,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
-          name: blocky-binaries
+          name: jungleblock-binaries
           path: |
             dist/*.tar.gz
             dist/*_checksums.txt

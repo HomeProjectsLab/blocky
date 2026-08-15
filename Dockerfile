@@ -54,7 +54,7 @@ ARG VERSION
 ARG BUILD_TIME
 ARG DOC_PATH
 
-LABEL org.opencontainers.image.title="blocky" \
+LABEL org.opencontainers.image.title="JungleBlock" \
   org.opencontainers.image.vendor="homeprojectslab" \
   org.opencontainers.image.licenses="Apache-2.0" \
   org.opencontainers.image.version="${VERSION}" \
@@ -67,7 +67,7 @@ LABEL org.opencontainers.image.title="blocky" \
 USER 100
 WORKDIR /app
 
-COPY --from=build /bin/blocky /app/blocky
+COPY --from=build /bin/jungleblock /app/jungleblock
 
 # CA roots: the recursive resolver and the Tranco decoy updater make outbound
 # TLS calls; a scratch image ships none. Copy the build stage's bundle.
@@ -84,7 +84,7 @@ ENV BLOCKY_DB_DIR=/data
 # DNS (udp+tcp) and the web UI / REST API.
 EXPOSE 53/tcp 53/udp 4000/tcp
 
-ENTRYPOINT ["/app/blocky"]
+ENTRYPOINT ["/app/jungleblock"]
 CMD ["serve"]
 
-HEALTHCHECK --start-period=1m --timeout=3s CMD ["/app/blocky", "healthcheck"]
+HEALTHCHECK --start-period=1m --timeout=3s CMD ["/app/jungleblock", "healthcheck"]

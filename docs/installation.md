@@ -7,7 +7,7 @@ You can choose one of the following installation options:
 
 ## Prepare your configuration
 
-Blocky supports single or multiple YAML files as configuration. Create new `config.yml` with your configuration
+JungleBlock supports single or multiple YAML files as configuration. Create new `config.yml` with your configuration
 (see [Configuration](configuration.md) for more details and all configuration options).
 
 Simple configuration file, which enables only basic features:
@@ -32,27 +32,28 @@ ports:
   http: 4000
 ```
 
-1.  Upstream DNS resolvers blocky forwards allowed queries to. Plain IPs as well as `tcp-tls:` (DoT) and `https://` (DoH) endpoints are supported.
+1.  Upstream DNS resolvers JungleBlock forwards allowed queries to. Plain IPs as well as `tcp-tls:` (DoT) and `https://` (DoH) endpoints are supported.
 2.  A named denylist group. Each entry is a URL or local file with hosts/domains to block; reference it from `clientGroupsBlock`.
 3.  Listening ports — `dns` serves DNS (UDP/TCP), `http` serves the REST API and Prometheus metrics.
 
-## Run Blocky
+## Run JungleBlock
 
 === "Standalone binary"
 
-    Download the binary file from [GitHub](https://github.com/0xERR0R/blocky/releases) for your architecture and
-    run `./blocky --config config.yml`.
+    Download the binary file for your architecture from the
+    [releases page](https://github.com/0xERR0R/blocky/releases) and
+    run `./jungleblock --config config.yml`.
 
     !!! warning
 
         To bind a **privileged port (< 1024, e.g. 53 or 853)** as a non-root user on
         Linux, the binary needs the `NET_BIND_SERVICE` capability. Add it with
-        `setcap 'cap_net_bind_service=+ep' ./blocky`, run as root (not recommended),
+        `setcap 'cap_net_bind_service=+ep' ./jungleblock`, run as root (not recommended),
         or configure a port >= 1024.
 
-        If Blocky runs under a **restricted capability bounding set** (for example a
+        If JungleBlock runs under a **restricted capability bounding set** (for example a
         hardened `systemd` unit, or a container that drops capabilities), use
-        `setcap 'cap_net_bind_service=+p' ./blocky` instead. Blocky raises the
+        `setcap 'cap_net_bind_service=+p' ./jungleblock` instead. JungleBlock raises the
         capability to effective itself at startup, which avoids the
         `operation not permitted` exec error that `+ep` triggers when the capability
         is not in the bounding set.
@@ -67,24 +68,24 @@ ports:
         *Restricted* Pod Security Standard, `capabilities: drop: [ALL]`).
 
         - On **ports >= 1024** no capability is required.
-        - On **privileged ports (< 1024, e.g. 53/853)** Blocky needs `NET_BIND_SERVICE`.
-          With the default runtime capability set it is already present and Blocky
+        - On **privileged ports (< 1024, e.g. 53/853)** JungleBlock needs `NET_BIND_SERVICE`.
+          With the default runtime capability set it is already present and JungleBlock
           enables it automatically. Under `drop: [ALL]`, grant it back (Kubernetes
           `securityContext.capabilities.add: ["NET_BIND_SERVICE"]`, or
           `docker run --cap-add NET_BIND_SERVICE`) or configure a port >= 1024.
 
     !!! note "Writable mounts and file permissions"
 
-        The container runs as the unprivileged user **UID 100**. Any directory Blocky
+        The container runs as the unprivileged user **UID 100**. Any directory JungleBlock
         writes to - the query log target, or `loading.downloads.cachePath` - must be
-        writable by that user, otherwise Blocky logs a `permission denied` error and
+        writable by that user, otherwise JungleBlock logs a `permission denied` error and
         continues without writing.
 
         The image ships `/app/cache` and `/logs` pre-created and owned by UID 100, so
         mounting a **named volume** over either path works with no host-side setup:
 
         ```sh
-        docker run -v blocky_cache:/app/cache ... spx01/blocky
+        docker run -v jungleblock_cache:/app/cache ... ghcr.io/homeprojectslab/jungleblock:latest
         ```
 
         A **bind mount** always keeps the host directory's ownership, so it needs one of:
@@ -96,14 +97,14 @@ ports:
 
         Read-only mounts such as `config.yml` are unaffected.
 
-    Blocky docker images are deployed to DockerHub (`spx01/blocky`) and GitHub Container Registry (`ghcr.io/0xerr0r/blocky`).
+    JungleBlock docker images are published to the GitHub Container Registry (`ghcr.io/homeprojectslab/jungleblock`).
 
     === "docker run"
 
         Execute the following command from the command line:
 
         ```sh
-        docker run --name blocky -v /path/to/config.yml:/app/config.yml -p 4000:4000 -p 53:53/udp spx01/blocky
+        docker run --name jungleblock -v /path/to/config.yml:/app/config.yml -p 4000:4000 -p 53:53/udp ghcr.io/homeprojectslab/jungleblock:latest
         ```
 
     === "docker-compose"
@@ -113,12 +114,12 @@ ports:
         ```yaml
         version: "2.1"
         services:
-          blocky:
-            image: spx01/blocky
-            container_name: blocky
+          jungleblock:
+            image: ghcr.io/homeprojectslab/jungleblock:latest
+            container_name: jungleblock
             restart: unless-stopped
             # Optional the instance hostname for logging purpose
-            hostname: blocky-hostname
+            hostname: jungleblock-hostname
             ports:
               - "53:53/tcp"
               - "53:53/udp"
@@ -145,14 +146,14 @@ Default value is `/app/config.yml`.
 
 !!! note "Legacy: `CONFIG_FILE`"
 
-    Older Blocky versions used `CONFIG_FILE` instead of
+    Older JungleBlock versions used `CONFIG_FILE` instead of
     `BLOCKY_CONFIG_FILE`. The legacy name is still accepted as a
     fallback when `BLOCKY_CONFIG_FILE` is unset. New deployments
     should use `BLOCKY_CONFIG_FILE`.
 
 ## Advanced docker-compose setup
 
-Following example shows, how to run blocky in a docker container and store query logs on a SAMBA share. Local black and
+Following example shows, how to run JungleBlock in a docker container and store query logs on a SAMBA share. Local black and
 allowlists directories are mounted as volume. You can create own black or allowlists in these directories and define the
 path like '/app/allowlists/allowlist.txt' in the config file.
 
@@ -161,9 +162,9 @@ path like '/app/allowlists/allowlist.txt' in the config file.
     ```yaml
     version: "2.1"
     services:
-      blocky:
-        image: spx01/blocky
-        container_name: blocky
+      jungleblock:
+        image: ghcr.io/homeprojectslab/jungleblock:latest
+        container_name: jungleblock
         restart: unless-stopped
         ports:
           - "53:53/tcp"
@@ -186,93 +187,25 @@ path like '/app/allowlists/allowlist.txt' in the config file.
         driver_opts:
           type: cifs
           # uid=100 is required: the share is mounted root-owned by default and
-          # Blocky runs as UID 100, which could then not write the query logs
+          # JungleBlock runs as UID 100, which could then not write the query logs
           o: username=USER,password=PASSWORD,uid=100,gid=100,rw
-          device: //NAS_HOSTNAME/blocky
+          device: //NAS_HOSTNAME/jungleblock
     ```
 
     !!! note
 
-        The `./denylists` and `./allowlists` bind mounts above are only read by Blocky,
+        The `./denylists` and `./allowlists` bind mounts above are only read by JungleBlock,
         so they need no ownership changes. See the permission note under
-        [Run Blocky](#run-blocky) if you add a writable bind mount.
+        [Run JungleBlock](#run-jungleblock) if you add a writable bind mount.
 
 ## Multiple configuration files
 
-For complex setups, splitting the configuration between multiple YAML files might be desired. In this case, folder containing YAML files is passed on startup, Blocky will join all the files.
+For complex setups, splitting the configuration between multiple YAML files might be desired. In this case, folder containing YAML files is passed on startup, JungleBlock will join all the files.
 
 ```sh
-./blocky --config ./config/
+./jungleblock --config ./config/
 ```
 
 !!! warning
 
-    Blocky simply joins the multiple YAML files. If an option (e.g. `upstream`) is present in multiple files, the configuration will not load and start will fail.
-
-## Other installation types
-
-!!! warning
-
-    These projects are not associated with Blocky devs and are listed here for convenience.
-
-### Arch Linux via AUR
-
-See [https://aur.archlinux.org/packages/blocky/](https://aur.archlinux.org/packages/blocky/)
-
-### Alpine Linux
-
-See [https://pkgs.alpinelinux.org/packages?name=blocky&branch=edge&repo=&arch=](https://pkgs.alpinelinux.org/packages?name=blocky&branch=edge&repo=&arch=)
-
-### CentOS/Debian/Fedora install script
-
-See [https://github.com/m0zgen/blocky-installer](https://github.com/m0zgen/blocky-installer)
-
-### FreeBSD
-
-See [https://www.freebsd.org/cgi/ports.cgi?query=blocky&stype=all](https://www.freebsd.org/cgi/ports.cgi?query=blocky&stype=all)
-
-### Gentoo
-
-See the [Gentoo Wiki](https://wiki.gentoo.org/wiki/Project:GURU/Information_for_End_Users) to enable the GURU repository, then run `emerge net-dns/blocky`.
-
-### NixOS
-
-Add `pkgs.blocky` as a module:
-
-```nix
-services.blocky = {
-  enable = true;
-
-  settings = {
-    # anything from config.yml
-  };
-};
-```
-
-### macOS via Homebrew
-
-See [https://formulae.brew.sh/formula/blocky](https://formulae.brew.sh/formula/blocky)
-
-### TrueNAS SCALE via TrueCharts
-
-See [https://truecharts.org/charts/enterprise/blocky/](https://truecharts.org/charts/enterprise/blocky/)
-(TrueCharts is not an official TrueNAS project)
-
-## Companion projects
-
-!!! warning
-
-    These projects are not associated with Blocky devs and are listed here for convenience.
-
-### Lists updater
-
-[Blocky lists updater](https://github.com/shizunge/blocky-lists-updater) updates list related configuration without restarting blocky DNS.
-
-### Web UIs
-
-- [Blocky Frontend](https://github.com/Mozart409/blocky-frontend) provides a Web UI to control blocky.
-See linked project for installation instructions.
-
-- [BlockyUI](https://github.com/GabeDuarteM/blocky-ui) provides a fully featured and modern Web UI for managing your Blocky DNS server.
-
-- [Blocky Visor](https://github.com/JCHHeilmann/blocky-visor) is a static SPA dashboard with live metrics and DNS query testing. Comes with an optional Go sidecar that adds historical analytics based on parsing Blocky's log files, log viewing, and config editing.
+    JungleBlock simply joins the multiple YAML files. If an option (e.g. `upstream`) is present in multiple files, the configuration will not load and start will fail.

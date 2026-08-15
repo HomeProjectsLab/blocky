@@ -37,7 +37,7 @@ To print runtime configuration / statistics, you can send `SIGUSR1` signal to ru
 
 !!! hint
 
-    To send a signal to a process you can use `kill -s USR1 <PID>` or `docker kill -s SIGUSR1 blocky` for docker setup
+    To send a signal to a process you can use `kill -s USR1 <PID>` or `docker kill -s SIGUSR1 jungleblock` for docker setup
 
 ## Debug / Profiling
 
@@ -69,7 +69,7 @@ Some links/ideas for lists:
 
 !!! warning
 
-    DNS server provider has access to all your DNS queries (all visited domain names). Some DNS providers can use (tracking, analyzing, profiling etc.). It is recommended to use different DNS upstream servers in blocky to distribute your DNS queries over multiple providers.
+    DNS server provider has access to all your DNS queries (all visited domain names). Some DNS providers can use (tracking, analyzing, profiling etc.). It is recommended to use different DNS upstream servers in JungleBlock to distribute your DNS queries over multiple providers.
 
     Please read the description before using the DNS server as upstream. Some of them provide already an ad-blocker, some
     filters other content. If you use external DNS server with included ad-blocker, you can't choose which domains should be

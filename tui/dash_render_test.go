@@ -60,7 +60,7 @@ func TestRenderSmoke(t *testing.T) {
 			sc.Show()
 
 			txt := mtScreenText(sc)
-			for _, want := range []string{"blocky 0.24", "analytics.google.com", "queries 1.2M"} {
+			for _, want := range []string{"JungleBlock 0.24", "analytics.google.com", "queries 1.2M"} {
 				if !strings.Contains(txt, want) {
 					t.Errorf("%s frame missing %q", tc.name, want)
 				}
@@ -96,7 +96,7 @@ func TestRenderSplashWhenDisconnected(t *testing.T) {
 	d.draw(sc)
 	sc.Show()
 
-	if !strings.Contains(mtScreenText(sc), "waiting for blocky") {
+	if !strings.Contains(mtScreenText(sc), "waiting for JungleBlock") {
 		t.Error("disconnected dashboard must show the splash")
 	}
 }

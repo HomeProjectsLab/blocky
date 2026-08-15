@@ -1,5 +1,5 @@
 {
-  "name": "blocky development",
+  "name": "JungleBlock development",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
   "features": {
     "ghcr.io/devcontainers/features/go:1": {},

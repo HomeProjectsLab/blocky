@@ -1,7 +1,7 @@
-# blocky — unattended Raspberry Pi 3 appliance image
+# JungleBlock — unattended Raspberry Pi 3 appliance image
 
 Bake an SD/USB image that turns a **Raspberry Pi 3** into a plug-and-play
-blocky box: flash the image, plug in wired ethernet (DHCP) + power, and it
+JungleBlock box: flash the image, plug in wired ethernet (DHCP) + power, and it
 resolves DNS on **:53**, serves the web UI/API on **:80**, and shows a live
 **htop-style dashboard on the HDMI console** — no setup, no login, no X.
 
@@ -33,7 +33,7 @@ balenaEtcher (both read `.img.xz` directly), or on the command line with
 
 1. Raspberry Pi OS expands the root filesystem (stock `init_resize`, untouched).
 2. Wired ethernet comes up via DHCP (RPi OS default — no wifi/country setup).
-3. `blocky-stack.service` runs `/opt/blocky/bootstrap.sh`, which installs Docker
+3. `jungleblock-stack.service` runs `/opt/blocky/bootstrap.sh`, which installs Docker
    (one time, a few minutes on a Pi 3), seeds the config database once from
    `/boot/firmware/appliance.yml`, and brings the compose stack up.
 4. The dashboard container renders the console UI on **tty1 (HDMI)**.
@@ -43,8 +43,8 @@ Then point your LAN's DHCP DNS (or each device) at the Pi's IP. The web UI is at
 
 ## Updates are pull-based — no SSH needed
 
-The appliance runs from containers and pull a newer image via a host systemd timer (blocky-update.timer) — polling
-`ghcr.io/homeprojectslab/blocky:latest` **every 30 s**. Push a new image and the
+The appliance runs from containers and pull a newer image via a host systemd timer (jungleblock-update.timer) — polling
+`ghcr.io/homeprojectslab/jungleblock:latest` **every 30 s**. Push a new image and the
 Pi restarts itself onto it within the poll interval — which is why the box needs
 no inbound access at all.
 
@@ -63,9 +63,9 @@ Two consequences worth knowing:
 |------|---------|
 | `/opt/blocky/compose.yml` | resolver container (dashboard + auto-update are host units) |
 | `/opt/blocky/bootstrap.sh` | first-boot Docker install, config seed, `compose up` |
-| `/etc/systemd/system/blocky-stack.service` | brings the stack up at boot |
+| `/etc/systemd/system/jungleblock-stack.service` | brings the stack up at boot |
 | `/boot/firmware/appliance.yml` | first-boot seed config (port 80, recursive default, noise on) |
-| `/usr/local/bin/blocky` | native binary, kept only as an offline rescue tool — nothing starts it |
+| `/usr/local/bin/jungleblock` | native binary, kept only as an offline rescue tool — nothing starts it |
 
 Edit `appliance.yml` on the boot partition before first boot to change ports,
 upstreams, or privacy defaults. After first boot, use the web UI.
