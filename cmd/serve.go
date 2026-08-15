@@ -87,7 +87,34 @@ func startServer(_ *cobra.Command, _ []string) error {
 	}
 	defer store.Close()
 
+	seedDefaultPassword(store)
+
 	return runSupervisor(store)
+}
+
+// seedDefaultPassword gives a freshly-provisioned appliance a working web-UI
+// login out of the box, so there is no first-run setup dance. It acts ONLY when
+// no password has been set yet; the value defaults to "jungle" and can be
+// overridden with JUNGLEBLOCK_DEFAULT_PASSWORD. This is a LAN-appliance
+// convenience — the UI is LAN-only — so it logs loudly to nudge a change in the
+// Settings page. ponytail: a known default on a LAN box is acceptable for the
+// threat model; change it (or set the env) if the box is ever exposed wider.
+func seedDefaultPassword(store *configstore.Store) {
+	if store.IsAuthConfigured() {
+		return
+	}
+
+	pw := os.Getenv("JUNGLEBLOCK_DEFAULT_PASSWORD")
+	if pw == "" {
+		pw = "jungle"
+	}
+
+	if err := store.SetPassword(pw); err != nil {
+		log.Log().Warnf("could not seed the default web-UI password: %v", err)
+		return
+	}
+
+	log.Log().Warnf("seeded the DEFAULT web-UI password %q — change it in the Settings page", pw)
 }
 
 // runSupervisor builds and starts the server, then serves until a termination
