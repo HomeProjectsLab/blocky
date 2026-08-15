@@ -3,12 +3,84 @@ package configstore
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"testing"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// TestSnapshotRestoreBackupRoundTrip guards the overlay-leak: config lives in
+// the YAML blob AND the upstream/denylist overlay tables, so a YAML-only backup
+// would drop the table state. Seeding all three, snapshotting the whole file and
+// restoring it into a fresh store must reproduce the exact same LoadConfig.
+//
+// Named for all three self-check filters (Snapshot/Restore/Backup) so `go test
+// -run <any of them>` selects this plain test even though the suite is Ginkgo.
+func TestSnapshotRestoreBackupRoundTrip(t *testing.T) {
+	src, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open source store: %v", err)
+	}
+
+	// YAML blob edit
+	if err := src.SetRawYAML("ports:\n  http: 5353\n"); err != nil {
+		t.Fatalf("set raw yaml: %v", err)
+	}
+
+	// upstream overlay tables: a default group row + entries
+	if err := src.PutUpstreamGroup(UpstreamGroup{Name: "default", Strategy: "recursive"}); err != nil {
+		t.Fatalf("put upstream group: %v", err)
+	}
+
+	if err := src.SetUpstreamEntries("default", []UpstreamEntry{
+		{Address: "1.1.1.1", Enabled: true},
+		{Address: "8.8.8.8", Enabled: true},
+	}); err != nil {
+		t.Fatalf("set upstream entries: %v", err)
+	}
+
+	// blocking overlay table: a manual denylist entry
+	if _, err := src.AddDenyEntry("manual", "ads.example.com"); err != nil {
+		t.Fatalf("add deny entry: %v", err)
+	}
+
+	want, err := src.LoadConfig()
+	if err != nil {
+		t.Fatalf("load source config: %v", err)
+	}
+
+	snap := filepath.Join(t.TempDir(), "backup.db")
+	if err := src.SnapshotTo(snap); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	if err := src.Close(); err != nil {
+		t.Fatalf("close source: %v", err)
+	}
+
+	// fresh store (its own seeded config.db), then restore the snapshot over it
+	dst, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open dest store: %v", err)
+	}
+	defer dst.Close()
+
+	if err := dst.RestoreDB(snap); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	got, err := dst.LoadConfig()
+	if err != nil {
+		t.Fatalf("load restored config: %v", err)
+	}
+
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("restored config differs from source:\nwant %+v\ngot  %+v", want, got)
+	}
+}
 
 var _ = Describe("Store", func() {
 	var (

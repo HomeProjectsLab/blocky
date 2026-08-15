@@ -1,5 +1,6 @@
 // settings.js — read-only config summary + raw YAML editor (validate/save/apply).
 import { getText, putText, send } from "./api.js";
+import { confirmDialog } from "./modal.js";
 
 const yamlEl = document.getElementById("set-yaml");
 const errEl = document.getElementById("set-error");
@@ -81,5 +82,32 @@ document.getElementById("set-apply").addEventListener("click", async () => {
 });
 
 document.getElementById("set-reload").addEventListener("click", reload);
+
+document.getElementById("set-export").addEventListener("click", () => {
+    window.location = "/api/ui/config/export";
+});
+
+const importInput = document.getElementById("set-import-file");
+document.getElementById("set-import").addEventListener("click", () => importInput.click());
+importInput.addEventListener("change", async () => {
+    const file = importInput.files[0];
+    importInput.value = ""; // allow re-picking the same file later
+    if (!file) return;
+
+    const ok = await confirmDialog(
+        `Restore configuration from "${file.name}"? This replaces every current setting.`,
+        { title: "Restore backup", okText: "Restore", danger: true },
+    );
+    if (!ok) return;
+
+    showErr(null); msg("Restoring…");
+    try {
+        const res = await fetch("/api/ui/config/import", { method: "POST", body: file });
+        if (res.status === 202) { msg("Restored — reloading."); window.location.reload(); return; }
+        let err = "restore failed";
+        try { err = (await res.json()).error || err; } catch { /* non-JSON error body */ }
+        showErr(err); msg("Restore rejected — fix the error above.", true);
+    } catch (err) { msg("Restore failed: " + err.message, true); }
+});
 
 reload();

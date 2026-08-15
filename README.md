@@ -1,48 +1,75 @@
-[![CI/CD](https://img.shields.io/github/actions/workflow/status/HomeProjectsLab/blocky/ci.yml?branch=main "CI/CD")](https://github.com/HomeProjectsLab/blocky/actions/workflows/ci.yml)
-[![Container image](https://img.shields.io/badge/ghcr.io-homeprojectslab%2Fblocky-2496ED?logo=docker&logoColor=white)](https://github.com/HomeProjectsLab/blocky/pkgs/container/blocky)
-[![Go version](https://img.shields.io/github/go-mod/go-version/HomeProjectsLab/blocky "Go version")](go.mod)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-# blocky (HomeProjectsLab fork)
+# JungleBlock
 
-A privacy-first, self-hosted DNS server for the home lab. One static Go binary that is a
-**recursive/forwarding resolver**, an **ad-blocker**, a **DNS noise machine**, and a **web UI** —
-configured entirely through an embedded SQLite database, no YAML files to hand-edit.
+**A privacy-first DNS appliance for your home network — resolve, block, and disappear into the noise.**
 
-This is a **hard fork** of [0xERR0R/blocky](https://github.com/0xERR0R/blocky) (Apache-2.0). It
-keeps blocky's fast resolver and blocking engine and adds recursive resolution, a SQLite config
-store, query recording with client fingerprinting, a full web UI, and a configurable DNS decoy
-("noise") engine. The Go module path is still `github.com/0xERR0R/blocky`; upstream attribution and
-license are intact — see [Attribution](#attribution).
+JungleBlock is a self-hosted DNS box that resolves recursively from the root, blocks ads and
+trackers per-client, and emits indistinguishable decoy DNS so an on-path observer can't profile what
+you actually look up. Flash one image to a Raspberry Pi, plug in ethernet, point your router's DNS at
+it — done. It is a **hard fork of [blocky](https://github.com/0xERR0R/blocky)** by 0xERR0R
+(Apache-2.0); the Go module path stays `github.com/0xERR0R/blocky` (so code and import examples
+legitimately show it) — only the product and branding are JungleBlock.
 
-> **Privacy is probabilistic, not magic.** The noise engine makes de-anonymizing your DNS traffic
-> *expensive*, it does not make it impossible, and it defends the **wire**, not the host. Read
-> [docs/PRIVACY.md](docs/PRIVACY.md) — the honest threat model — before you rely on any of this.
+> JungleBlock is **not a DHCP server.** It is a resolver + blocker + appliance, on purpose. Hand out
+> leases with your router; hand out *answers* with JungleBlock.
 
-## What it is
+## Features
 
-- **Resolver** — recursive by default (iterative resolution from the root via [zmap/zdns
-  v2](https://github.com/zmap/zdns), DNSSEC-validating), or forwarding to upstreams you configure.
-  Per-group strategy: `recursive`, `parallel_best`, `strict`, `random`, `round_robin`,
-  `weighted_round_robin`, `weighted_random`, `time_hop`, `domain_shard` (salt-rotating). Upstreams
-  and strategies swap at runtime, no restart.
-- **Ad-blocker** — 25 embedded [blocklistproject](https://github.com/blocklistproject/Lists)
-  categories, per-client group segmentation, allow/deny rules, live domain counts. Inherits
-  blocky's blocking engine (regex, wildcards, CNAME/IP blocking, scheduled disable).
-- **Query recording** — every query to `querylog.db` with rich metadata and **client
-  fingerprinting** (transport, TLS, EDNS option order, 0x20, cookie). Write-path aggregate tables
-  feed the dashboards; a live SSE stream feeds the UI.
-- **The noise machine** — a background decoy engine that emits cover traffic so an on-path or
-  upstream observer cannot tell which domains you actually visit. It shapes total egress to a
-  household "persona" curve (hides *how much* you browse), draws decoys from your own visited-domain
-  corpus + replayed real queries + Tranco-1M + blocklists, emits them in recorded page-load
-  *cohorts* with matched fingerprints, and shadow-completes blocked queries so the box looks like a
-  normal unprotected device on the wire. See [docs/PRIVACY.md](docs/PRIVACY.md).
-- **Web UI** — Dashboard, Live, Queries, Clients (with fingerprint drill-down), Upstreams,
-  Blocking, Privacy, Settings, System, and Noise. Go templates + vanilla ES modules + uPlot,
-  embedded in the binary. **No frontend toolchain** — no node, no npm, no bundler.
+**Core (shipped, stable)**
 
-Single static binary. Multi-arch. Configured by SQLite, not files.
+- **Recursive-from-root resolution** with DNSSEC validation — no dependence on a third-party
+  resolver; bogus answers become SERVFAIL.
+- **Encrypted upstreams** — DoH (`https://`) and DoT (`tls://`) when you do forward, with optional
+  EDNS(0) padding and 0x20 case randomization.
+- **Per-client blocking** — 25 embedded blocklist categories, allow/deny rules, per-device policy.
+- **Cover-traffic noise engine** — emits indistinguishable decoy DNS shaped to a household diurnal
+  curve, drawn from your own replayed queries + a Tranco-1M corpus, replayed in real page-load
+  cohorts with matched fingerprints. On-path observers can't tell real lookups from chaff.
+- **Zero-downtime config hot-swap** — the resolver rebuilds on apply while listeners keep serving;
+  no dropped queries.
+- **SQLite query log** with hourly aggregate rollups and a disk guardian that auto-trims oldest raw
+  rows to keep the appliance from filling its card.
+- **Live SSE query stream** and a reactive **TUI dashboard** on HDMI/tty1.
+- **Raspberry Pi image build** plus a host systemd **auto-update timer**.
+- **Live QPS counters** (10s / 1m / 5m / 10m / 1h) and a per-core CPU/mem/disk header.
+
+**New — supersede-your-Pi-hole parity**
+
+- **Login & auth** — first-run password setup, signed-cookie session gating the whole web UI and
+  `/api/ui/*`, argon2id hashing, per-IP login lockout. Loopback stays exempt so the local console
+  dashboard keeps working.
+- **Backup / restore** — one-click download of the entire `config.db` and validated restore
+  (Pi-hole "Teleporter" equivalent); query-log history is excluded.
+- **Lists screen** — add your own blocklist URLs (adlists), per-entry enable toggle and comment on
+  allow/deny; exact / wildcard / regex types auto-derived from the domain syntax.
+- **Household groups** — named policy bundles assigned to devices by name / IP / CIDR, enabled or
+  disabled live with zero DNS downtime.
+- **UX** — light/dark theme toggle, conditional-forwarding UI (send reverse-DNS + local names to
+  your router), dashboard badges (recursive-from-root indicator, noise-engine impact ratio,
+  device-class chips).
+- **Appliance** — native-binary auto-refresh so the tty dashboard never goes stale after a container
+  update.
+
+## JungleBlock vs Pi-hole
+
+Pi-hole is a fine LAN ad-blocker. JungleBlock aims a rung higher on privacy while matching the
+household features people actually use.
+
+| | Pi-hole | JungleBlock |
+|---|---|---|
+| Block ads/trackers per-client | Yes | Yes |
+| Login, backup, adlists, groups | Yes | Yes |
+| **Recursive-from-root** resolver | via add-on | **built in** (DNSSEC-validating) |
+| **Encrypted upstreams** (DoH/DoT) | via add-on | **built in** |
+| **Cover-traffic noise** (decoy DNS) | No | **Yes** |
+| **Zero-downtime config hot-swap** | No | **Yes** |
+| **DHCP server** | Yes | **No — out of scope** |
+
+What JungleBlock adds beyond parity: it can resolve **without trusting any upstream at all**, it can
+**encrypt** the upstreams it does use, it **buries your real lookups in indistinguishable noise**, and
+it **applies config changes without dropping a single query**. What it deliberately leaves to your
+router: **DHCP**.
 
 ## Quick start
 
@@ -50,95 +77,63 @@ Single static binary. Multi-arch. Configured by SQLite, not files.
 
 ```bash
 docker run -d \
-  --name blocky \
+  --name jungleblock \
   -p 53:53/tcp -p 53:53/udp \
   -p 4000:4000/tcp \
   -v /path/to/data:/data \
-  -e BLOCKY_DB_DIR=/data \
-  ghcr.io/homeprojectslab/blocky:latest
+  ghcr.io/homeprojectslab/jungleblock:latest serve --db-dir /data
 ```
 
-Point your router or a client at the host on port 53, then open the web UI at
-`http://<host>:4000`. Images are published for `linux/amd64`, `linux/arm64`, `linux/386`, and
-`linux/arm/v7`.
+Point your router (or a single client) at the host on port 53, then open the web UI at
+`http://<host>:4000`. On first launch JungleBlock self-creates `config.db` (seeded recursive, so it
+resolves immediately) and `querylog.db`. Set the admin password on first visit.
 
-### Bare binary
+### Raspberry Pi image
+
+Flash one image, boot, done — DNS on `:53`, web UI on `:80`, live dashboard on HDMI. A Pi 3 sustains
+~1000–1100 QPS.
 
 ```bash
-# from a release binary or `go build` (see Build)
-./blocky serve --db-dir /path/to/data
+make image        # builds ./jungleblock-rpi3-arm64.img.xz
 ```
 
-`--db-dir` (or `BLOCKY_DB_DIR`, default the current directory) is the one thing you point at
-persistent storage. Everything else is configured after launch.
-
-### First launch
-
-On first start blocky **self-creates** its two databases in `--db-dir`:
-
-- `config.db` — the entire configuration (tiny, transactional). Seeded with a single `default`
-  upstream group set to **recursive**, so the box resolves immediately with zero configuration.
-- `querylog.db` — query log, aggregates, decoy sources, and the noise corpus (WAL, append-heavy).
-
-The web UI comes up on **`:4000`** with no auth (LAN-only by design — see the privacy doc). Recursive
-resolution works out of the box; the noise engine and ad-blocking are configured from there.
-
-## Configuration
-
-There are **no YAML config files** to maintain. Configuration lives in `config.db` and is edited two
-ways:
-
-- **Web UI** — the normal path. Upstreams, blocking, privacy/noise, ports, caching, retention, and a
-  raw-config editor with validation are all under `http://<host>:4000`.
-- **`blocky import`** — one-time migration of an existing upstream-blocky YAML config into the
-  database:
-
-  ```bash
-  ./blocky import ./config.yml --db-dir /path/to/data
-  ```
-
-  Refuses to overwrite a non-empty database without `--force`.
-
-The full configuration schema (every knob, generated) is in
-[docs/config.schema.json](docs/config.schema.json). The privacy/noise knobs that matter are
-called out in [docs/PRIVACY.md](docs/PRIVACY.md).
+The full build, flash, first-boot, and auto-update flow is in **[docs/deployment.md](docs/deployment.md)**.
 
 ## Privacy
 
-The headline feature deserves an honest description of what it does and does **not** protect against.
-[docs/PRIVACY.md](docs/PRIVACY.md) is the threat model: what the noise machine defends (an on-path or
-upstream observer trying to unmask *which* domains you visit), how the layered design works, and the
-residual leaks it does **not** solve — real usage above the persona ceiling, genuine first-ever
-visits, the plaintext recursive-default path, and the explicitly out-of-scope local-DB/LAN-UI threat
-model. Cover traffic makes de-anonymization expensive and probabilistic; it is not a guarantee.
+The point of the box: **only indistinguishable DNS leaves it.**
 
-## Build
+- The **web UI and `/api/ui/*` bind LAN-only** and are gated behind login.
+- The only thing JungleBlock sends to the internet is DNS — real queries plus decoy queries an
+  on-path observer can't tell apart. **No telemetry, no phone-home, nothing else.**
 
-Pure Go, no frontend toolchain, no code generation needed to build:
+Honest limits: without TLS on the LAN, the login cookie rides in cleartext — auth closes the "any LAN
+device owns the box" hole, not on-path sniffing. And cover traffic makes de-anonymization *expensive
+and probabilistic*, not impossible. The full threat model is in **[docs/PRIVACY.md](docs/PRIVACY.md)**.
 
-```bash
-go build -o blocky .
-# or
-make build
-```
+## Screenshots / UI tour
 
-The web UI (templates, ES modules, uPlot) and the blocklists / Tranco-1M decoy list are embedded via
-`go:embed`, so the resulting binary is fully self-contained.
+_Coming soon._ The web UI ships Dashboard, Live, Queries, Clients (with fingerprint drill-down),
+Upstreams, Blocking, Lists, Privacy/Noise, Local DNS, Settings, and System pages — plus the
+htop-style HDMI console dashboard. See **[docs/api-reference.md](docs/api-reference.md)** for the
+page/route map.
 
-## Releases & images
+## Documentation
 
-CI (`.github/workflows/ci.yml`) lints and tests on every push and PR, then:
+| Doc | What's in it |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Resolver chain, blocking model, config-store hot-swap, noise engine, query log |
+| [docs/deployment.md](docs/deployment.md) | Pi image build, flashing, first boot, auto-update, container runtime |
+| [docs/configuration.md](docs/configuration.md) | Every config knob and how the SQLite config store works |
+| [docs/api-reference.md](docs/api-reference.md) | HTTP API (`/api/ui/*`), SSE stream, web pages, TUI |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | The honest threat model for the noise engine |
 
-- builds cross-compiled binaries for **amd64 / arm64 / 386 / armv7**, uploaded as workflow artifacts
-  (and attached to GitHub Releases on `v*` tags via goreleaser);
-- builds and pushes multi-arch container images to **`ghcr.io/homeprojectslab/blocky`** — `:latest`
-  and `:<sha>` on `main`, `:<semver>` on tags.
+## Credits & License
 
-## Attribution
-
-This project is a hard fork of **[0xERR0R/blocky](https://github.com/0xERR0R/blocky)** by Dimitri
+JungleBlock is a hard fork of **[0xERR0R/blocky](https://github.com/0xERR0R/blocky)** by Dimitri
 Herzog and contributors, licensed under the **Apache License 2.0**. The upstream resolver chain,
-blocking engine, caching, and DNS-protocol support are their work; this fork adds the SQLite config
-store, recursive resolution, query recording/fingerprinting, the web UI, and the noise engine. The
-original license is retained in [LICENSE](LICENSE). If you want the upstream project — a lean,
-file-configured, stateless DNS ad-blocker — go support it directly.
+blocking engine, caching, and DNS-protocol support are their work; this fork adds recursive-from-root
+resolution, the SQLite config store, query recording with client fingerprinting, the web UI, the
+appliance tooling, and the noise engine. The Go module path remains `github.com/0xERR0R/blocky` and
+the original license is retained in [LICENSE](LICENSE). If you want the lean, file-configured upstream
+project, go support it directly.

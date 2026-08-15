@@ -23,12 +23,15 @@ recover your real activity.
 ### What is out of scope
 
 - **The local databases.** Decoy queries are recorded in `querylog.db` labeled `decoy=1`. Anyone
-  with **the file** or **access to the LAN web UI** can read your real query history directly —
-  filtering decoys out is trivial for them. This is by design (it powers the Noise dashboard) and it
-  is an accepted trade-off: **this tool defends the wire, not the host.** Protect the box and its LAN
-  like any other server holding sensitive logs.
-- **The web UI has no authentication** — LAN-only, on purpose. Do not expose port 4000 to the
-  internet.
+  with **the file** or **an authenticated LAN web UI session** can read your real query history
+  directly — filtering decoys out is trivial for them. This is by design (it powers the Noise
+  dashboard) and it is an accepted trade-off: **this tool defends the wire, not the host.** Protect
+  the box and its LAN like any other server holding sensitive logs.
+- **The web UI is login-gated but LAN-only, on purpose.** First-run password setup plus a signed
+  session cookie stop a random LAN device from owning the box (see the auth section in
+  [api-reference.md](api-reference.md#auth-gate)), but auth does not turn this into a wire defense:
+  without TLS the cookie rides cleartext on the LAN, and anyone with a valid login or file access can
+  still read your real history. Do not expose the web UI to the internet.
 - Config-at-rest secrets, local instance fingerprinting, and other host-side threats. Out of scope.
 
 ## How it works
@@ -84,7 +87,7 @@ its cohorts are conspicuously missing their expected members. That alone marks y
 
 **Shadow completion** decouples the client answer from the wire query. When a client hits a blocked
 domain, the client still gets the block response (**ad-blocking stays fully intact — the ad never
-loads**), *but* blocky also egresses the real upstream query and **discards** the answer. Now:
+loads**), *but* JungleBlock also egresses the real upstream query and **discards** the answer. Now:
 
 - real page-load cohorts are **complete on the wire** (trackers included), matching decoy cohorts —
   no "cohort missing its trackers = real visit" tell;

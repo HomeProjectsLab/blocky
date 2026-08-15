@@ -330,6 +330,15 @@
             <span id="set-msg" class="empty"></span>
         </div>
     </section>
+    <section class="panel">
+        <h2>Backup &amp; restore</h2>
+        <p class="empty">Download the full configuration database, or restore it from a backup file. Restoring replaces every setting and reloads.</p>
+        <div class="ctl-row">
+            <button id="set-export" type="button">Download backup</button>
+            <button id="set-import" type="button">Restore from backup…</button>
+            <input id="set-import-file" type="file" accept=".db" hidden>
+        </div>
+    </section>
 {{else if eq .Page "system"}}
     <div class="page-head"><h1>System</h1></div>
     <section class="tiles" id="sys-tiles"></section>

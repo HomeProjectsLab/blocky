@@ -23,6 +23,8 @@ func registerConfigUIEndpoints(router *chi.Mux, store *configstore.Store, swappe
 		r.Post("/validate", u.validate)
 		r.Post("/apply", u.apply)
 		r.Get("/status", u.status)
+		r.Get("/export", u.exportConfig)
+		r.Post("/import", u.importConfig)
 	})
 
 	router.Route("/api/ui/upstreams", func(r chi.Router) {
