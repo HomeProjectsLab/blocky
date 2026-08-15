@@ -155,6 +155,19 @@ ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # host bloc
 # nothing to do — but it stays enabled and spams "Failed to start userconfig"
 # every 10s on the console. Mask it.
 ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/userconfig.service"
+# Larger UDP socket buffers + backlog: under sustained DNS load the listener
+# should QUEUE bursts in the kernel instead of dropping them — trading a little
+# latency for far fewer timeouts. blocky runs with host networking, so these host
+# sysctls apply to its :53 socket (rmem_default is the buffer every UDP socket
+# gets without asking).
+install -d "$ROOT_MNT/etc/sysctl.d"
+cat > "$ROOT_MNT/etc/sysctl.d/99-blocky.conf" <<'SYSCTL'
+net.core.rmem_default = 4194304
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+net.core.netdev_max_backlog = 4096
+SYSCTL
+
 install -Dm644 "$HERE/appliance.yml" "$BOOT_MNT/appliance.yml"
 
 # Headless user account. Raspberry Pi OS bookworm REQUIRES a user or it drops to
