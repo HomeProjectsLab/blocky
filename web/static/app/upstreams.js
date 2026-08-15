@@ -1,5 +1,6 @@
 // upstreams.js — upstream group management (list, strategy, entries, apply).
 import { getJSON, send, action } from "./api.js";
+import { confirmDialog, promptDialog } from "./modal.js";
 
 const STRATEGIES = [
     ["parallel_best", "Picks 2 random weighted resolvers, returns the fastest (default)."],
@@ -60,7 +61,7 @@ function groupPanel(g, isDefault) {
     if (!isDefault) {
         const del = el("button", { type: "button", class: "btn-danger", text: "Delete group" });
         del.addEventListener("click", async () => {
-            if (!confirm(`Delete upstream group "${g.name}"?`)) return;
+            if (!(await confirmDialog(`Delete upstream group "${g.name}"?`, { danger: true }))) return;
             try { await send("DELETE", `/api/ui/upstreams/groups/${encodeURIComponent(g.name)}`); showApply(true); load(); }
             catch (err) { flash(err.message, true); }
         });
@@ -141,7 +142,7 @@ applyBtn.addEventListener("click", async () => {
 });
 
 document.getElementById("add-group-btn").addEventListener("click", async () => {
-    const name = prompt("New group name (client IP, CIDR or name):");
+    const name = await promptDialog("New group name (client IP, CIDR or name)", {});
     if (!name) return;
     const n = name.trim();
     try {

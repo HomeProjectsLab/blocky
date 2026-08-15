@@ -1,6 +1,7 @@
 // blocking.js — ad-blocker management: runtime toggle, category grid,
 // per-device profiles, manual allow/deny, block stats.
 import { action, getJSON, send } from "./api.js";
+import { confirmDialog, promptDialog } from "./modal.js";
 
 const dot = document.getElementById("bl-dot");
 const state = document.getElementById("bl-state");
@@ -138,7 +139,7 @@ function segRow(seg) {
     const row = el("div", { class: "seg-row" });
     const del = el("button", { type: "button", class: "btn-icon btn-danger", title: "remove profile", text: "✕" });
     del.addEventListener("click", async () => {
-        if (!confirm(`Remove the profile for "${seg.client}"? It falls back to the global categories.`)) return;
+        if (!(await confirmDialog(`Remove the profile for "${seg.client}"? It falls back to the global categories.`, { danger: true }))) return;
         try {
             const r = await send("PUT", `/api/ui/blocking/segments/${encodeURIComponent(seg.client)}`, { categories: [] });
             if (r.needsApply) showApply(true);
@@ -186,7 +187,7 @@ function renderSegments() {
 }
 
 document.getElementById("seg-add").addEventListener("click", async () => {
-    const client = prompt("Device to profile (client name, IP or CIDR — e.g. kids-tablet or 192.168.1.50):");
+    const client = await promptDialog("Device to profile (client name, IP or CIDR — e.g. kids-tablet or 192.168.1.50):", { placeholder: "kids-tablet or 192.168.1.50" });
     if (!client) return;
     // start from the globally enabled categories so the profile is a tweak, not a reset
     const start = data.categories.filter((c) => c.enabled).map((c) => c.name);
