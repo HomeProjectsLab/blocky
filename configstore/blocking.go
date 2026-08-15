@@ -37,10 +37,13 @@ func (BlockingClientSegment) TableName() string { return "blocking_client_segmen
 
 // AllowlistEntry is one manual always-allow domain (group kept for future
 // group-scoped lists; the UI uses "manual", which applies to every client).
+// Enabled defaults true so rows predating the column read back active on upgrade.
 type AllowlistEntry struct {
 	ID        uint   `gorm:"primaryKey"`
 	GroupName string `gorm:"index"`
 	Domain    string
+	Enabled   bool `gorm:"default:true"`
+	Comment   string
 }
 
 func (AllowlistEntry) TableName() string { return "allowlist_entry" }
@@ -51,9 +54,24 @@ type DenylistEntry struct {
 	ID        uint   `gorm:"primaryKey"`
 	GroupName string `gorm:"index"`
 	Domain    string
+	Enabled   bool `gorm:"default:true"`
+	Comment   string
 }
 
 func (DenylistEntry) TableName() string { return "denylist_entry" }
+
+// AdlistEntry is one blocklist URL (or local file path). Global — no group — it
+// lives in its own "adlists" deny group, isolated from manual entries: mixing an
+// HTTP source into "manual" would re-download every URL on each manual edit,
+// because group cache reuse never reuses a group containing an HTTP source.
+type AdlistEntry struct {
+	ID      uint `gorm:"primaryKey"`
+	URL     string
+	Enabled bool `gorm:"default:true"`
+	Comment string
+}
+
+func (AdlistEntry) TableName() string { return "adlist_entry" }
 
 // defaultOnCategories are pre-enabled on first launch: the ad/privacy/fraud
 // lists plus the small security ones. The giants (malware 2.65M, abuse 435k,
@@ -98,10 +116,11 @@ func seedBlockingCategories(db *gorm.DB) error {
 
 // blockingRows is a full snapshot of the blocking tables.
 type blockingRows struct {
-	cats   []BlockingCategory
-	segs   []BlockingClientSegment
-	allows []AllowlistEntry
-	denies []DenylistEntry
+	cats    []BlockingCategory
+	segs    []BlockingClientSegment
+	allows  []AllowlistEntry
+	denies  []DenylistEntry
+	adlists []AdlistEntry
 }
 
 // active reports whether the tables govern blocking (category rows exist).
@@ -124,6 +143,10 @@ func (s *Store) loadBlockingRows() (*blockingRows, error) {
 
 	if err := s.db.Order("id").Find(&b.denies).Error; err != nil {
 		return nil, fmt.Errorf("can't read denylist entries: %w", err)
+	}
+
+	if err := s.db.Order("id").Find(&b.adlists).Error; err != nil {
+		return nil, fmt.Errorf("can't read adlist entries: %w", err)
 	}
 
 	return &b, nil
@@ -162,11 +185,19 @@ func overlayBlocking(cfg *config.Config, b *blockingRows) {
 	// manual entries, grouped
 	denyByGroup := map[string][]string{}
 	for _, e := range b.denies {
+		if !e.Enabled {
+			continue
+		}
+
 		denyByGroup[e.GroupName] = append(denyByGroup[e.GroupName], e.Domain)
 	}
 
 	allowByGroup := map[string][]string{}
 	for _, e := range b.allows {
+		if !e.Enabled {
+			continue
+		}
+
 		allowByGroup[e.GroupName] = append(allowByGroup[e.GroupName], e.Domain)
 	}
 
@@ -203,6 +234,26 @@ func overlayBlocking(cfg *config.Config, b *blockingRows) {
 
 		for client := range cgb {
 			cgb[client] = append(cgb[client], g)
+		}
+	}
+
+	// adlist URLs get their OWN "adlists" group (never mixed into "manual": a
+	// manual edit must not re-download every URL). Like manual, it applies to
+	// everyone — the default group and every segmented client.
+	var urls []string
+
+	for _, a := range b.adlists {
+		if a.Enabled {
+			urls = append(urls, a.URL)
+		}
+	}
+
+	if len(urls) > 0 {
+		deny["adlists"] = append(deny["adlists"], config.NewBytesSources(urls...)...)
+		defaults = append(defaults, "adlists")
+
+		for client := range cgb {
+			cgb[client] = append(cgb[client], "adlists")
 		}
 	}
 
@@ -371,7 +422,7 @@ func validateListDomain(domain string) (string, error) {
 }
 
 // AddAllowEntry appends a manual allow entry and returns its id.
-func (s *Store) AddAllowEntry(group, domain string) (uint, error) {
+func (s *Store) AddAllowEntry(group, domain, comment string) (uint, error) {
 	domain, err := validateListDomain(domain)
 	if err != nil {
 		return 0, err
@@ -381,7 +432,7 @@ func (s *Store) AddAllowEntry(group, domain string) (uint, error) {
 		group = "manual"
 	}
 
-	e := AllowlistEntry{GroupName: group, Domain: domain}
+	e := AllowlistEntry{GroupName: group, Domain: domain, Enabled: true, Comment: comment}
 	if err := s.db.Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist allowlist entry: %w", err)
 	}
@@ -390,7 +441,7 @@ func (s *Store) AddAllowEntry(group, domain string) (uint, error) {
 }
 
 // AddDenyEntry appends a manual deny entry and returns its id.
-func (s *Store) AddDenyEntry(group, domain string) (uint, error) {
+func (s *Store) AddDenyEntry(group, domain, comment string) (uint, error) {
 	domain, err := validateListDomain(domain)
 	if err != nil {
 		return 0, err
@@ -400,12 +451,34 @@ func (s *Store) AddDenyEntry(group, domain string) (uint, error) {
 		group = "manual"
 	}
 
-	e := DenylistEntry{GroupName: group, Domain: domain}
+	e := DenylistEntry{GroupName: group, Domain: domain, Enabled: true, Comment: comment}
 	if err := s.db.Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist denylist entry: %w", err)
 	}
 
 	return e.ID, nil
+}
+
+// SetAllowEntry updates one manual allow entry's enabled flag and comment.
+func (s *Store) SetAllowEntry(id uint, enabled bool, comment string) error {
+	res := s.db.Model(&AllowlistEntry{}).Where("id = ?", id).
+		Updates(map[string]any{"enabled": enabled, "comment": comment})
+	if res.Error != nil {
+		return fmt.Errorf("can't persist allowlist entry: %w", res.Error)
+	}
+
+	return nil
+}
+
+// SetDenyEntry updates one manual deny entry's enabled flag and comment.
+func (s *Store) SetDenyEntry(id uint, enabled bool, comment string) error {
+	res := s.db.Model(&DenylistEntry{}).Where("id = ?", id).
+		Updates(map[string]any{"enabled": enabled, "comment": comment})
+	if res.Error != nil {
+		return fmt.Errorf("can't persist denylist entry: %w", res.Error)
+	}
+
+	return nil
 }
 
 // DeleteAllowEntry removes one manual allow entry by id.
@@ -416,4 +489,92 @@ func (s *Store) DeleteAllowEntry(id uint) error {
 // DeleteDenyEntry removes one manual deny entry by id.
 func (s *Store) DeleteDenyEntry(id uint) error {
 	return s.db.Delete(&DenylistEntry{}, id).Error
+}
+
+// --- adlist accessors --------------------------------------------------------
+
+// ListAdlistEntries returns all blocklist URLs, oldest first.
+func (s *Store) ListAdlistEntries() ([]AdlistEntry, error) {
+	var out []AdlistEntry
+	if err := s.db.Order("id").Find(&out).Error; err != nil {
+		return nil, fmt.Errorf("can't read adlist entries: %w", err)
+	}
+
+	return out, nil
+}
+
+// AddAdlistEntry appends a blocklist URL and returns its id. The candidate
+// config is validated (through validateBlockingCandidate) before it is persisted.
+func (s *Store) AddAdlistEntry(url, comment string) (uint, error) {
+	url = strings.TrimSpace(url)
+	if url == "" || strings.ContainsAny(url, " \t\n") {
+		return 0, fmt.Errorf("invalid adlist URL %q", url)
+	}
+
+	b, err := s.loadBlockingRows()
+	if err != nil {
+		return 0, err
+	}
+
+	e := AdlistEntry{URL: url, Enabled: true, Comment: comment}
+	b.adlists = append(b.adlists, e)
+
+	if err := s.validateBlockingCandidate(b); err != nil {
+		return 0, err
+	}
+
+	if err := s.db.Create(&e).Error; err != nil {
+		return 0, fmt.Errorf("can't persist adlist entry: %w", err)
+	}
+
+	return e.ID, nil
+}
+
+// SetAdlistEnabled toggles one blocklist URL. Validated before persist.
+func (s *Store) SetAdlistEnabled(id uint, enabled bool) error {
+	return s.updateAdlist(id, map[string]any{"enabled": enabled}, func(e *AdlistEntry) { e.Enabled = enabled })
+}
+
+// UpdateAdlistEntry replaces one blocklist URL's url and comment. Validated
+// before persist.
+func (s *Store) UpdateAdlistEntry(id uint, url, comment string) error {
+	url = strings.TrimSpace(url)
+	if url == "" || strings.ContainsAny(url, " \t\n") {
+		return fmt.Errorf("invalid adlist URL %q", url)
+	}
+
+	return s.updateAdlist(id, map[string]any{"url": url, "comment": comment}, func(e *AdlistEntry) {
+		e.URL, e.Comment = url, comment
+	})
+}
+
+// updateAdlist applies mutate to the in-memory row, validates the resulting
+// config, then persists cols for the given id.
+func (s *Store) updateAdlist(id uint, cols map[string]any, mutate func(*AdlistEntry)) error {
+	b, err := s.loadBlockingRows()
+	if err != nil {
+		return err
+	}
+
+	i := slices.IndexFunc(b.adlists, func(a AdlistEntry) bool { return a.ID == id })
+	if i < 0 {
+		return fmt.Errorf("unknown adlist entry %d", id)
+	}
+
+	mutate(&b.adlists[i])
+
+	if err := s.validateBlockingCandidate(b); err != nil {
+		return err
+	}
+
+	if err := s.db.Model(&AdlistEntry{}).Where("id = ?", id).Updates(cols).Error; err != nil {
+		return fmt.Errorf("can't persist adlist entry: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteAdlistEntry removes one blocklist URL by id.
+func (s *Store) DeleteAdlistEntry(id uint) error {
+	return s.db.Delete(&AdlistEntry{}, id).Error
 }

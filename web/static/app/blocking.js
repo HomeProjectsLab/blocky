@@ -88,7 +88,7 @@ document.getElementById("cache-flush").addEventListener("click", async () => {
 });
 
 // ---- main state ----
-let data = { categories: [], segments: [], allow: [], deny: [] };
+let data = { categories: [], segments: [], allow: [], deny: [], adlists: [] };
 const catNames = () => data.categories.map((c) => c.name);
 
 async function load() {
@@ -97,6 +97,7 @@ async function load() {
     renderCats();
     renderSegments();
     renderEntries();
+    renderAdlists();
     renderTiles();
 }
 
@@ -199,6 +200,14 @@ document.getElementById("seg-add").addEventListener("click", async () => {
 });
 
 // ---- manual allow/deny ----
+// blocky list syntax → badge, derived (no stored type column):
+// /re/ → regex, *.host → wildcard, else exact.
+function entryType(d) {
+    if (d.length > 1 && d.startsWith("/") && d.endsWith("/")) return "regex";
+    if (d.startsWith("*.")) return "wildcard";
+    return "exact";
+}
+
 function entryList(kind, items) {
     const ul = document.getElementById(`${kind}-list`);
     ul.textContent = "";
@@ -207,7 +216,33 @@ function entryList(kind, items) {
         return;
     }
     for (const e of items) {
+        const cb = el("input", { type: "checkbox", title: "enabled" });
+        cb.checked = e.enabled;
+        const badge = el("span", { class: "type-badge", text: entryType(e.domain) });
+        const comment = el("span", { class: "entry-comment", title: "click to edit comment", text: e.comment || "add note…" });
         const rm = el("button", { type: "button", class: "btn-icon", title: "remove", text: "✕" });
+        const li = el("li", { class: e.enabled ? "" : "off" },
+            cb, el("span", { class: "entry-domain", text: e.domain }), badge, comment,
+            el("span", { class: "spacer" }), rm);
+
+        const put = async (enabled, cmt) => {
+            const r = await send("PUT", `/api/ui/blocking/${kind}/${e.id}`, { enabled, comment: cmt });
+            e.enabled = enabled; e.comment = cmt;
+            li.classList.toggle("off", !enabled);
+            comment.textContent = cmt || "add note…";
+            if (r.needsApply) showApply(true);
+        };
+        cb.addEventListener("change", async () => {
+            cb.disabled = true;
+            try { await put(cb.checked, e.comment || ""); }
+            catch (err) { cb.checked = !cb.checked; flash(err.message, true); }
+            finally { cb.disabled = false; }
+        });
+        comment.addEventListener("click", async () => {
+            const cmt = await promptDialog("Comment for this entry:", { value: e.comment || "" });
+            if (cmt === null) return;
+            try { await put(e.enabled, cmt.trim()); } catch (err) { flash(err.message, true); }
+        });
         rm.addEventListener("click", async () => {
             try {
                 const r = await send("DELETE", `/api/ui/blocking/${kind}/${e.id}`);
@@ -215,7 +250,7 @@ function entryList(kind, items) {
                 load();
             } catch (err) { flash(err.message, true); }
         });
-        ul.append(el("li", {}, el("span", { text: e.domain }), rm));
+        ul.append(li);
     }
 }
 
@@ -223,6 +258,66 @@ function renderEntries() {
     entryList("allow", data.allow);
     entryList("deny", data.deny);
 }
+
+// ---- blocklist URLs (adlists) ----
+function renderAdlists() {
+    const ul = document.getElementById("adlist-list");
+    ul.textContent = "";
+    if (!data.adlists.length) {
+        ul.append(el("li", { class: "empty", text: "No blocklist URLs yet." }));
+        return;
+    }
+    for (const a of data.adlists) {
+        const cb = el("input", { type: "checkbox", title: "enabled" });
+        cb.checked = a.enabled;
+        const comment = el("span", { class: "entry-comment", title: "click to edit comment", text: a.comment || "add note…" });
+        const rm = el("button", { type: "button", class: "btn-icon", title: "remove", text: "✕" });
+        const li = el("li", { class: a.enabled ? "" : "off" },
+            cb, el("span", { class: "entry-domain", text: a.url }), comment,
+            el("span", { class: "spacer" }), rm);
+
+        cb.addEventListener("change", async () => {
+            cb.disabled = true;
+            try {
+                const r = await send("PUT", `/api/ui/blocking/adlists/${a.id}`, { enabled: cb.checked });
+                a.enabled = cb.checked; li.classList.toggle("off", !cb.checked);
+                if (r.needsApply) showApply(true);
+            } catch (err) { cb.checked = !cb.checked; flash(err.message, true); }
+            finally { cb.disabled = false; }
+        });
+        comment.addEventListener("click", async () => {
+            const cmt = await promptDialog("Comment for this list:", { value: a.comment || "" });
+            if (cmt === null) return;
+            try {
+                const r = await send("PUT", `/api/ui/blocking/adlists/${a.id}`, { url: a.url, comment: cmt.trim() });
+                a.comment = cmt.trim(); comment.textContent = a.comment || "add note…";
+                if (r.needsApply) showApply(true);
+            } catch (err) { flash(err.message, true); }
+        });
+        rm.addEventListener("click", async () => {
+            if (!(await confirmDialog(`Remove blocklist URL "${a.url}"?`, { danger: true }))) return;
+            try {
+                const r = await send("DELETE", `/api/ui/blocking/adlists/${a.id}`);
+                if (r.needsApply) showApply(true);
+                load();
+            } catch (err) { flash(err.message, true); }
+        });
+        ul.append(li);
+    }
+}
+
+document.getElementById("adlist-add").addEventListener("click", async () => {
+    const urlEl = document.getElementById("adlist-url");
+    const commentEl = document.getElementById("adlist-comment");
+    const url = urlEl.value.trim();
+    if (!url) return;
+    try {
+        const r = await send("POST", "/api/ui/blocking/adlists", { url, comment: commentEl.value.trim() });
+        urlEl.value = ""; commentEl.value = "";
+        if (r.needsApply) showApply(true);
+        load();
+    } catch (err) { flash(err.message, true); }
+});
 
 function wireAdd(kind) {
     const input = document.getElementById(`${kind}-in`);

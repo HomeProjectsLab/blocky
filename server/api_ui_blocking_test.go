@@ -64,7 +64,7 @@ var _ = Describe("Blocking UI API", func() {
 		It("returns categories with counts, segments and manual entries", func() {
 			Expect(store.SetClientSegment("kids", []string{"porn"})).Should(Succeed())
 
-			_, err := store.AddDenyEntry("manual", "bad.example.com")
+			_, err := store.AddDenyEntry("manual", "bad.example.com", "")
 			Expect(err).Should(Succeed())
 
 			rec := exec(http.MethodGet, "/api/ui/blocking", "")

@@ -358,6 +358,17 @@ dl.kv dd { margin: 0; color: var(--ink); }
     padding: 0.25rem 0; border-bottom: 1px solid var(--grid);
 }
 #allow-in, #deny-in { flex: 1; min-width: 10rem; }
+#adlist-url { flex: 2; min-width: 12rem; }
+#adlist-comment { flex: 1; min-width: 8rem; }
+.entry-list li.off { opacity: 0.5; }
+.entry-list .entry-domain { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.type-badge {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink2); border: 1px solid var(--grid);
+    border-radius: 3px; padding: 0 0.25rem;
+}
+.entry-comment { color: var(--muted); font-style: italic; cursor: pointer; }
+.entry-comment:hover { color: var(--ink2); }
 
 /* clients: fingerprint panel + transport mix */
 .spark { min-height: 120px; }

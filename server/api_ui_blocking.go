@@ -30,8 +30,13 @@ func registerBlockingUIEndpoints(router *chi.Mux, store *configstore.Store, stat
 		r.Put("/segments/{client}", b.putSegment)
 		r.Post("/allow", b.addEntry(true))
 		r.Post("/deny", b.addEntry(false))
+		r.Put("/allow/{id}", b.setEntry(true))
+		r.Put("/deny/{id}", b.setEntry(false))
 		r.Delete("/allow/{id}", b.deleteEntry(true))
 		r.Delete("/deny/{id}", b.deleteEntry(false))
+		r.Post("/adlists", b.addAdlist)
+		r.Put("/adlists/{id}", b.putAdlist)
+		r.Delete("/adlists/{id}", b.deleteAdlist)
 	})
 }
 
@@ -54,9 +59,18 @@ type blockingSegmentJSON struct {
 }
 
 type blockingEntryJSON struct {
-	ID     uint   `json:"id"`
-	Group  string `json:"group"`
-	Domain string `json:"domain"`
+	ID      uint   `json:"id"`
+	Group   string `json:"group"`
+	Domain  string `json:"domain"`
+	Enabled bool   `json:"enabled"`
+	Comment string `json:"comment"`
+}
+
+type adlistJSON struct {
+	ID      uint   `json:"id"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
+	Comment string `json:"comment"`
 }
 
 func (b *blockingAPI) get(rw http.ResponseWriter, _ *http.Request) {
@@ -116,12 +130,24 @@ func (b *blockingAPI) get(rw http.ResponseWriter, _ *http.Request) {
 
 	allowJSON := make([]blockingEntryJSON, 0, len(allows))
 	for _, e := range allows {
-		allowJSON = append(allowJSON, blockingEntryJSON{ID: e.ID, Group: e.GroupName, Domain: e.Domain})
+		allowJSON = append(allowJSON, blockingEntryJSON{ID: e.ID, Group: e.GroupName, Domain: e.Domain, Enabled: e.Enabled, Comment: e.Comment})
 	}
 
 	denyJSON := make([]blockingEntryJSON, 0, len(denies))
 	for _, e := range denies {
-		denyJSON = append(denyJSON, blockingEntryJSON{ID: e.ID, Group: e.GroupName, Domain: e.Domain})
+		denyJSON = append(denyJSON, blockingEntryJSON{ID: e.ID, Group: e.GroupName, Domain: e.Domain, Enabled: e.Enabled, Comment: e.Comment})
+	}
+
+	adlists, err := b.store.ListAdlistEntries()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	adlistJSONs := make([]adlistJSON, 0, len(adlists))
+	for _, e := range adlists {
+		adlistJSONs = append(adlistJSONs, adlistJSON{ID: e.ID, URL: e.URL, Enabled: e.Enabled, Comment: e.Comment})
 	}
 
 	writeJSON(rw, http.StatusOK, map[string]any{
@@ -129,6 +155,7 @@ func (b *blockingAPI) get(rw http.ResponseWriter, _ *http.Request) {
 		"segments":   segsJSON,
 		"allow":      allowJSON,
 		"deny":       denyJSON,
+		"adlists":    adlistJSONs,
 	})
 }
 
@@ -188,8 +215,9 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 		}
 
 		var body struct {
-			Group  string `json:"group"`
-			Domain string `json:"domain"`
+			Group   string `json:"group"`
+			Domain  string `json:"domain"`
+			Comment string `json:"comment"`
 		}
 
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -220,7 +248,7 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 				continue
 			}
 
-			id, err := add(body.Group, tok)
+			id, err := add(body.Group, tok, body.Comment)
 			if err != nil {
 				skipped = append(skipped, tok)
 
@@ -240,6 +268,132 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 			"added": len(ids), "ids": ids, "skipped": skipped, "needsApply": true,
 		})
 	}
+}
+
+func (b *blockingAPI) setEntry(isAllow bool) http.HandlerFunc {
+	return func(rw http.ResponseWriter, req *http.Request) {
+		if b.storeUnavailable(rw) {
+			return
+		}
+
+		id, err := strconv.ParseUint(chi.URLParam(req, "id"), 10, 32)
+		if err != nil {
+			badRequest(rw, err)
+
+			return
+		}
+
+		var body struct {
+			Enabled bool   `json:"enabled"`
+			Comment string `json:"comment"`
+		}
+
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			badRequest(rw, err)
+
+			return
+		}
+
+		set := b.store.SetDenyEntry
+		if isAllow {
+			set = b.store.SetAllowEntry
+		}
+
+		if err := set(uint(id), body.Enabled, body.Comment); err != nil {
+			badRequest(rw, err)
+
+			return
+		}
+
+		writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
+	}
+}
+
+func (b *blockingAPI) addAdlist(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	var body struct {
+		URL     string `json:"url"`
+		Comment string `json:"comment"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	id, err := b.store.AddAdlistEntry(body.URL, body.Comment)
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"id": id, "needsApply": true})
+}
+
+func (b *blockingAPI) putAdlist(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	id, err := strconv.ParseUint(chi.URLParam(req, "id"), 10, 32)
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	// url present → edit url/comment; url absent → toggle enabled only.
+	var body struct {
+		URL     *string `json:"url"`
+		Enabled bool    `json:"enabled"`
+		Comment string  `json:"comment"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if body.URL != nil {
+		err = b.store.UpdateAdlistEntry(uint(id), *body.URL, body.Comment)
+	} else {
+		err = b.store.SetAdlistEnabled(uint(id), body.Enabled)
+	}
+
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
+}
+
+func (b *blockingAPI) deleteAdlist(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	id, err := strconv.ParseUint(chi.URLParam(req, "id"), 10, 32)
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if err := b.store.DeleteAdlistEntry(uint(id)); err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
 }
 
 func (b *blockingAPI) deleteEntry(isAllow bool) http.HandlerFunc {

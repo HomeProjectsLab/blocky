@@ -43,7 +43,7 @@ func TestSnapshotRestoreBackupRoundTrip(t *testing.T) {
 	}
 
 	// blocking overlay table: a manual denylist entry
-	if _, err := src.AddDenyEntry("manual", "ads.example.com"); err != nil {
+	if _, err := src.AddDenyEntry("manual", "ads.example.com", ""); err != nil {
 		t.Fatalf("add deny entry: %v", err)
 	}
 

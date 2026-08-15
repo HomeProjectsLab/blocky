@@ -92,10 +92,10 @@ var _ = Describe("Blocking tables", func() {
 
 	Describe("manual allow/deny entries", func() {
 		It("adds, lists and deletes entries", func() {
-			id, err := store.AddDenyEntry("", "bad.example.com")
+			id, err := store.AddDenyEntry("", "bad.example.com", "")
 			Expect(err).Should(Succeed())
 
-			id2, err := store.AddAllowEntry("manual", "good.example.com")
+			id2, err := store.AddAllowEntry("manual", "good.example.com", "")
 			Expect(err).Should(Succeed())
 
 			denies, err := store.ListDenyEntries()
@@ -113,10 +113,10 @@ var _ = Describe("Blocking tables", func() {
 		})
 
 		It("rejects garbage entries", func() {
-			_, err := store.AddDenyEntry("manual", "")
+			_, err := store.AddDenyEntry("manual", "", "")
 			Expect(err).Should(HaveOccurred())
 
-			_, err = store.AddDenyEntry("manual", "two words")
+			_, err = store.AddDenyEntry("manual", "two words", "")
 			Expect(err).Should(HaveOccurred())
 		})
 	})
@@ -125,9 +125,9 @@ var _ = Describe("Blocking tables", func() {
 		It("builds denylists and clientGroupsBlock from the tables", func() {
 			Expect(store.SetClientSegment("kids-tablet", []string{"porn"})).Should(Succeed())
 
-			_, err := store.AddDenyEntry("manual", "bad.example.com")
+			_, err := store.AddDenyEntry("manual", "bad.example.com", "")
 			Expect(err).Should(Succeed())
-			_, err = store.AddAllowEntry("manual", "good.example.com")
+			_, err = store.AddAllowEntry("manual", "good.example.com", "")
 			Expect(err).Should(Succeed())
 
 			cfg, err := store.LoadConfig()
@@ -183,7 +183,7 @@ var _ = Describe("Blocking tables", func() {
 		})
 
 		It("guards manual allow-only groups against allowlist-only mode", func() {
-			_, err := store.AddAllowEntry("manual", "good.example.com")
+			_, err := store.AddAllowEntry("manual", "good.example.com", "")
 			Expect(err).Should(Succeed())
 
 			cfg, err := store.LoadConfig()

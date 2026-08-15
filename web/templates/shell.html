@@ -237,6 +237,16 @@
         <div id="bl-segments"></div>
         <div class="ctl-row"><button id="seg-add" class="btn-sub">+ Add device profile</button></div>
     </section>
+    <section class="panel">
+        <h2>Blocklist URLs</h2>
+        <p class="empty">Subscribe to external blocklists by URL (or a local file path). Each is fetched and merged on Apply. Kept in their own group, isolated from your manual rules — editing a manual rule never re-downloads these.</p>
+        <div class="ctl-row">
+            <input id="adlist-url" type="text" placeholder="https://example.com/hosts.txt" autocomplete="off" spellcheck="false">
+            <input id="adlist-comment" type="text" placeholder="comment (optional)" autocomplete="off" spellcheck="false">
+            <button id="adlist-add">Add</button>
+        </div>
+        <ul class="entry-list" id="adlist-list"></ul>
+    </section>
     <section class="top-grid">
         <div class="panel">
             <h2>Always allow</h2>
