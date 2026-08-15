@@ -39,10 +39,16 @@ func (l Level) Color() tcell.Color {
 	}
 }
 
-// meterBar renders an htop-style gauge body of the given inner width, e.g.
-// "|||||     ". value/max is clamped to 0..1. width is the number of cells
-// between the brackets (the caller draws the "[" "]").
+// meterBar renders an htop-style ASCII gauge body, e.g. "|||||     ". Kept for
+// the legacy path and tests; new panels use meterBarWith with caps glyphs.
 func meterBar(value, max float64, width int) string {
+	return meterBarWith(value, max, width, '|', ' ')
+}
+
+// meterBarWith renders a gauge body of the given inner width using caller-chosen
+// fill/empty runes (e.g. '█'/'▁' on unicode, '█'/' ' on fbcon). value/max is
+// clamped to 0..1.
+func meterBarWith(value, max float64, width int, fill, empty rune) string {
 	if width <= 0 {
 		return ""
 	}
@@ -62,5 +68,5 @@ func meterBar(value, max float64, width int) string {
 
 	filled := int(frac*float64(width) + 0.5)
 
-	return strings.Repeat("|", filled) + strings.Repeat(" ", width-filled)
+	return strings.Repeat(string(fill), filled) + strings.Repeat(string(empty), width-filled)
 }

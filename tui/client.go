@@ -22,13 +22,46 @@ type QueryItem struct {
 	DecoySource string `json:"decoySource"`
 }
 
-// System mirrors /api/ui/system.
+// System mirrors /api/ui/system. The cpu/mem/disk fields are only present once
+// the (linux-only) usage sampler has published a snapshot; json decoding leaves
+// them zero-valued when the keys are absent, which panels treat as "no data".
 type System struct {
 	Version       string `json:"version"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	Goroutines    int    `json:"goroutines"`
 	HeapAllocRaw  uint64 `json:"heapAllocBytes"`
 	QueriesTotal  int64  `json:"queriesTotal"`
+
+	CPUPerCore   []float64 `json:"cpuPerCore"`
+	CPUTotal     float64   `json:"cpuTotal"`
+	MemUsed      uint64    `json:"memUsed"`
+	MemTotal     uint64    `json:"memTotal"`
+	DiskUsed     uint64    `json:"diskUsed"`
+	DiskTotal    uint64    `json:"diskTotal"`
+	DiskReadBps  float64   `json:"diskReadBps"`
+	DiskWriteBps float64   `json:"diskWriteBps"`
+}
+
+// Latency mirrors /api/ui/stats/latency (milliseconds).
+type Latency struct {
+	P50 float64 `json:"p50"`
+	P90 float64 `json:"p90"`
+	P95 float64 `json:"p95"`
+	P99 float64 `json:"p99"`
+}
+
+// BlockCategory is one entry of /api/ui/blocking's categories.
+type BlockCategory struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	Domains int64  `json:"domains"`
+}
+
+// Blocking mirrors the counts the dashboard renders from /api/ui/blocking.
+type Blocking struct {
+	Categories []BlockCategory   `json:"categories"`
+	Allow      []json.RawMessage `json:"allow"`
+	Deny       []json.RawMessage `json:"deny"`
 }
 
 // Overview mirrors /api/ui/stats/overview (and /noise/overview partially).
@@ -119,6 +152,45 @@ func (c *Client) Top(col string, n int) ([]TopItem, error) {
 	err := c.getJSON(fmt.Sprintf("/api/ui/stats/top?col=%s&n=%d", col, n), &out)
 
 	return out.Items, err
+}
+
+// TopMulti fetches several top-N columns in one batched request
+// (col=domain,blocked,client,transport) so the poll stays under the browser's
+// 6-connections-per-origin cap. Returns a map keyed by column name.
+func (c *Client) TopMulti(cols []string, n int) (map[string][]TopItem, error) {
+	var out struct {
+		Columns map[string][]TopItem `json:"columns"`
+	}
+	err := c.getJSON(fmt.Sprintf("/api/ui/stats/top?col=%s&n=%d", strings.Join(cols, ","), n), &out)
+
+	return out.Columns, err
+}
+
+// LatencyPct fetches resolver latency percentiles from /api/ui/stats/latency.
+func (c *Client) LatencyPct() (Latency, error) {
+	var l Latency
+	err := c.getJSON("/api/ui/stats/latency", &l)
+
+	return l, err
+}
+
+// ConfigDirty reports whether there are unapplied config changes
+// (/api/ui/config/status). A missing/errored endpoint reports not-dirty.
+func (c *Client) ConfigDirty() (bool, error) {
+	var out struct {
+		Dirty bool `json:"dirty"`
+	}
+	err := c.getJSON("/api/ui/config/status", &out)
+
+	return out.Dirty, err
+}
+
+// Blocking fetches blocklist category counts and allow/deny totals.
+func (c *Client) Blocking() (Blocking, error) {
+	var b Blocking
+	err := c.getJSON("/api/ui/blocking", &b)
+
+	return b, err
 }
 
 // Clients fetches the identified-client list from /api/ui/clients.

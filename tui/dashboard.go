@@ -3,35 +3,44 @@ package tui
 import (
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 )
 
+// timeNow is indirected so the clock can be pinned in tests.
+var timeNow = time.Now
+
 // Dashboard is the htop-style console monitor. It owns all mutable UI state
-// behind mu; background goroutines (SSE stream, 1s refresh) mutate it and poke
-// redraw, while the main Run loop owns the tcell screen.
+// behind mu; background goroutines (SSE stream, refresh) mutate it and poke
+// redraw, while the main Run loop owns the tcell screen. State is snapshotted
+// under mu and rendered lock-free.
 type Dashboard struct {
 	api     *Client
 	refresh time.Duration
 	maxRows int
+	caps    Caps
 
-	mu        sync.Mutex
-	connected bool
-	system    System
-	overview  Overview
-	decoy     DecoyOverview
-	topDom    []TopItem
-	clients   []ClientInfo
-	vitals    Vitals
-	rows      []QueryItem // newest last
-	paused    bool
+	mu          sync.Mutex
+	connected   bool
+	system      System
+	overview    Overview
+	latency     Latency
+	decoy       DecoyOverview
+	blocking    Blocking
+	configDirty bool
+	topDom      []TopItem
+	topBlocked  []TopItem
+	clients     []ClientInfo
+	vitals      Vitals
+	rows        []QueryItem // newest last
+	paused      bool
 
 	streamCount int64 // total SSE events seen (for live QPS)
 	lastCount   int64
 	qps         float64
+	qpsHist     []float64 // rolling QPS samples, oldest first
 
 	redrawCh chan struct{}
 }
@@ -74,6 +83,7 @@ func (d *Dashboard) Run() error {
 // RunOn drives an already-initialised screen (real or SimulationScreen).
 func (d *Dashboard) RunOn(screen tcell.Screen) error {
 	screen.Clear()
+	d.caps = DetectScreen(screen)
 
 	go d.streamLoop()
 	go d.refreshLoop()
@@ -112,30 +122,41 @@ func (d *Dashboard) RunOn(screen tcell.Screen) error {
 	}
 }
 
-// refreshLoop polls the JSON endpoints + local vitals every d.refresh.
+// refreshLoop polls the JSON endpoints on two tiers: the fast tier (system,
+// overview, latency, config-status) every interval, the slow tier (clients,
+// batched top-N, noise, blocklist — heavier scans) every 8th tick. SSE holds one
+// origin connection slot; the slow tier is batched to stay under the 6-conn cap.
 func (d *Dashboard) refreshLoop() {
 	tick := time.NewTicker(d.refresh)
 	defer tick.Stop()
 
-	for {
-		d.refreshOnce()
+	for i := 0; ; i++ {
+		d.refreshFast()
+
+		if i%8 == 0 {
+			d.refreshSlow()
+		}
+
 		d.poke()
 		<-tick.C
 	}
 }
 
-func (d *Dashboard) refreshOnce() {
+func (d *Dashboard) refreshFast() {
 	sys, err := d.api.System()
-
 	v := ReadVitals()
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	d.vitals = v
-	// live QPS from the SSE event delta over one refresh interval
 	d.qps = float64(d.streamCount-d.lastCount) / d.refresh.Seconds()
 	d.lastCount = d.streamCount
+
+	d.qpsHist = append(d.qpsHist, d.qps)
+	if len(d.qpsHist) > 120 {
+		d.qpsHist = d.qpsHist[len(d.qpsHist)-120:]
+	}
 
 	if err != nil {
 		d.connected = false
@@ -150,16 +171,39 @@ func (d *Dashboard) refreshOnce() {
 		d.overview = o
 	}
 
-	if n, e := d.api.NoiseOverview(); e == nil {
-		d.decoy = n
+	if l, e := d.api.LatencyPct(); e == nil {
+		d.latency = l
 	}
 
-	if t, e := d.api.Top("domain", 8); e == nil {
-		d.topDom = t
+	if dirty, e := d.api.ConfigDirty(); e == nil {
+		d.configDirty = dirty
+	}
+}
+
+func (d *Dashboard) refreshSlow() {
+	cols, _ := d.api.TopMulti([]string{"domain", "blocked"}, 12)
+	clients, _ := d.api.Clients()
+	noise, noiseErr := d.api.NoiseOverview()
+	blocking, blockErr := d.api.Blocking()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if cols != nil {
+		d.topDom = cols["domain"]
+		d.topBlocked = cols["blocked"]
 	}
 
-	if cl, e := d.api.Clients(); e == nil {
-		d.clients = cl
+	if clients != nil {
+		d.clients = clients
+	}
+
+	if noiseErr == nil {
+		d.decoy = noise
+	}
+
+	if blockErr == nil {
+		d.blocking = blocking
 	}
 }
 
@@ -184,6 +228,35 @@ func (d *Dashboard) streamLoop() {
 	}
 }
 
+// buildSnapshot copies the live state under the mutex so the draw path renders
+// lock-free from a consistent frame.
+func (d *Dashboard) buildSnapshot() *snapshot {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	host, _ := os.Hostname()
+
+	return &snapshot{
+		caps:        d.caps,
+		connected:   d.connected,
+		base:        host,
+		system:      d.system,
+		overview:    d.overview,
+		latency:     d.latency,
+		decoy:       d.decoy,
+		blocking:    d.blocking,
+		vitals:      d.vitals,
+		topDom:      d.topDom,
+		topBlocked:  d.topBlocked,
+		clients:     d.clients,
+		rows:        append([]QueryItem(nil), d.rows...),
+		qps:         d.qps,
+		qpsHist:     append([]float64(nil), d.qpsHist...),
+		configDirty: d.configDirty,
+		paused:      d.paused,
+	}
+}
+
 // ---- rendering ----
 
 func drawText(s tcell.Screen, x, y int, style tcell.Style, text string) {
@@ -197,32 +270,34 @@ func (d *Dashboard) draw(s tcell.Screen) {
 	w, h := s.Size()
 	s.Clear()
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	// Clamp to a sane floor: some terminals report 0×0 or stale dims.
+	if w < 20 {
+		w = 20
+	}
 
-	if !d.connected {
+	if h < 6 {
+		h = 6
+	}
+
+	snap := d.buildSnapshot()
+
+	if !snap.connected {
 		d.drawSplash(s, w, h)
 		s.Show()
 
 		return
 	}
 
-	base := tcell.StyleDefault
-	d.drawHeader(s, w, base)
-	d.drawMeters(s, w, base)
+	root := Rect{0, 0, w, h}
 
-	// two-column body: query stream left, side panels right
-	rightX := w - 34
-	sidePanel := rightX > 40
-
-	streamW := w
-	if sidePanel {
-		streamW = rightX - 1
-		d.drawSidePanels(s, rightX, w, h, base)
+	switch pickTier(w, h) {
+	case tierTiny:
+		d.drawTiny(s, root, snap)
+	case tierMedium:
+		d.drawMedium(s, root, snap)
+	default:
+		d.drawLarge(s, root, snap)
 	}
-
-	d.drawStream(s, streamW, h, base)
-	d.drawFooter(s, w, h, base)
 
 	s.Show()
 }
@@ -232,138 +307,103 @@ func (d *Dashboard) drawSplash(s tcell.Screen, w, h int) {
 	drawText(s, (w-len(msg))/2, h/2, tcell.StyleDefault.Foreground(tcell.ColorYellow), msg)
 }
 
-func (d *Dashboard) drawHeader(s tcell.Screen, w int, base tcell.Style) {
-	host, _ := os.Hostname()
-	up := (time.Duration(d.system.UptimeSeconds) * time.Second).String()
-	left := fmt.Sprintf(" blocky %s  up %s  %s", d.system.Version, up, host)
-	right := time.Now().Format("2006-01-02 15:04:05 ")
+// drawTiny: title · compact KPI strip (2 rows) · live ticker · footer.
+func (d *Dashboard) drawTiny(s tcell.Screen, root Rect, snap *snapshot) {
+	caps := snap.caps
 
-	title := base.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue).Bold(true)
-	for x := range w {
-		s.SetContent(x, 0, ' ', nil, title)
-	}
+	title, rest := root.Rows(1)
+	body, footer := rest.RowsBottom(1)
+	kpi, ticker := body.Rows(2)
 
-	drawText(s, 0, 0, title, left)
-	drawText(s, w-len(right), 0, title, right)
-}
+	panelTitle(s, title, snap)
 
-// drawMeter draws a labelled htop gauge: "label [|||||    ] text".
-func drawMeter(s tcell.Screen, x, y, barW int, base tcell.Style, label string, frac float64, text string) {
-	drawText(s, x, y, base, fmt.Sprintf("%-6s", label))
-	bx := x + 6
-	s.SetContent(bx, y, '[', nil, base)
+	row1 := Rect{kpi.X + 1, kpi.Y, kpi.W - 1, 1}
+	x := drawGauge(s, row1.X, row1.Y, caps, styBase, "QPS", clamp(snap.qps/50, 1), 8, fmt.Sprintf("%.0f", snap.qps))
+	x = drawGauge(s, x+2, row1.Y, caps, styBase, "BLOCK", snap.blockFrac(), 6, pct(snap.blockFrac()))
+	drawGauge(s, x+2, row1.Y, caps, styBase, "CACHE", snap.cacheFrac(), 6, pct(snap.cacheFrac()))
 
-	bar := meterBar(frac, 1, barW)
-	col := levelFor(frac).Color()
-	drawText(s, bx+1, y, base.Foreground(col), bar)
+	if kpi.H >= 2 {
+		memFrac, _ := memGauge(snap.system, snap.vitals)
+		cpu := snap.system.CPUTotal / 100
+		x = drawGauge(s, row1.X, kpi.Y+1, caps, styBase, "CPU", cpu, 8, fmt.Sprintf("%.0f%%", snap.system.CPUTotal))
+		x = drawGauge(s, x+2, kpi.Y+1, caps, styBase, "MEM", memFrac, 6, pct(memFrac))
 
-	s.SetContent(bx+1+barW, y, ']', nil, base)
-	drawText(s, bx+2+barW, y, base, " "+text)
-}
-
-func (d *Dashboard) drawMeters(s tcell.Screen, w int, base tcell.Style) {
-	barW := 20
-	if w < 60 {
-		barW = 10
-	}
-
-	o := d.overview
-	blockFrac, cacheFrac := 0.0, 0.0
-	if o.Queries > 0 {
-		blockFrac = float64(o.Blocked) / float64(o.Queries)
-		cacheFrac = float64(o.Cached) / float64(o.Queries)
-	}
-
-	// column 1: service meters
-	drawMeter(s, 1, 2, barW, base, "QPS", clamp(d.qps/50, 1), fmt.Sprintf("%.1f", d.qps))
-	drawMeter(s, 1, 3, barW, base, "Block", blockFrac, pct(blockFrac))
-	drawMeter(s, 1, 4, barW, base, "Cache", cacheFrac, pct(cacheFrac))
-
-	// column 2: Pi vitals
-	x2 := barW + 34
-	v := d.vitals
-
-	loadFrac, loadTxt := 0.0, "N/A"
-	if v.HasLoad {
-		loadFrac, loadTxt = clamp(v.Load/4, 1), fmt.Sprintf("%.2f", v.Load)
-	}
-
-	memTxt := "N/A"
-	if v.HasMem {
-		memTxt = fmt.Sprintf("%s%% of %dMB", strings.TrimSuffix(pct(v.MemUsedFrac), "%"), v.MemTotalKB/1024)
-	}
-
-	tempFrac, tempTxt := 0.0, "N/A"
-	if v.HasTemp {
-		tempFrac, tempTxt = clamp(v.TempC/85, 1), fmt.Sprintf("%.1fC", v.TempC)
-	}
-
-	drawMeter(s, x2, 2, barW, base, "Load", loadFrac, loadTxt)
-	drawMeter(s, x2, 3, barW, base, "Mem", d.vitals.MemUsedFrac, memTxt)
-	drawMeter(s, x2, 4, barW, base, "Temp", tempFrac, tempTxt)
-}
-
-func (d *Dashboard) drawStream(s tcell.Screen, w, h int, base tcell.Style) {
-	top := 6
-	hdr := base.Foreground(tcell.ColorAqua).Bold(true)
-	drawText(s, 1, top, hdr, "LIVE QUERIES  (p pause)")
-	drawText(s, 1, top+1, base.Dim(true),
-		fmt.Sprintf("%-8s %-15s %-28s %-5s %s", "TIME", "CLIENT", "DOMAIN", "TYPE", "RESULT"))
-
-	avail := h - (top + 2) - 1 // leave footer line
-	if avail < 1 {
-		return
-	}
-
-	start := 0
-	if len(d.rows) > avail {
-		start = len(d.rows) - avail
-	}
-
-	y := top + 2
-	for _, q := range d.rows[start:] {
-		style := base
-		result := q.Rtype
-
-		switch {
-		case q.Decoy:
-			style = base.Dim(true).Foreground(tcell.ColorGray)
-			src := q.DecoySource
-			if src == "" {
-				src = "decoy"
-			}
-
-			result = "~" + src
-		case q.Rtype == "BLOCKED":
-			style = base.Foreground(tcell.ColorRed)
-		case q.Rtype == "CACHED":
-			style = base.Foreground(tcell.ColorTeal)
-		default:
-			style = base.Foreground(tcell.ColorGreen)
+		if snap.vitals.HasTemp {
+			drawGauge(s, x+2, kpi.Y+1, caps, styBase, "TEMP", clamp(snap.vitals.TempC/85, 1), 5, fmt.Sprintf("%.0fC", snap.vitals.TempC))
 		}
-
-		line := fmt.Sprintf("%-8s %-15s %-28s %-5s %s",
-			hhmmss(q.TS), trunc(q.Client, 15), trunc(q.Question, 28), trunc(q.Qtype, 5), trunc(result, 12))
-		drawText(s, 1, y, style, trunc(line, w-2))
-		y++
 	}
+
+	panelTicker(s, ticker, caps, snap)
+	panelFooter(s, footer, snap)
 }
 
-func (d *Dashboard) drawSidePanels(s tcell.Screen, x, w, h int, base tcell.Style) {
-	hdr := base.Foreground(tcell.ColorAqua).Bold(true)
-	half := (h - 8) / 2
+// drawMedium: title · system band · two-column body · footer.
+func (d *Dashboard) drawMedium(s tcell.Screen, root Rect, snap *snapshot) {
+	caps := snap.caps
 
-	drawText(s, x, 6, hdr, "TOP DOMAINS")
-	drawTop(s, x, 7, half-1, base, d.topDom, w-x-1)
+	title, rest := root.Rows(1)
+	sys, rest := rest.Rows(2)
+	body, footer := rest.RowsBottom(1)
 
-	cy := 7 + half
-	drawText(s, x, cy, hdr, "CLIENTS")
-	drawClients(s, x, cy+1, h-2, base, d.clients, w-x-1)
+	cols := body.SplitH(3, 2)
+	left, right := cols[0], cols[1]
+
+	leftMeters, ticker := left.Rows(3)
+
+	panelTitle(s, title, snap)
+	panelSystem(s, sys, caps, snap)
+
+	// left meter strip
+	x := drawGauge(s, leftMeters.X+1, leftMeters.Y, caps, styBase, "QPS", clamp(snap.qps/50, 1), 10, fmt.Sprintf("%.0f q/s", snap.qps))
+	_ = x
+	drawGauge(s, leftMeters.X+1, leftMeters.Y+1, caps, styBase, "BLOCK", snap.blockFrac(), 12, pct(snap.blockFrac()))
+	drawGauge(s, leftMeters.X+1, leftMeters.Y+2, caps, styBase, "CACHE", snap.cacheFrac(), 12, pct(snap.cacheFrac()))
+
+	panelTicker(s, ticker, caps, snap)
+
+	rParts := right.SplitV(2, 2, 1)
+	panelTopList(s, rParts[0], caps, "TOP DOMAINS", snap.topDom)
+	panelClients(s, rParts[1], caps, snap)
+	panelDecoy(s, rParts[2], caps, snap)
+
+	panelFooter(s, footer, snap)
 }
 
-// drawClients renders the identified-client list: one head line per client
-// (hostname  queries/blocked  [NAT xN]) plus a dim sub-line (ip · guess) when
-// there is room and info to show. Stops at maxY, leaving the footer clear.
+// drawLarge: full HDMI grid, every cell used.
+func (d *Dashboard) drawLarge(s tcell.Screen, root Rect, snap *snapshot) {
+	caps := snap.caps
+
+	title, rest := root.Rows(1)
+	sys, rest := rest.Rows(3)
+	rest, footer := rest.RowsBottom(1)
+	rest, lower := rest.RowsBottom(4)
+
+	parts := rest.SplitV(2, 3)
+	upper, ticker := parts[0], parts[1]
+
+	cols := upper.SplitH(6, 3, 5, 6)
+	leftCol := cols[0].SplitV(1, 1)
+	topCol := cols[2].SplitV(1, 1)
+
+	panelTitle(s, title, snap)
+	panelSystem(s, sys, caps, snap)
+
+	panelQPS(s, leftCol[0], caps, snap)
+	panelCache(s, leftCol[1], caps, snap)
+	panelBlocked(s, cols[1], caps, snap)
+	panelTopList(s, topCol[0], caps, "TOP DOMAINS", snap.topDom)
+	panelTopList(s, topCol[1], caps, "TOP BLOCKED", snap.topBlocked)
+	panelClients(s, cols[3], caps, snap)
+
+	panelTicker(s, ticker, caps, snap)
+
+	lo := lower.SplitH(1, 2)
+	panelDecoy(s, lo[0], caps, snap)
+	panelBlocklist(s, lo[1], caps, snap)
+
+	panelFooter(s, footer, snap)
+}
+
 func drawClients(s tcell.Screen, x, y, maxY int, base tcell.Style, clients []ClientInfo, width int) {
 	dim := base.Dim(true)
 
@@ -414,29 +454,6 @@ func drawTop(s tcell.Screen, x, y, rows int, base tcell.Style, items []TopItem, 
 	}
 }
 
-func (d *Dashboard) drawFooter(s tcell.Screen, w, h int, base tcell.Style) {
-	decoyTotal := int64(0)
-	for _, c := range d.decoy.BySource {
-		decoyTotal += c
-	}
-
-	foot := base.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue)
-	for x := range w {
-		s.SetContent(x, h-1, ' ', nil, foot)
-	}
-
-	pauseLbl := ""
-	if d.paused {
-		pauseLbl = " [PAUSED]"
-	}
-
-	left := " q quit  p pause" + pauseLbl
-	right := fmt.Sprintf("queries %d  blocked %d  decoys %d ",
-		d.overview.Queries, d.overview.Blocked, decoyTotal)
-	drawText(s, 0, h-1, foot, left)
-	drawText(s, w-len(right), h-1, foot, right)
-}
-
 // ---- small helpers ----
 
 func clamp(f, max float64) float64 {
@@ -449,16 +466,25 @@ func clamp(f, max float64) float64 {
 
 func pct(f float64) string { return fmt.Sprintf("%.0f%%", f*100) }
 
+// trunc clips s to at most n columns. It counts by RUNES, not bytes, and slices
+// on a rune boundary — the rendered glyphs (block-font banners, box glyphs,
+// ASCII/punycode names) are all width-1, so a byte-slice would cut a multi-byte
+// glyph mid-sequence and emit U+FFFD (the artifact this replaced).
 func trunc(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
 
-	if len(s) <= n {
-		return s
+	runes := 0
+	for i := range s {
+		if runes == n {
+			return s[:i]
+		}
+
+		runes++
 	}
 
-	return s[:n]
+	return s
 }
 
 // hhmmss extracts HH:MM:SS from an RFC3339 timestamp, falling back to the raw
