@@ -20,6 +20,35 @@ queryLog:
 privacy:
   decoy:
     enable: true            # the appliance runs the noise machine
+    # NOTE: the import stores Go zero-values for omitted fields instead of the
+    # struct defaults, so every knob the noise machine needs must be set here
+    # explicitly — otherwise the whole structural layer (cohorts, sessions,
+    # companions, persona cover) silently seeds OFF. Values mirror the code
+    # defaults in config/privacy.go.
+    #
+    # Structural emission — shape the sequence/texture of decoys after real browsing:
+    cohortPct: 55           # replay whole recorded page-load cohorts (real timing/texture)
+    sessionCoherence: true  # walk plausible session chains, not IID domain picks
+    stepPct: 70
+    revisitCadence: true    # re-emit on learned revisit intervals, not flat-random
+    companionPct: 40        # a real query triggers a browse-style companion cluster
+    clusterPct: 20
+    # Persona-compensating cover — total egress tracks a household diurnal curve:
+    personaCover: true
+    personaAttribution: true
+    # Per-query realism / transport & failure diversity:
+    diurnalShaping: true
+    replayMutate: true
+    fingerprintMatch: true
+    splitUpstream: true
+    reactiveVolume: true
+    adaptiveBackoff: true
+    shadowTTL: true
+    dualStackPct: 55
+    missChaffPct: 15
+    chatterPct: 15
+    failChaffPct: 8
+    tcpPct: 10
 lists:
   updater:
     enable: true
