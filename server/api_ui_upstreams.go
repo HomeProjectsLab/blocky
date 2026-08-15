@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
@@ -183,4 +184,68 @@ func (u *uiAPI) putUpstreamEntries(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(rw, http.StatusOK, map[string]any{"swapped": true})
+}
+
+func (u *uiAPI) getConditional(rw http.ResponseWriter, _ *http.Request) {
+	if u.storeUnavailable(rw) {
+		return
+	}
+
+	mapping, err := u.store.GetConditional()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"mapping": mapping})
+}
+
+func (u *uiAPI) putConditional(rw http.ResponseWriter, req *http.Request) {
+	if u.storeUnavailable(rw) {
+		return
+	}
+
+	var body struct {
+		Domain    string   `json:"domain"`
+		Upstreams []string `json:"upstreams"` // absent/empty = delete the mapping
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	domain := strings.TrimSpace(body.Domain)
+	if domain == "" {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "domain is required"})
+
+		return
+	}
+
+	var up []string
+
+	for _, s := range body.Upstreams {
+		if t := strings.TrimSpace(s); t != "" {
+			up = append(up, t)
+		}
+	}
+
+	var err error
+	if len(up) == 0 {
+		err = u.store.DeleteConditionalMapping(domain)
+	} else {
+		err = u.store.SetConditionalMapping(domain, up)
+	}
+
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	u.store.RequestApply()
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
 }

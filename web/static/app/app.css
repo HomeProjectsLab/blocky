@@ -1,30 +1,28 @@
 /* ============================================================
-   blocky* — operations-room theme (dark, single committed mode)
-   Palette (validated: dataviz validate_palette.js, dark mode,
-   surface #131a22 — all checks PASS):
-     --bg0      #0b1016  page plane
-     --bg1      #131a22  panel surface (chart surface)
-     --bg2      #1b242e  raised / hover
-     --grid     #232e3a  hairline grid
-     --ink      #dde6ee  primary ink
-     --ink2     #8fa1b3  secondary ink
-     --muted    #5c6b7a  muted / axis
+   blocky* — operations-room theme (dark + light, togglable)
+   Bare :root is the LIGHT palette. Dark overrides live under both
+   prefers-color-scheme (system default) and [data-theme="dark"]
+   (explicit toggle), so the toggle wins in either direction.
+   The --c-* status hues are IDENTICAL across themes (shared here).
+   Light palette (page plane / surface / raised / grid / inks):
+     --bg0 #f4f6f8  --bg1 #ffffff  --bg2 #e6ebf0  --grid #d3dae1
+     --ink #16202b  --ink2 #48586a  --muted #64727f  --accent #2f6fd0
+   Dark palette:
+     --bg0 #0b1016  --bg1 #131a22  --bg2 #1b242e  --grid #232e3a
+     --ink #dde6ee  --ink2 #8fa1b3  --muted #5c6b7a  --accent #3987e5
    Status colors (structure encodes meaning — fixed everywhere):
-     resolved   #3987e5  calm blue
-     cached     #199e70  calm aqua
-     blocked    #c98500  attention amber
-     error      #e66767  serious red
-     other      #9085e9  violet
+     resolved #3987e5  cached #199e70  blocked #c98500
+     error #e66767  other #9085e9
    ============================================================ */
 :root {
-    --bg0: #0b1016;
-    --bg1: #131a22;
-    --bg2: #1b242e;
-    --grid: #232e3a;
-    --ink: #dde6ee;
-    --ink2: #8fa1b3;
-    --muted: #5c6b7a;
-    --accent: #3987e5;
+    --bg0: #f4f6f8;
+    --bg1: #ffffff;
+    --bg2: #e6ebf0;
+    --grid: #d3dae1;
+    --ink: #16202b;
+    --ink2: #48586a;
+    --muted: #64727f;
+    --accent: #2f6fd0;
 
     --c-resolved: #3987e5;
     --c-cached: #199e70;
@@ -35,6 +33,29 @@
     --font-body: -apple-system, "Segoe UI", "Inter", Roboto, "Helvetica Neue", sans-serif;
     --font-display: "Futura", "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
     --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg0: #0b1016;
+        --bg1: #131a22;
+        --bg2: #1b242e;
+        --grid: #232e3a;
+        --ink: #dde6ee;
+        --ink2: #8fa1b3;
+        --muted: #5c6b7a;
+        --accent: #3987e5;
+    }
+}
+:root[data-theme="dark"] {
+    --bg0: #0b1016;
+    --bg1: #131a22;
+    --bg2: #1b242e;
+    --grid: #232e3a;
+    --ink: #dde6ee;
+    --ink2: #8fa1b3;
+    --muted: #5c6b7a;
+    --accent: #3987e5;
 }
 
 * { box-sizing: border-box; }

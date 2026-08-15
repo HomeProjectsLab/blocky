@@ -6,6 +6,7 @@
     <title>{{.Title}} · blocky*</title>
     <link rel="stylesheet" href="/static/vendor/uplot.min.css">
     <link rel="stylesheet" href="/static/app/app.css">
+    <script>document.documentElement.dataset.theme = localStorage.theme || "";</script>
 </head>
 <body data-page="{{.Page}}">
 {{if eq .Page "login"}}
@@ -39,6 +40,7 @@
             <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
             <a href="/system" {{if eq .Page "system"}}aria-current="page"{{end}}>System</a>
         </nav>
+        <button class="logout-btn" id="theme-btn" title="Toggle dark / light theme" aria-label="Toggle theme">◐</button>
         <button class="logout-btn" id="logout-btn" title="Sign out">Sign out</button>
     </div>
     <div class="sysbar" id="sysbar" hidden></div>

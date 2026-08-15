@@ -13,6 +13,18 @@ if (logoutBtn) {
     });
 }
 
+// ---- theme toggle: flip data-theme, persist; no-flash init is in shell <head> ----
+const themeBtn = document.getElementById("theme-btn");
+if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+        const root = document.documentElement;
+        const dark = root.dataset.theme
+            ? root.dataset.theme === "dark"
+            : matchMedia("(prefers-color-scheme: dark)").matches;
+        root.dataset.theme = localStorage.theme = dark ? "light" : "dark";
+    });
+}
+
 const pageModules = {
     dashboard: "./dashboard.js",
     live: "./live.js",

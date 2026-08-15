@@ -141,6 +141,81 @@ applyBtn.addEventListener("click", async () => {
     catch (err) { flash(err.message, true); }
 });
 
+// ── Conditional forwarding ────────────────────────────────────────────────
+// conditional.mapping.<domain> = <resolver(s)>. Own panel, own PUT endpoint.
+const condEl = el("div");
+groupsEl.after(condEl);
+
+function condRow(domain, upstreams) {
+    const row = el("div", { class: "entry-row" });
+    const label = el("span", { class: "group-name", text: domain });
+    const value = el("span", { class: "strat-desc", text: upstreams.join(", ") });
+    const edit = el("button", { type: "button", class: "btn-icon", title: "edit", text: "✎" });
+    const rm = el("button", { type: "button", class: "btn-icon", title: "remove", text: "✕" });
+    edit.addEventListener("click", () => putCond(domain, upstreams.join(", ")));
+    rm.addEventListener("click", async () => {
+        if (!(await confirmDialog(`Remove conditional mapping for "${domain}"?`, { danger: true }))) return;
+        await sendCond({ domain, upstreams: [] });
+    });
+    row.append(label, el("span", { class: "spacer" }), value, edit, rm);
+    return row;
+}
+
+async function sendCond(body) {
+    try {
+        const r = await send("PUT", "/api/ui/upstreams/conditional", body);
+        if (r.needsApply) showApply(true);
+        loadCond();
+    } catch (err) { flash(err.message, true); }
+}
+
+async function putCond(domain, currentUpstreams) {
+    const dom = domain ?? (await promptDialog("Domain to forward (e.g. fritz.box, home)", {}))?.trim();
+    if (!dom) return;
+    const val = await promptDialog(`Resolver(s) for "${dom}", comma-separated`, { value: currentUpstreams || "" });
+    if (val == null) return;
+    const upstreams = val.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!upstreams.length) { flash("Enter at least one resolver (or delete the mapping).", true); return; }
+    await sendCond({ domain: dom, upstreams });
+}
+
+async function loadCond() {
+    condEl.textContent = "";
+    let data;
+    try { data = await getJSON("/api/ui/upstreams/conditional"); }
+    catch (err) { flash(`Could not load conditional forwarding: ${err.message}`, true); return; }
+    const mapping = data.mapping || {};
+    const panel = el("section", { class: "panel" });
+    panel.append(el("h2", { text: "Conditional forwarding", class: "sub-h" }));
+    const domains = Object.keys(mapping).sort();
+    if (!domains.length) {
+        panel.append(el("p", { class: "empty", text: "No conditional mappings — queries for a matching domain go to a specific resolver instead of the normal upstreams." }));
+    } else {
+        for (const d of domains) panel.append(condRow(d, mapping[d]));
+    }
+    const add = el("button", { type: "button", class: "btn-sub", text: "+ Add mapping" });
+    add.addEventListener("click", () => putCond());
+    const router = el("button", { type: "button", class: "btn-sub", text: "Send reverse-DNS + local names to my router" });
+    router.addEventListener("click", routerHelper);
+    panel.append(el("div", { class: "ctl-row" }, add, router));
+    condEl.append(panel);
+}
+
+// One click: point in-addr.arpa, ip6.arpa and a local domain at the router's
+// resolver, so reverse lookups and bare LAN hostnames resolve.
+async function routerHelper() {
+    const ip = (await promptDialog("Router IP (its DNS resolver)", { value: "192.168.1.1" }))?.trim();
+    if (!ip) return;
+    const local = (await promptDialog("Local domain for LAN hostnames", { value: "fritz.box" }))?.trim();
+    if (!local) return;
+    for (const dom of ["in-addr.arpa", "ip6.arpa", local]) {
+        await sendCond({ domain: dom, upstreams: [ip] });
+    }
+    flash(`Reverse DNS + "${local}" now forward to ${ip}.`);
+}
+
+loadCond();
+
 document.getElementById("add-group-btn").addEventListener("click", async () => {
     const name = await promptDialog("New group name (client IP, CIDR or name)", {});
     if (!name) return;

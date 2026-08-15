@@ -32,6 +32,8 @@ func registerConfigUIEndpoints(router *chi.Mux, store *configstore.Store, swappe
 		r.Put("/groups/{name}", u.putUpstreamGroup)
 		r.Delete("/groups/{name}", u.deleteUpstreamGroup)
 		r.Put("/groups/{name}/entries", u.putUpstreamEntries)
+		r.Get("/conditional", u.getConditional)
+		r.Put("/conditional", u.putConditional)
 	})
 }
 
