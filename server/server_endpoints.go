@@ -213,7 +213,14 @@ func createHTTPRouter(
 ) (*chi.Mux, io.Closer) {
 	router := chi.NewRouter()
 
+	// Gate the web UI before any route is registered so it wraps them all
+	// (chi applies Use-middleware to routes added after it). Runs after the
+	// mux-level CORS/secure-headers in withCommonMiddleware.
+	router.Use(newSessionGate(store, cfg.Ports.DOHPath))
+
 	api.RegisterOpenAPIEndpoints(router, openAPIImpl)
+
+	registerAuthEndpoints(router, store)
 
 	registerConfigUIEndpoints(router, store, swapper)
 
@@ -313,6 +320,7 @@ var uiPages = []struct {
 	{"/privacy", "privacy", "Privacy"},
 	{"/settings", "settings", "Settings"},
 	{"/system", "system", "System"},
+	{"/login", "login", "Sign in"},
 }
 
 func configureRootHandler(router *chi.Mux) {

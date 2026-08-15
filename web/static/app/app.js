@@ -1,8 +1,17 @@
 // app.js — shell boot: ticker, footer, page module dispatch.
-import { getJSON, onQuery } from "./api.js";
+import { getJSON, onQuery, send } from "./api.js";
 import { fmtClock, fmtUptime, band } from "./format.js";
 
 const page = document.body.dataset.page;
+
+// ---- sign out ----
+const logoutBtn = document.getElementById("logout-btn");
+if (logoutBtn) {
+    logoutBtn.addEventListener("click", async () => {
+        try { await send("POST", "/api/ui/auth/logout"); } catch { /* ignore */ }
+        location = "/login";
+    });
+}
 
 const pageModules = {
     dashboard: "./dashboard.js",
@@ -16,6 +25,7 @@ const pageModules = {
     privacy: "./privacy.js",
     settings: "./settings.js",
     system: "./system.js",
+    login: "./login.js",
 };
 
 if (pageModules[page]) {

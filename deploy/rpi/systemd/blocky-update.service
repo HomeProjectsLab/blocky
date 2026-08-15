@@ -13,4 +13,8 @@ Type=oneshot
 # daemon. `up -d` recreates the container only when the pulled image changed.
 ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml pull --quiet blocky
 ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml up -d blocky
+# Refresh the native binary (tty1 dashboard) from the freshly pulled image;
+# runs before the prune so the image is still present. ExecStartPost runs in
+# declaration order: pull → up → refresh → prune.
+ExecStartPost=/opt/blocky/refresh-native-binary.sh
 ExecStartPost=-/usr/bin/docker image prune -f

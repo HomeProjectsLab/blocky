@@ -446,3 +446,32 @@ select.cc-override { font-size: 12px; padding: 0.15rem 0.3rem; }
     dl.kv { grid-template-columns: 1fr; gap: 0.1rem 0; }
     dl.kv dd { margin-bottom: 0.4rem; }
 }
+
+/* ---------- sign out control ---------- */
+.logout-btn { margin-left: auto; color: var(--ink2); }
+.logout-btn:hover { color: var(--ink); border-color: var(--muted); }
+
+/* ---------- login / setup card ---------- */
+.auth-main {
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 1.5rem; background: var(--bg0);
+}
+.auth-card {
+    width: 100%; max-width: 22rem;
+    display: flex; flex-direction: column; gap: 1rem;
+    padding: 1.75rem;
+    background: var(--bg1); border: 1px solid var(--grid); border-radius: 8px;
+}
+.auth-card .wordmark { font-size: 1.4rem; }
+.auth-card h1 {
+    font-family: var(--font-display); font-size: 1.15rem; font-weight: 700;
+    color: var(--ink); margin: 0;
+}
+.auth-card form { display: flex; flex-direction: column; gap: 0.75rem; }
+.auth-card input { padding: 0.5rem 0.7rem; }
+.auth-card button { padding: 0.5rem 0.7rem; background: var(--accent); border-color: var(--accent); color: #fff; }
+.auth-card button:hover { filter: brightness(1.1); }
+.auth-card button:disabled { opacity: 0.6; cursor: default; }
+.auth-hint { color: var(--muted); font-size: 12px; margin: 0; }
+.auth-err { color: var(--c-error); font-size: 12px; margin: 0; }

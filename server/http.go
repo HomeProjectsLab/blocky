@@ -78,10 +78,13 @@ type httpMiddleware = func(http.Handler) http.Handler
 
 func secureHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// These need no TLS — set them on every response so the UI is
+		// clickjacking/sniffing-protected over plain HTTP too.
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
 		if r.TLS != nil {
 			w.Header().Set("Strict-Transport-Security", "max-age=63072000")
-			w.Header().Set("X-Frame-Options", "DENY")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("x-xss-protection", "1; mode=block")
 		}
 

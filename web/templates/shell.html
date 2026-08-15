@@ -8,6 +8,21 @@
     <link rel="stylesheet" href="/static/app/app.css">
 </head>
 <body data-page="{{.Page}}">
+{{if eq .Page "login"}}
+<main class="auth-main">
+    <div class="auth-card">
+        <a class="wordmark" href="/">blocky<span class="wordmark-star">*</span></a>
+        <h1 id="auth-title">Sign in</h1>
+        <form id="auth-form" autocomplete="on">
+            <input type="password" id="auth-pw" autocomplete="current-password" placeholder="Password" required>
+            <p class="auth-hint" id="auth-hint" hidden>Choose a password to protect this dashboard (at least 8 characters).</p>
+            <p class="auth-err" id="auth-err" role="alert" hidden></p>
+            <button type="submit" id="auth-submit">Sign in</button>
+        </form>
+    </div>
+</main>
+<script type="module" src="/static/app/login.js"></script>
+{{else}}
 <header class="shell-header">
     <div class="shell-bar">
         <a class="wordmark" href="/">blocky<span class="wordmark-star">*</span></a>
@@ -24,6 +39,7 @@
             <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
             <a href="/system" {{if eq .Page "system"}}aria-current="page"{{end}}>System</a>
         </nav>
+        <button class="logout-btn" id="logout-btn" title="Sign out">Sign out</button>
     </div>
     <div class="sysbar" id="sysbar" hidden></div>
     <div class="ticker" id="ticker" aria-live="off">
@@ -334,5 +350,6 @@
 
 <script src="/static/vendor/uplot.iife.min.js"></script>
 <script type="module" src="/static/app/app.js"></script>
+{{end}}
 </body>
 </html>

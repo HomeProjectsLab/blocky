@@ -97,7 +97,7 @@ func Open(dir string) (*Store, error) {
 	// single local file: serialize through one connection (see querylog writer)
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&configBlob{}, &UpstreamGroup{}, &UpstreamEntry{},
+	if err := db.AutoMigrate(&configBlob{}, &authSettings{}, &UpstreamGroup{}, &UpstreamEntry{},
 		&BlockingCategory{}, &BlockingClientSegment{}, &AllowlistEntry{}, &DenylistEntry{}); err != nil {
 		return nil, fmt.Errorf("can't migrate config database schema: %w", err)
 	}

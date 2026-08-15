@@ -41,6 +41,13 @@ var _ = Describe("Web UI shell", func() {
 				Expect(res.StatusCode).Should(Equal(http.StatusOK))
 				Expect(res.Header.Get("Content-Type")).Should(ContainSubstring("text/html"))
 				Expect(body).Should(ContainSubstring(`data-page="` + p.Page + `"`))
+
+				if p.Page == "login" {
+					// The auth gate is a distinct layout: no nav, no page container.
+					Expect(body).Should(ContainSubstring(`id="auth-form"`))
+					return
+				}
+
 				Expect(body).Should(ContainSubstring(`id="page-` + p.Page + `"`))
 				Expect(body).Should(ContainSubstring("<nav"))
 			})

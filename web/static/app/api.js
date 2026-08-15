@@ -1,5 +1,12 @@
 // api.js — fetch + shared EventSource helpers.
 
+// guard bounces to the login page on a 401 (session gate rejected us) and
+// returns the response otherwise so callers can chain.
+export function guard(res) {
+    if (res.status === 401) location = "/login";
+    return res;
+}
+
 export async function getJSON(path, params) {
     const url = new URL(path, window.location.origin);
     if (params) {
@@ -7,7 +14,7 @@ export async function getJSON(path, params) {
             if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
         }
     }
-    const res = await fetch(url);
+    const res = guard(await fetch(url));
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
     return res.json();
 }

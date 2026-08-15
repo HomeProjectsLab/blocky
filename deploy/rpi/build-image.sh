@@ -146,6 +146,7 @@ ln -sf ../blocky-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.targ
 
 # Auto-update (replaces the abandoned Watchtower container): a host systemd
 # timer pulls the latest image and recreates blocky if it changed.
+install -Dm755 "$HERE/refresh-native-binary.sh" "$ROOT_MNT/opt/blocky/refresh-native-binary.sh"
 install -Dm644 "$HERE/systemd/blocky-update.service" "$ROOT_MNT/etc/systemd/system/blocky-update.service"
 install -Dm644 "$HERE/systemd/blocky-update.timer"   "$ROOT_MNT/etc/systemd/system/blocky-update.timer"
 install -d "$ROOT_MNT/etc/systemd/system/timers.target.wants"
