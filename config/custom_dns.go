@@ -21,6 +21,11 @@ type CustomDNS struct {
 	Zone ZoneFileDNS `default:"" yaml:"zone"`
 	// If true, queries for types not defined for a domain return empty; if false, they are forwarded upstream.
 	FilterUnmappedTypes bool `default:"true" yaml:"filterUnmappedTypes"`
+	// Domains answered with NXDOMAIN (name error) instead of a record. Exact match
+	// only. Use for signals that require a real NXDOMAIN rather than a 0.0.0.0 block
+	// — e.g. Firefox's use-application-dns.net canary, which disables DoH only on
+	// NXDOMAIN. Matched before the zone/mapping.
+	NXDomains []string `yaml:"nxdomain"`
 }
 
 type (

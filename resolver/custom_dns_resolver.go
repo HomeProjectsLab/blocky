@@ -38,6 +38,7 @@ type CustomDNSResolver struct {
 	createAnswerFromQuestion createAnswerFunc
 	mapping                  config.CustomDNSMapping
 	reverseAddresses         map[string][]string
+	nxDomains                map[string]struct{} // exact-match domains answered with NXDOMAIN
 }
 
 // NewCustomDNSResolver creates new resolver instance
@@ -69,6 +70,13 @@ func NewCustomDNSResolver(cfg config.CustomDNS) *CustomDNSResolver {
 		}
 	}
 
+	nxDomains := make(map[string]struct{}, len(cfg.NXDomains))
+	for _, d := range cfg.NXDomains {
+		if d = util.ExtractDomainOnly(strings.TrimSpace(d)); d != "" {
+			nxDomains[d] = struct{}{}
+		}
+	}
+
 	return &CustomDNSResolver{
 		configurable: withConfig(&cfg),
 		typed:        withType("custom_dns"),
@@ -76,6 +84,7 @@ func NewCustomDNSResolver(cfg config.CustomDNS) *CustomDNSResolver {
 		createAnswerFromQuestion: util.CreateAnswerFromQuestion,
 		mapping:                  dnsRecords,
 		reverseAddresses:         reverse,
+		nxDomains:                nxDomains,
 	}
 }
 
@@ -155,6 +164,18 @@ func (r *CustomDNSResolver) processRequest(
 	question := request.Req.Question[0]
 	domain := util.ExtractDomain(question)
 	var answers []dns.RR
+
+	// Exact-match NXDOMAIN entries win before any zone/mapping lookup: reply with a
+	// real name error (+ SOA per RFC 2308), not a record. Needed for signals like
+	// Firefox's use-application-dns.net canary that only trip on NXDOMAIN.
+	if _, ok := r.nxDomains[domain]; ok {
+		logger.WithField(logFieldDomain, util.Obfuscate(domain)).Debug("returning NXDOMAIN for custom nxdomain entry")
+
+		resp := model.NewResponseWithRcode(request, dns.RcodeNameError, model.ResponseTypeCUSTOMDNS, "CUSTOM NXDOMAIN")
+		resp.Res.Ns = []dns.RR{util.CreateSOAForNegativeResponse(question, r.cfg.CustomTTL.SecondsU32())}
+
+		return resp, nil
+	}
 
 	for len(domain) > 0 {
 		if err := ctx.Err(); err != nil {

@@ -76,6 +76,22 @@ var _ = Describe("CustomDNSResolver", func() {
 		sut.Next(m)
 	})
 
+	Describe("NXDOMAIN entries", func() {
+		BeforeEach(func() {
+			cfg.NXDomains = []string{"use-application-dns.net"}
+		})
+
+		It("answers a configured nxdomain with NXDOMAIN instead of a record", func() {
+			Expect(sut.Resolve(ctx, newRequest("use-application-dns.net.", A))).
+				Should(HaveReturnCode(dns.RcodeNameError))
+		})
+
+		It("does not affect domains that aren't listed", func() {
+			Expect(sut.Resolve(ctx, newRequest("custom.domain.", A))).
+				Should(HaveReturnCode(dns.RcodeSuccess))
+		})
+	})
+
 	Describe("IsEnabled", func() {
 		It("is true", func() {
 			Expect(sut.IsEnabled()).Should(BeTrue())
