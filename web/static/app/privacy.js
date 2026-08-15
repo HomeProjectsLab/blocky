@@ -42,6 +42,8 @@ const SECTIONS = [
         { field: "revisitCadence", type: "toggle", label: "Revisit cadence", help: "Re-emit visited domains on their learned revisit interval (jittered) instead of flat-random." },
         { field: "personaCover", type: "toggle", label: "Persona-compensating cover", help: "Shape TOTAL egress to a household diurnal target so an eavesdropper can't read your activity level, not just which queries are real." },
         { field: "personaAttribution", type: "toggle", label: "Persona attribution", help: "Attribute decoys to sampled real clients (their IP + fingerprint) so each client's on-wire profile stays consistent under noise." },
+        { field: "cohortJitterMs", type: "number", min: "0", label: "Cohort timing jitter (ms)", help: "± milliseconds nudged onto each replayed sub-resource's recorded offset, then re-sorted — so a replayed cohort isn't a byte-identical echo. 0 = exact 1:1 replay. The primary (main document) always leads." },
+        { field: "cohortCompanionPct", type: "number", min: "0", max: "100", label: "Cohort companion splice %", help: "Chance a cohort replay also splices in one unrelated companion domain at a random point in the load." },
     ]],
     ["deviceClass", "Device-class shaping", "Classifies each client from its DNS behaviour (IoT / workstation / server) and shapes its cover to match — IoT and servers beacon to fixed vendor telemetry, they don't browse, so browsing-shaped noise for them is itself a tell. Manage & override per-client classes on the Clients page.", [
         { field: "enable", type: "toggle", label: "Enable device-class shaping", help: "Off = every client gets the same browsing-shaped cover." },

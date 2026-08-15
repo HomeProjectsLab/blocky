@@ -171,6 +171,8 @@ type privacyJSON struct {
 		RevisitCadence     bool `json:"revisitCadence"`
 		PersonaCover       bool `json:"personaCover"`
 		PersonaAttribution bool `json:"personaAttribution"`
+		CohortJitterMs     uint `json:"cohortJitterMs"`
+		CohortCompanionPct uint `json:"cohortCompanionPct"`
 	} `json:"decoy"`
 	// DeviceClass is DecoyConfig.DeviceClass, surfaced at the top level of the wire
 	// shape so the flat privacy.js panel renderer can bind it like the other sections.
@@ -210,6 +212,8 @@ func privacyToJSON(p config.PrivacyConfig) privacyJSON {
 	j.Decoy.RevisitCadence = p.Decoy.RevisitCadence
 	j.Decoy.PersonaCover = p.Decoy.PersonaCover
 	j.Decoy.PersonaAttribution = p.Decoy.PersonaAttribution
+	j.Decoy.CohortJitterMs = p.Decoy.CohortJitterMs
+	j.Decoy.CohortCompanionPct = p.Decoy.CohortCompanionPct
 	j.DeviceClass.Enable = p.Decoy.DeviceClass.Enable
 	j.DeviceClass.VendorTelemetry = p.Decoy.DeviceClass.VendorTelemetry
 	j.DeviceClass.VendorFamilies = p.Decoy.DeviceClass.VendorFamilies
@@ -248,6 +252,8 @@ func (j privacyJSON) applyTo(p config.PrivacyConfig) config.PrivacyConfig {
 	p.Decoy.RevisitCadence = j.Decoy.RevisitCadence
 	p.Decoy.PersonaCover = j.Decoy.PersonaCover
 	p.Decoy.PersonaAttribution = j.Decoy.PersonaAttribution
+	p.Decoy.CohortJitterMs = j.Decoy.CohortJitterMs
+	p.Decoy.CohortCompanionPct = j.Decoy.CohortCompanionPct
 	p.Decoy.DeviceClass.Enable = j.DeviceClass.Enable
 	p.Decoy.DeviceClass.VendorTelemetry = j.DeviceClass.VendorTelemetry
 	p.Decoy.DeviceClass.VendorFamilies = j.DeviceClass.VendorFamilies

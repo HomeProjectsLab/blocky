@@ -33,6 +33,8 @@ privacy:
     revisitCadence: true    # re-emit on learned revisit intervals, not flat-random
     companionPct: 40        # a real query triggers a browse-style companion cluster
     clusterPct: 20
+    cohortJitterMs: 120     # break the 1:1 cohort echo: jitter sub-resource timing/order
+    cohortCompanionPct: 15  # % of cohort replays that splice in one unrelated companion
     # Persona-compensating cover — total egress tracks a household diurnal curve:
     personaCover: true
     personaAttribution: true

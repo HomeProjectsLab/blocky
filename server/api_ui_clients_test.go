@@ -181,7 +181,7 @@ var _ = Describe("Clients + privacy UI API", func() {
 			Expect(jsonBody(rec)).Should(HaveKey("decoy"))
 
 			put := exec(http.MethodPut, "/api/ui/privacy",
-				[]byte(`{"decoy":{"enable":true,"queriesPerMinute":6,"replayWeight":3,"listWeight":1,"activeHoursStart":8,"activeHoursEnd":22,"personaProfile":"enterprise","targetQpmPeak":300,"targetQpmTrough":60,"cohortPct":77,"companionPct":42,"sessionCoherence":true,"personaCover":true},"deviceClass":{"enable":true,"vendorTelemetry":true,"vendorFamilies":["apple","google"],"phantomDevicesPct":25},"ttlJitter":{"enable":true,"percent":15},"ednsPadding":{"enable":true}}`))
+				[]byte(`{"decoy":{"enable":true,"queriesPerMinute":6,"replayWeight":3,"listWeight":1,"activeHoursStart":8,"activeHoursEnd":22,"personaProfile":"enterprise","targetQpmPeak":300,"targetQpmTrough":60,"cohortPct":77,"companionPct":42,"sessionCoherence":true,"personaCover":true,"cohortJitterMs":90,"cohortCompanionPct":25},"deviceClass":{"enable":true,"vendorTelemetry":true,"vendorFamilies":["apple","google"],"phantomDevicesPct":25},"ttlJitter":{"enable":true,"percent":15},"ednsPadding":{"enable":true}}`))
 			Expect(put.Code).Should(Equal(http.StatusNoContent))
 
 			after := jsonBody(exec(http.MethodGet, "/api/ui/privacy", nil))
@@ -195,6 +195,8 @@ var _ = Describe("Clients + privacy UI API", func() {
 			Expect(decoy).Should(HaveKeyWithValue("companionPct", BeNumerically("==", 42)))
 			Expect(decoy).Should(HaveKeyWithValue("sessionCoherence", true))
 			Expect(decoy).Should(HaveKeyWithValue("personaCover", true))
+			Expect(decoy).Should(HaveKeyWithValue("cohortJitterMs", BeNumerically("==", 90)))
+			Expect(decoy).Should(HaveKeyWithValue("cohortCompanionPct", BeNumerically("==", 25)))
 			dc := after["deviceClass"].(map[string]any)
 			Expect(dc).Should(HaveKeyWithValue("vendorTelemetry", true))
 			Expect(dc).Should(HaveKeyWithValue("phantomDevicesPct", BeNumerically("==", 25)))

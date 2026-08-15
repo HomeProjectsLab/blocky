@@ -795,13 +795,8 @@ func (e *Engine) emitCohort(ctx context.Context) bool {
 // So no two replays of the same cohort are identical, while the page-load shape
 // (which domains, roughly when) stays real.
 //
-// ponytail: fixed jitter/inject constants; promote to DecoyConfig knobs if you
-// want them tunable from the UI like the other decoy percentages.
-const (
-	cohortDelayJitterMs      = 120
-	cohortCompanionInjectPct = 15
-)
-
+// Jitter magnitude and companion-splice share are DecoyConfig knobs
+// (CohortJitterMs / CohortCompanionPct); a jitter of 0 means exact 1:1 replay.
 func (e *Engine) perturbCohort(qs []decoyQuery) []decoyQuery {
 	if len(qs) <= 1 {
 		return qs // nothing to reorder, and no burst to hide a splice in
@@ -811,13 +806,15 @@ func (e *Engine) perturbCohort(qs []decoyQuery) []decoyQuery {
 
 	// jitter sub-resource offsets; index 0 is the primary (delay 0) and stays put
 	// so the main document still leads.
-	for i := 1; i < len(qs); i++ {
-		qs[i].delayMs = max(qs[i].delayMs+e.rnd.Intn(2*cohortDelayJitterMs+1)-cohortDelayJitterMs, 1)
-		maxDelay = max(maxDelay, qs[i].delayMs)
+	if j := int(e.cfg.CohortJitterMs); j > 0 {
+		for i := 1; i < len(qs); i++ {
+			qs[i].delayMs = max(qs[i].delayMs+e.rnd.Intn(2*j+1)-j, 1)
+			maxDelay = max(maxDelay, qs[i].delayMs)
+		}
 	}
 
 	// splice in one unrelated companion at a random point in the load
-	if e.rndPct(cohortCompanionInjectPct) {
+	if e.rndPct(e.cfg.CohortCompanionPct) {
 		qs = append(qs, decoyQuery{
 			name:    clusterCompanions[e.rnd.Intn(len(clusterCompanions))],
 			qtype:   e.realQtype(),

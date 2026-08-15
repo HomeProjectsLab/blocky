@@ -67,6 +67,11 @@ type DecoyConfig struct {
 	SessionCoherence bool `default:"true" yaml:"sessionCoherence"` // walk plausible session chains (NextInSession/SessionSeed) instead of IID domain picks
 	StepPct          uint `default:"70"   yaml:"stepPct"`          // within a session, % chance to advance to a topically-plausible successor vs. reseeding a fresh session
 	RevisitCadence   bool `default:"true" yaml:"revisitCadence"`   // re-emit corpus/replay domains on their learned revisit interval (jittered) instead of flat random
+	// Cohort-replay perturbation: keep the recorded texture but break the exact
+	// 1:1 echo — jitter each sub-resource offset (the re-sort turns overlapping
+	// jitter into small run-to-run reordering) and splice in a small % companion.
+	CohortJitterMs     uint `default:"120" yaml:"cohortJitterMs"`     // ± ms jitter on each recorded sub-resource's replay offset (0 = exact 1:1 replay)
+	CohortCompanionPct uint `default:"15"  yaml:"cohortCompanionPct"` // % of cohort replays that splice in one unrelated companion at a random point in the load
 
 	// Compensating persona cover (#8): TOTAL egress tracks a household diurnal
 	// target curve, so decoy_rate(t) = max(0, targetCurve(t) − recentRealQPM).
@@ -248,6 +253,10 @@ func (c *DecoyConfig) validate() error {
 
 	if c.StepPct > 100 {
 		return fmt.Errorf("privacy.decoy: stepPct (%d) must be in [0, 100]", c.StepPct)
+	}
+
+	if c.CohortCompanionPct > 100 {
+		return fmt.Errorf("privacy.decoy: cohortCompanionPct (%d) must be in [0, 100]", c.CohortCompanionPct)
 	}
 
 	if c.ChatterPct > 100 {
