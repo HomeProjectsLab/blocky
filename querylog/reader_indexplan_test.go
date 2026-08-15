@@ -102,6 +102,11 @@ func TestUIQueriesAreIndexBacked(t *testing.T) {
 		mustRun("TotalQueries", err)
 	}
 
+	// ClientList/ClientDetail run the multi-facet enrich SELECT (enrichClients/
+	// enrichClient in client_enrich.go). The added os MAX(CASE) + vendor/model/app
+	// GROUP_CONCAT(DISTINCT CASE) columns keep the same GROUP BY client_name scan
+	// and request_ts bound (no window fn), so the captured SQL below must still
+	// come back index-backed — this is the blueprint-R1 facet-enrich assertion.
 	if _, err := r.ClientList(from, to); err != nil {
 		mustRun("ClientList", err)
 	}

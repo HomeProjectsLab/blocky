@@ -125,10 +125,15 @@ func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
 // Contract:
 //
 //	GET  /api/ui/clients            -> {"clients":[{name,queries,blocked,lastSeen,
-//	                                   ips[],natAggregate,fpCount,deviceGuess}]}
+//	                                   ips[],natAggregate,fpCount,os,vendor[],model[],
+//	                                   apps[],deviceGuess,shared,sharedLabel}]}
 //	GET  /api/ui/clients/{name}     -> ClientDetail (history, transports,
-//	                                   fingerprints[], topDomains, plus ips[]/
-//	                                   natAggregate/fpCount/deviceGuess) — see querylog.Reader
+//	                                   fingerprints[], topDomains, plus the same
+//	                                   identity facets) — see querylog.Reader
+//
+// Identity facets: os is a single conf-ranked guess; vendor/model/apps are
+// med+confidence chip sets. A NAT/shared client (natAggregate) has all facets
+// blanked and carries shared=true + sharedLabel "shared / N devices" instead.
 //	GET  /api/ui/privacy            -> the privacy config block (see privacyJSON)
 //	PUT  /api/ui/privacy            -> apply a new privacy config block, 204 on success
 //

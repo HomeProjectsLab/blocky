@@ -423,9 +423,11 @@ func (r *Reader) TotalQueries() (int64, error) {
 	return count, nil
 }
 
-// ClientRow is one entry of the /api/ui/clients list response. The ips/
-// natAggregate/fpCount/deviceGuess fields are derived from the raw log_entries
-// rows (see client_enrich.go); they're optional so an unenriched row stays lean.
+// ClientRow is one entry of the /api/ui/clients list response. The enrichment
+// fields (ips / natAggregate / fpCount / os / vendor / model / apps / legacy
+// deviceGuess) are derived from the raw log_entries rows (see client_enrich.go);
+// they're optional so an unenriched row stays lean. A NAT/shared identity has
+// its facets blanked and carries shared/sharedLabel instead (blueprint R3).
 type ClientRow struct {
 	Name     string `json:"name"`
 	Queries  int64  `json:"queries"`
@@ -435,7 +437,20 @@ type ClientRow struct {
 	IPs          []string `json:"ips,omitempty"`
 	NatAggregate bool     `json:"natAggregate,omitempty"`
 	FpCount      int      `json:"fpCount,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Vendor       []string `json:"vendor,omitempty"`
+	Model        []string `json:"model,omitempty"`
+	Apps         []string `json:"apps,omitempty"`
 	DeviceGuess  string   `json:"deviceGuess,omitempty"`
+	Shared       bool     `json:"shared,omitempty"`
+	SharedLabel  string   `json:"sharedLabel,omitempty"`
+}
+
+// applyEnrich copies the derived identity fields onto a ClientRow.
+func (row *ClientRow) applyEnrich(e clientEnrich) {
+	row.IPs, row.NatAggregate, row.FpCount = e.IPs, e.NatAggregate, e.FpCount
+	row.OS, row.Vendor, row.Model, row.Apps = e.OS, e.Vendor, e.Model, e.Apps
+	row.DeviceGuess, row.Shared, row.SharedLabel = e.DeviceGuess, e.Shared, e.SharedLabel
 }
 
 // ClientList ranks clients by query count in the range (from the hourly aggregates).
@@ -470,7 +485,7 @@ func (r *Reader) ClientList(from, to time.Time) ([]ClientRow, error) {
 			LastSeen: normalizeSQLiteTime(rows[i].LastHour),
 		}
 		if e, ok := enrich[rows[i].Name]; ok {
-			row.IPs, row.NatAggregate, row.FpCount, row.DeviceGuess = e.IPs, e.NatAggregate, e.FpCount, e.DeviceGuess
+			row.applyEnrich(e)
 		}
 
 		out = append(out, row)
@@ -529,7 +544,13 @@ type ClientDetail struct {
 	IPs          []string `json:"ips,omitempty"`
 	NatAggregate bool     `json:"natAggregate,omitempty"`
 	FpCount      int      `json:"fpCount,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Vendor       []string `json:"vendor,omitempty"`
+	Model        []string `json:"model,omitempty"`
+	Apps         []string `json:"apps,omitempty"`
 	DeviceGuess  string   `json:"deviceGuess,omitempty"`
+	Shared       bool     `json:"shared,omitempty"`
+	SharedLabel  string   `json:"sharedLabel,omitempty"`
 }
 
 // ClientDetail assembles the drill-down for one client (keyed by the exact
@@ -594,7 +615,9 @@ func (r *Reader) ClientDetail(name string, from, to time.Time) (*ClientDetail, e
 		return nil, err
 	}
 
-	d.IPs, d.NatAggregate, d.FpCount, d.DeviceGuess = e.IPs, e.NatAggregate, e.FpCount, e.DeviceGuess
+	d.IPs, d.NatAggregate, d.FpCount = e.IPs, e.NatAggregate, e.FpCount
+	d.OS, d.Vendor, d.Model, d.Apps = e.OS, e.Vendor, e.Model, e.Apps
+	d.DeviceGuess, d.Shared, d.SharedLabel = e.DeviceGuess, e.Shared, e.SharedLabel
 
 	return d, nil
 }

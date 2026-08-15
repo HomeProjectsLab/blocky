@@ -169,28 +169,84 @@ var _ = Describe("client enrichment", func() {
 		})
 	})
 
-	Context("device guessing", func() {
-		It("labels a matching question suffix", func() {
+	Context("multi-facet recognition", func() {
+		It("recognises the OS from a high-confidence signature", func() {
 			ceInsert("iphone", "10.0.0.4", "1-courier.push.apple.com.", "fp-a", false, 0)
 			out, err := reader.enrichClients(ceFrom, ceTo)
 			Expect(err).Should(Succeed())
-			Expect(out["iphone"].DeviceGuess).Should(Equal("Apple device"))
+			Expect(out["iphone"].OS).Should(Equal("iOS/macOS"))
+			Expect(out["iphone"].DeviceGuess).Should(Equal("iOS/macOS")) // legacy field mirrors OS
 		})
 
-		It("leaves the guess empty when nothing matches", func() {
+		It("conf-ranks the OS: a high signature beats a med one for the same client", func() {
+			ceInsert("mac", "10.0.0.4", "swscan.apple.com.", "fp-a", false, 0)      // macOS, high
+			ceInsert("mac", "10.0.0.4", "gs-loc.apple.com.", "fp-b", false, time.Minute) // iOS, med
+			out, err := reader.enrichClients(ceFrom, ceTo)
+			Expect(err).Should(Succeed())
+			Expect(out["mac"].OS).Should(Equal("macOS")) // '9|macOS' > '5|iOS'
+		})
+
+		It("leaves all facets empty when nothing matches", func() {
 			ceInsert("mystery", "10.0.0.4", "www.plain-domain.example.", "fp-a", false, 0)
 			out, err := reader.enrichClients(ceFrom, ceTo)
 			Expect(err).Should(Succeed())
+			Expect(out["mystery"].OS).Should(BeEmpty())
+			Expect(out["mystery"].Vendor).Should(BeEmpty())
+			Expect(out["mystery"].Apps).Should(BeEmpty())
 			Expect(out["mystery"].DeviceGuess).Should(BeEmpty())
 		})
 
-		It("resolves multi-device matches by MAX(label) lexicographically", func() {
-			// Xbox and Roku both match; MAX picks "Xbox" ('X' > 'R').
+		It("collects multi-valued vendor and model chips", func() {
 			ceInsert("console", "10.0.0.4", "foo.xboxlive.com.", "fp-a", false, 0)
 			ceInsert("console", "10.0.0.4", "foo.roku.com.", "fp-b", false, time.Minute)
 			out, err := reader.enrichClients(ceFrom, ceTo)
 			Expect(err).Should(Succeed())
-			Expect(out["console"].DeviceGuess).Should(Equal("Xbox"))
+			Expect(out["console"].Vendor).Should(ConsistOf("Microsoft", "Roku"))
+			Expect(out["console"].Model).Should(ConsistOf("Xbox"))
+		})
+
+		It("collects app chips", func() {
+			ceInsert("tv", "10.0.0.4", "ipv4-c001.nflxvideo.net.", "fp-a", false, 0)
+			ceInsert("tv", "10.0.0.4", "r1.sn-x.googlevideo.com.", "fp-b", false, time.Minute)
+			out, err := reader.enrichClients(ceFrom, ceTo)
+			Expect(err).Should(Succeed())
+			Expect(out["tv"].Apps).Should(ConsistOf("Netflix", "YouTube"))
+		})
+
+		It("R4: drops conf<med rules from the chip sets (CDN pollution guard)", func() {
+			// apple.com / googleapis.com / microsoft.com are conf=low: they must
+			// NEVER auto-surface as a vendor chip even though they match.
+			ceInsert("cdnclient", "10.0.0.4", "gateway.icloud.apple.com.", "fp-a", false, 0)
+			ceInsert("cdnclient", "10.0.0.4", "www.googleapis.com.", "fp-b", false, time.Minute)
+			ceInsert("cdnclient", "10.0.0.4", "login.microsoft.com.", "fp-c", false, 2*time.Minute)
+			out, err := reader.enrichClients(ceFrom, ceTo)
+			Expect(err).Should(Succeed())
+			Expect(out["cdnclient"].Vendor).ShouldNot(ContainElement("Apple"))
+			Expect(out["cdnclient"].Vendor).ShouldNot(ContainElement("Google"))
+			Expect(out["cdnclient"].Vendor).ShouldNot(ContainElement("Microsoft"))
+			Expect(out["cdnclient"].Vendor).Should(BeEmpty())
+		})
+
+		It("R3: suppresses every facet for a NAT-aggregate client and sets the shared label", func() {
+			// 8 distinct fps trips the NAT gate; the rows also carry recognisable
+			// signatures that MUST be blanked (a shared IP's union is meaningless).
+			sigs := []string{
+				"push.apple.com.", "mtalk.google.com.", "foo.xboxlive.com.", "foo.roku.com.",
+				"ipv4.nflxvideo.net.", "discord.com.", "sonos.com.", "meethue.com.",
+			}
+			for i, q := range sigs {
+				ceInsert("router", "10.0.0.9", q, "fp-"+time.Duration(i).String(), false, time.Duration(i)*time.Minute)
+			}
+			out, err := reader.enrichClients(ceFrom, ceTo)
+			Expect(err).Should(Succeed())
+			Expect(out["router"].NatAggregate).Should(BeTrue())
+			Expect(out["router"].Shared).Should(BeTrue())
+			Expect(out["router"].SharedLabel).Should(Equal("shared / 8 devices"))
+			Expect(out["router"].OS).Should(BeEmpty())
+			Expect(out["router"].Vendor).Should(BeEmpty())
+			Expect(out["router"].Model).Should(BeEmpty())
+			Expect(out["router"].Apps).Should(BeEmpty())
+			Expect(out["router"].DeviceGuess).Should(BeEmpty())
 		})
 	})
 
@@ -241,7 +297,8 @@ var _ = Describe("client enrichment", func() {
 			e, err := reader.enrichClient("laptop", ceFrom, ceTo)
 			Expect(err).Should(Succeed())
 			Expect(e.IPs).Should(ConsistOf("10.0.0.5"))
-			Expect(e.DeviceGuess).Should(Equal("Apple device"))
+			Expect(e.OS).Should(Equal("iOS/macOS"))
+			Expect(e.DeviceGuess).Should(Equal("iOS/macOS"))
 		})
 	})
 })
