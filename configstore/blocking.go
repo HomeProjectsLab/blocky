@@ -116,11 +116,14 @@ func seedBlockingCategories(db *gorm.DB) error {
 
 // blockingRows is a full snapshot of the blocking tables.
 type blockingRows struct {
-	cats    []BlockingCategory
-	segs    []BlockingClientSegment
-	allows  []AllowlistEntry
-	denies  []DenylistEntry
-	adlists []AdlistEntry
+	cats         []BlockingCategory
+	segs         []BlockingClientSegment
+	allows       []AllowlistEntry
+	denies       []DenylistEntry
+	adlists      []AdlistEntry
+	groups       []BlockingGroup
+	groupCats    []BlockingGroupCategory
+	groupMembers []BlockingGroupMember
 }
 
 // active reports whether the tables govern blocking (category rows exist).
@@ -147,6 +150,18 @@ func (s *Store) loadBlockingRows() (*blockingRows, error) {
 
 	if err := s.db.Order("id").Find(&b.adlists).Error; err != nil {
 		return nil, fmt.Errorf("can't read adlist entries: %w", err)
+	}
+
+	if err := s.db.Order("name").Find(&b.groups).Error; err != nil {
+		return nil, fmt.Errorf("can't read blocking groups: %w", err)
+	}
+
+	if err := s.db.Order("group_name, category").Find(&b.groupCats).Error; err != nil {
+		return nil, fmt.Errorf("can't read group categories: %w", err)
+	}
+
+	if err := s.db.Order("group_name, client").Find(&b.groupMembers).Error; err != nil {
+		return nil, fmt.Errorf("can't read group members: %w", err)
 	}
 
 	return &b, nil
@@ -220,13 +235,56 @@ func overlayBlocking(cfg *config.Config, b *blockingRows) {
 		}
 	}
 
+	// household groups: an enabled group unions its assigned categories into a
+	// deny group named after it, and every member client references that group.
+	// Group-scoped manual allow/deny (shared Allow/DenylistEntry.GroupName)
+	// already populated deny[g]/allow[g] above and stay scoped to members here —
+	// so a group name is NOT a global "manual" group.
+	groupCats := map[string][]string{}
+	for _, gc := range b.groupCats {
+		groupCats[gc.Group] = append(groupCats[gc.Group], gc.Category)
+	}
+
+	membersByGroup := map[string][]string{}
+	for _, m := range b.groupMembers {
+		membersByGroup[m.Group] = append(membersByGroup[m.Group], m.Client)
+	}
+
+	isGroup := map[string]bool{}
+
+	for _, grp := range b.groups {
+		isGroup[grp.Name] = true
+
+		if !grp.Enabled {
+			continue
+		}
+
+		for _, cat := range groupCats[grp.Name] {
+			deny[grp.Name] = append(deny[grp.Name], blocklistSource(cat)...)
+		}
+
+		members := membersByGroup[grp.Name]
+		for _, client := range members {
+			cgb[client] = append(cgb[client], grp.Name)
+		}
+
+		// an enabled group with members but no sources at all (no categories, no
+		// group-scoped allow/deny) leaves deny[g] AND allow[g] nil while cgb
+		// references it → cfg.Validate rejects it. Emit an empty deny source
+		// (mirrors the allow-only guard above).
+		if len(members) > 0 && deny[grp.Name] == nil && allow[grp.Name] == nil {
+			deny[grp.Name] = []config.BytesSource{config.TextBytesSource()}
+		}
+	}
+
 	// manual (non-category) groups apply to everyone: the default group and
 	// every segmented client. Groups named after a category just extend that
-	// category's sources and follow its activation instead.
+	// category's sources and follow its activation instead. Household group
+	// names are member-scoped (handled above), never global.
 	defaults := enabled
 
 	for g := range manual {
-		if category[g] {
+		if category[g] || isGroup[g] {
 			continue
 		}
 

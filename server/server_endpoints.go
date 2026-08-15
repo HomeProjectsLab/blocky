@@ -316,6 +316,7 @@ var uiPages = []struct {
 	{"/clients", "clients", "Clients"},
 	{"/upstreams", "upstreams", "Upstreams"},
 	{"/blocking", "blocking", "Blocking"},
+	{"/groups", "groups", "Groups"},
 	{"/localdns", "localdns", "Local DNS"},
 	{"/privacy", "privacy", "Privacy"},
 	{"/settings", "settings", "Settings"},

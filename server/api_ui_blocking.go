@@ -37,6 +37,11 @@ func registerBlockingUIEndpoints(router *chi.Mux, store *configstore.Store, stat
 		r.Post("/adlists", b.addAdlist)
 		r.Put("/adlists/{id}", b.putAdlist)
 		r.Delete("/adlists/{id}", b.deleteAdlist)
+		r.Get("/groups", b.getGroups)
+		r.Put("/groups/{name}", b.putGroup)
+		r.Put("/groups/{name}/members", b.putGroupMembers)
+		r.Put("/groups/{name}/enabled", b.putGroupEnabled)
+		r.Delete("/groups/{name}", b.deleteGroup)
 	})
 }
 
@@ -388,6 +393,135 @@ func (b *blockingAPI) deleteAdlist(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := b.store.DeleteAdlistEntry(uint(id)); err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
+}
+
+type groupJSON struct {
+	Name       string   `json:"name"`
+	Enabled    bool     `json:"enabled"`
+	Categories []string `json:"categories"`
+	Members    []string `json:"members"`
+}
+
+// getGroups returns every household group plus the available category names, so
+// the groups page can render its picker from one call.
+func (b *blockingAPI) getGroups(rw http.ResponseWriter, _ *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	groups, err := b.store.ListGroups()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	cats, err := b.store.ListBlockingCategories()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	groupsJSON := make([]groupJSON, 0, len(groups))
+	for _, g := range groups {
+		groupsJSON = append(groupsJSON, groupJSON{
+			Name: g.Name, Enabled: g.Enabled, Categories: g.Categories, Members: g.Members,
+		})
+	}
+
+	catNames := make([]string, 0, len(cats))
+	for _, c := range cats {
+		catNames = append(catNames, c.Name)
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"groups": groupsJSON, "categories": catNames})
+}
+
+func (b *blockingAPI) putGroup(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	var body struct {
+		Categories []string `json:"categories"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if err := b.store.SaveGroup(chi.URLParam(req, "name"), body.Categories); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
+}
+
+func (b *blockingAPI) putGroupMembers(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	var body struct {
+		Members []string `json:"members"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if err := b.store.SetGroupMembers(chi.URLParam(req, "name"), body.Members); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
+}
+
+func (b *blockingAPI) putGroupEnabled(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	var body struct {
+		Enable bool `json:"enable"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if err := b.store.SetGroupEnabled(chi.URLParam(req, "name"), body.Enable); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"needsApply": true})
+}
+
+func (b *blockingAPI) deleteGroup(rw http.ResponseWriter, req *http.Request) {
+	if b.storeUnavailable(rw) {
+		return
+	}
+
+	if err := b.store.DeleteGroup(chi.URLParam(req, "name")); err != nil {
 		internalError(rw, err)
 
 		return

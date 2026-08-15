@@ -129,7 +129,8 @@ func openGorm(absDir string) (*gorm.DB, error) {
 
 func migrateSchema(db *gorm.DB) error {
 	if err := db.AutoMigrate(&configBlob{}, &authSettings{}, &UpstreamGroup{}, &UpstreamEntry{},
-		&BlockingCategory{}, &BlockingClientSegment{}, &AllowlistEntry{}, &DenylistEntry{}, &AdlistEntry{}); err != nil {
+		&BlockingCategory{}, &BlockingClientSegment{}, &AllowlistEntry{}, &DenylistEntry{}, &AdlistEntry{},
+		&BlockingGroup{}, &BlockingGroupCategory{}, &BlockingGroupMember{}); err != nil {
 		return fmt.Errorf("can't migrate config database schema: %w", err)
 	}
 

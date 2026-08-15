@@ -35,6 +35,7 @@
             <a href="/clients" {{if eq .Page "clients"}}aria-current="page"{{end}}>Clients</a>
             <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
             <a href="/blocking" {{if eq .Page "blocking"}}aria-current="page"{{end}}>Blocking</a>
+            <a href="/groups" {{if eq .Page "groups"}}aria-current="page"{{end}}>Groups</a>
             <a href="/localdns" {{if eq .Page "localdns"}}aria-current="page"{{end}}>Local DNS</a>
             <a href="/privacy" {{if eq .Page "privacy"}}aria-current="page"{{end}}>Privacy</a>
             <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
@@ -266,6 +267,17 @@
     <section class="top-grid">
         <div class="panel"><h2>Top blocked (24h)</h2><ol class="bar-list" id="bl-top"></ol></div>
         <div class="panel"><h2>Recent blocks by list</h2><ol class="bar-list" id="bl-bygroup"></ol><p class="empty" id="bl-bygroup-empty" hidden>No blocks recorded yet.</p></div>
+    </section>
+{{else if eq .Page "groups"}}
+    <div class="page-head">
+        <h1>Household groups</h1>
+        <button id="gr-apply" hidden>Apply changes</button>
+    </div>
+    <p class="empty" id="gr-status" hidden></p>
+    <section class="panel">
+        <p class="empty">Bundle a set of blocklist categories, then add the devices it applies to. A group only affects its members — everyone else keeps the global categories. Toggle a group off to lift it instantly (after Apply). Paste a device IP or a small CIDR (e.g. 192.168.1.50 or 192.168.1.0/24); MAC addresses are not supported.</p>
+        <div id="gr-list"></div>
+        <div class="ctl-row"><button id="gr-add" class="btn-sub">+ Add group</button></div>
     </section>
 {{else if eq .Page "clients"}}
     <div class="page-head"><h1>Clients</h1></div>
