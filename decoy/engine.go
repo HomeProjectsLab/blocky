@@ -778,9 +778,58 @@ func (e *Engine) emitCohort(ctx context.Context) bool {
 		qs = append(qs, decoyQuery{name: m.Domain, qtype: m.Qtype, source: provCohort, allowBlocked: m.Blocked, delayMs: m.DelayMs})
 	}
 
-	go e.emitBurstTimed(ctx, qs)
+	go e.emitBurstTimed(ctx, e.perturbCohort(qs))
 
 	return true
+}
+
+// Cohort-replay perturbation. A recorded cohort is faithful real texture, but
+// emitting it byte-identically every time is itself a signature. perturbCohort
+// keeps the primary leading (the main document still comes first) and:
+//   - jitters each sub-resource's recorded offset by a small ± amount, then the
+//     caller-visible re-sort turns overlapping jitters into the small run-to-run
+//     reordering that real resource scheduling already produces;
+//   - with a small probability splices in ONE unrelated companion at a random
+//     point in the load.
+//
+// So no two replays of the same cohort are identical, while the page-load shape
+// (which domains, roughly when) stays real.
+//
+// ponytail: fixed jitter/inject constants; promote to DecoyConfig knobs if you
+// want them tunable from the UI like the other decoy percentages.
+const (
+	cohortDelayJitterMs      = 120
+	cohortCompanionInjectPct = 15
+)
+
+func (e *Engine) perturbCohort(qs []decoyQuery) []decoyQuery {
+	if len(qs) <= 1 {
+		return qs // nothing to reorder, and no burst to hide a splice in
+	}
+
+	maxDelay := qs[len(qs)-1].delayMs
+
+	// jitter sub-resource offsets; index 0 is the primary (delay 0) and stays put
+	// so the main document still leads.
+	for i := 1; i < len(qs); i++ {
+		qs[i].delayMs = max(qs[i].delayMs+e.rnd.Intn(2*cohortDelayJitterMs+1)-cohortDelayJitterMs, 1)
+		maxDelay = max(maxDelay, qs[i].delayMs)
+	}
+
+	// splice in one unrelated companion at a random point in the load
+	if e.rndPct(cohortCompanionInjectPct) {
+		qs = append(qs, decoyQuery{
+			name:    clusterCompanions[e.rnd.Intn(len(clusterCompanions))],
+			qtype:   e.realQtype(),
+			source:  provCompanion,
+			delayMs: 1 + e.rnd.Intn(max(maxDelay, 1)),
+		})
+	}
+
+	// emission order follows the perturbed timeline; the primary (delay 0) leads.
+	sort.SliceStable(qs, func(i, j int) bool { return qs[i].delayMs < qs[j].delayMs })
+
+	return qs
 }
 
 // emitBurstTimed resolves a recorded cohort spread across its ORIGINAL page-load

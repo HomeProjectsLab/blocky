@@ -90,7 +90,7 @@ var _ = Describe("Structural emission", func() {
 	}
 
 	Describe("recorded-cohort replay (7G)", func() {
-		It("fires the recorded cohort in order, incl. a blocked member, all Bypass+Decoy", func() {
+		It("fires every recorded cohort member (blocked included) as Bypass+Decoy, primary first", func() {
 			src := &mockSource{
 				cohort: []querylog.CohortMember{
 					{Domain: "news.example", Qtype: dns.TypeA, DelayMs: 0},
@@ -110,17 +110,26 @@ var _ = Describe("Structural emission", func() {
 
 			eng.emit(context.Background())
 
-			Eventually(snapshot, "3s", "10ms").Should(HaveLen(3))
+			// perturbCohort now jitters the sub-resource timing/order and may splice in
+			// one unrelated companion, so assert the invariants rather than an exact
+			// list: every real member still fires, the primary still leads, all
+			// Bypass+Decoy.
+			Eventually(func() int { return len(snapshot()) }, "2s", "10ms").Should(BeNumerically(">=", 3))
+			time.Sleep(400 * time.Millisecond) // past the bounded burst spread (<= ~130ms)
 
 			reqs := snapshot()
-			names := make([]string, len(reqs))
-			for i, r := range reqs {
-				names[i] = r.Req.Question[0].Name
+			Expect(len(reqs)).To(BeElementOf(3, 4), "3 cohort members + at most one spliced companion")
+
+			names := map[string]bool{}
+			for _, r := range reqs {
+				names[r.Req.Question[0].Name] = true
 				Expect(r.Bypass).Should(BeTrue())
 				Expect(r.Decoy).Should(BeTrue())
 			}
 
-			Expect(names).Should(Equal([]string{"news.example.", "tracker.example.", "cdn.example."}))
+			Expect(reqs[0].Req.Question[0].Name).Should(Equal("news.example."), "the main document still leads")
+			Expect(names).Should(HaveKey("tracker.example."), "blocked cohort member must still egress (allowBlocked)")
+			Expect(names).Should(HaveKey("cdn.example."))
 		})
 
 		It("falls back to the synthetic path at cold start (empty cohort)", func() {
