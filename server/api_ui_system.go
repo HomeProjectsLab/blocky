@@ -58,6 +58,16 @@ func (s *statsAPI) system(rw http.ResponseWriter, _ *http.Request) {
 		out["diskWriteBps"] = snap.DiskWriteBps
 	}
 
+	// Live query rate (real + decoy) over rolling windows, from the SSE hub's
+	// per-second counter — for the UI's QPS readout next to the CPU strip.
+	if s.hub != nil {
+		out["qps10s"] = s.hub.QPS(10 * time.Second)
+		out["qps1m"] = s.hub.QPS(time.Minute)
+		out["qps5m"] = s.hub.QPS(5 * time.Minute)
+		out["qps10m"] = s.hub.QPS(10 * time.Minute)
+		out["qps1h"] = s.hub.QPS(time.Hour)
+	}
+
 	writeJSON(rw, http.StatusOK, out)
 }
 

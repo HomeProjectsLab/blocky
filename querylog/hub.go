@@ -56,10 +56,65 @@ const hubSubBuffer = 256
 type Hub struct {
 	mu   sync.RWMutex
 	subs map[chan []byte]struct{}
+	qps  qpsCounter // rolling per-second query counts for the UI QPS readout
 }
 
 func NewHub() *Hub {
 	return &Hub{subs: make(map[chan []byte]struct{})}
+}
+
+// qpsCounter is a lock-guarded ring of per-second query counts over the last
+// hour, so the UI can show live QPS over several windows. Cheap: 3600 int
+// buckets, incremented per query and summed on read.
+type qpsCounter struct {
+	mu    sync.Mutex
+	count [3600]int64
+	sec   [3600]int64 // the unix second each bucket currently holds (stale-guard)
+}
+
+func (q *qpsCounter) incr(now int64) {
+	i := now % 3600
+
+	q.mu.Lock()
+	if q.sec[i] != now { // reused bucket from an hour ago: reset before counting
+		q.sec[i], q.count[i] = now, 0
+	}
+	q.count[i]++
+	q.mu.Unlock()
+}
+
+// rate returns queries/sec averaged over the last window seconds (1..3600).
+func (q *qpsCounter) rate(now, window int64) float64 {
+	if window <= 0 {
+		return 0
+	}
+
+	if window > 3600 {
+		window = 3600
+	}
+
+	var sum int64
+
+	q.mu.Lock()
+	for s := now - window + 1; s <= now; s++ {
+		i := ((s % 3600) + 3600) % 3600
+		if q.sec[i] == s {
+			sum += q.count[i]
+		}
+	}
+	q.mu.Unlock()
+
+	return float64(sum) / float64(window)
+}
+
+// QPS returns the query rate over the last window (real + decoy queries).
+// A nil Hub reports 0.
+func (h *Hub) QPS(window time.Duration) float64 {
+	if h == nil {
+		return 0
+	}
+
+	return h.qps.rate(time.Now().Unix(), int64(window.Seconds()))
 }
 
 // Subscribe returns a channel of marshalled QueryItem JSON and an unsubscribe
@@ -88,6 +143,8 @@ func (h *Hub) Publish(entry *LogEntry) {
 	if h == nil {
 		return
 	}
+
+	h.qps.incr(time.Now().Unix()) // count every query for the QPS readout, even with no subscribers
 
 	h.mu.RLock()
 	defer h.mu.RUnlock()

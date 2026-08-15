@@ -45,6 +45,13 @@ function sysBytes(n) {
 
 function sysPct(used, total) { return total ? Math.round((100 * used) / total) : 0; }
 
+function fmtQps(v) {
+    v = Number(v) || 0;
+    if (v >= 1000) return (v / 1000).toFixed(1) + "k";
+    if (v >= 100) return String(Math.round(v));
+    return v.toFixed(v >= 10 ? 0 : 1);
+}
+
 function cpuColor(p) {
     return p >= 85 ? "var(--c-error)" : p >= 50 ? "var(--c-blocked)" : "var(--c-cached)";
 }
@@ -55,7 +62,12 @@ function renderSysbar(s) {
         .join("");
     const item = (label, value) =>
         `<span class="sysbar-item"><span class="sysbar-label">${label}</span>${value}</span>`;
+    // rolling QPS (10s/1m/5m/10m/1h) — present only on boxes new enough to report it
+    const qps = typeof s.qps10s === "number"
+        ? item("QPS", `<span class="sysbar-value">${fmtQps(s.qps10s)}<sub>10s</sub> ${fmtQps(s.qps1m)}<sub>1m</sub> ${fmtQps(s.qps5m)}<sub>5m</sub> ${fmtQps(s.qps10m)}<sub>10m</sub> ${fmtQps(s.qps1h)}<sub>1h</sub></span>`)
+        : "";
     return [
+        qps,
         item("CPU", `<span class="cpu-bars">${bars}</span><span class="sysbar-value">${Math.round(s.cpuTotal)}%</span>`),
         item("MEM", `<span class="sysbar-value">${sysBytes(s.memUsed)}/${sysBytes(s.memTotal)} · ${sysPct(s.memUsed, s.memTotal)}%</span>`),
         item("DISK", `<span class="sysbar-value">${sysBytes(s.diskUsed)}/${sysBytes(s.diskTotal)} · ${sysPct(s.diskUsed, s.diskTotal)}%</span>`),

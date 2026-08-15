@@ -97,6 +97,7 @@ a { color: var(--accent); }
 .sysbar-item { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
 .sysbar-label { color: var(--muted); letter-spacing: 0.06em; }
 .sysbar-value { color: var(--ink); }
+.sysbar-value sub { font-size: 9px; color: var(--muted); vertical-align: baseline; margin: 0 5px 0 1px; }
 .cpu-bars { display: inline-flex; align-items: flex-end; gap: 1px; height: 14px; }
 .cpu-bar { width: 4px; min-height: 2px; border-radius: 1px 1px 0 0; background: var(--c-resolved); }
 @media (prefers-reduced-motion: no-preference) {
