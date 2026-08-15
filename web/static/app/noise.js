@@ -125,8 +125,7 @@ const MAX_ROWS = 200;
 const wireBody = document.getElementById("noise-wire-body");
 const wireEmpty = document.getElementById("noise-wire-empty");
 
-onQuery((item) => {
-    if (!item.decoy) return;
+function addNoiseRow(item) {
     wireEmpty.hidden = true;
     const tr = document.createElement("tr");
     tr.dataset.band = band(item);
@@ -145,6 +144,28 @@ onQuery((item) => {
     });
     wireBody.prepend(tr);
     while (wireBody.children.length > MAX_ROWS) wireBody.lastElementChild.remove();
+}
+
+// Coalesce rendering: the noise machine emits decoys constantly (and far more
+// under load), so rendering one row per SSE event saturates the main thread and
+// crashes the tab. Buffer (bounded), drain on an animation frame — DOM touched
+// at most ~60x/sec; under a burst only the newest MAX_ROWS can be visible.
+const wireBuffer = [];
+let wireRaf = 0;
+function scheduleWireFlush() {
+    if (wireRaf) return;
+    wireRaf = requestAnimationFrame(() => {
+        wireRaf = 0;
+        if (wireBuffer.length > MAX_ROWS) wireBuffer.splice(0, wireBuffer.length - MAX_ROWS);
+        while (wireBuffer.length > 0) addNoiseRow(wireBuffer.shift());
+    });
+}
+
+onQuery((item) => {
+    if (!item.decoy) return;
+    wireBuffer.push(item);
+    if (wireBuffer.length > MAX_ROWS) wireBuffer.shift();
+    scheduleWireFlush();
 });
 
 loadAll();

@@ -67,13 +67,26 @@ function flush() {
     while (buffer.length > 0 && !isPaused()) addRow(buffer.shift());
 }
 
+// Coalesce rendering. A flooded resolver can push ~1k stream events/sec;
+// rendering one DOM row per event saturates the main thread and crashes the tab
+// (the buffer bounds memory, but not the mutation RATE). So always buffer, and
+// drain on an animation frame — the DOM is touched at most ~60x/sec regardless
+// of the incoming rate, and under a burst only the newest MAX_ROWS can matter.
+let rafPending = 0;
+function scheduleFlush() {
+    if (rafPending || isPaused()) return;
+    rafPending = requestAnimationFrame(() => {
+        rafPending = 0;
+        if (isPaused()) return;
+        if (buffer.length > MAX_ROWS) buffer.splice(0, buffer.length - MAX_ROWS);
+        while (buffer.length > 0) addRow(buffer.shift());
+    });
+}
+
 onQuery((item) => {
-    if (isPaused()) {
-        buffer.push(item);
-        if (buffer.length > MAX_ROWS) buffer.shift();
-        return;
-    }
-    addRow(item);
+    buffer.push(item);
+    if (buffer.length > MAX_ROWS) buffer.shift();
+    scheduleFlush();
 });
 
 pauseBtn.addEventListener("click", () => setPaused(!paused));
