@@ -119,6 +119,55 @@ var _ = Describe("Serve command", func() {
 			})
 		})
 
+		It("should hot-swap a listener-compatible change without restarting", func() {
+			loggerHook := test.NewGlobal()
+			log.Log().AddHook(loggerHook)
+			DeferCleanup(loggerHook.Reset)
+
+			errChan := make(chan error)
+			go func() {
+				errChan <- runSupervisor(store)
+			}()
+
+			Eventually(dialable(port), "5s").Should(Succeed())
+
+			By("apply a resolver-only change on the same ports (adds a denylist)", func() {
+				Expect(store.SetRawYAML(minimalYAML(port,
+					"blocking:",
+					"  denylists:",
+					"    ads:",
+					"      - |",
+					"        example.com",
+					"  clientGroupsBlock:",
+					"    default:",
+					"      - ads"))).Should(Succeed())
+				store.RequestApply()
+			})
+
+			By("config is applied via hot-swap, keeping the same listener", func() {
+				Eventually(func() []string {
+					msgs := make([]string, 0, len(loggerHook.AllEntries()))
+					for _, entry := range loggerHook.AllEntries() {
+						msgs = append(msgs, entry.Message)
+					}
+
+					return msgs
+				}, "10s").Should(ContainElement(ContainSubstring("without dropping listeners")))
+
+				// the port never dropped, and no full-restart message was logged
+				Consistently(dialable(port), "300ms", "100ms").Should(Succeed())
+				for _, entry := range loggerHook.AllEntries() {
+					Expect(entry.Message).ShouldNot(ContainSubstring("full restart"))
+				}
+			})
+
+			By("terminate with signal", func() {
+				signals <- syscall.SIGINT
+
+				Eventually(errChan, "15s").Should(Receive(BeNil()))
+			})
+		})
+
 		It("should roll back to the last applied config if the rebuild fails", func() {
 			loggerHook := test.NewGlobal()
 			log.Log().AddHook(loggerHook)

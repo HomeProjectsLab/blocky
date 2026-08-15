@@ -209,5 +209,124 @@ var _ = Describe("Clients + privacy UI API", func() {
 				[]byte(`{"ttlJitter":{"enable":true,"percent":99}}`))
 			Expect(put.Code).Should(Equal(http.StatusBadRequest))
 		})
+
+		It("returns 503 when the config store is nil", func() {
+			router = chi.NewRouter()
+			registerStatsUIEndpoints(router, &config.Config{}, querylog.NewHub(), nil, nil)
+
+			Expect(exec(http.MethodGet, "/api/ui/privacy", nil).Code).Should(Equal(http.StatusServiceUnavailable))
+			Expect(exec(http.MethodPut, "/api/ui/privacy", []byte(`{}`)).Code).Should(Equal(http.StatusServiceUnavailable))
+		})
+
+		It("rejects a malformed JSON body", func() {
+			put := exec(http.MethodPut, "/api/ui/privacy", []byte(`{not json`))
+			Expect(put.Code).Should(Equal(http.StatusBadRequest))
+		})
+	})
+
+	Describe("clients enrichment omitempty", func() {
+		It("omits the false/empty enrichment keys but keeps the populated ones", func() {
+			// the seeded fixtures have a known IP and <8 fingerprints per client, so:
+			//   natAggregate (false) and deviceGuess ("") -> omitempty drops them,
+			//   while ips/fpCount are populated and must be present.
+			clients := jsonBody(exec(http.MethodGet, "/api/ui/clients", nil))["clients"].([]any)
+			Expect(clients).ShouldNot(BeEmpty())
+			for _, c := range clients {
+				m := c.(map[string]any)
+				Expect(m).ShouldNot(HaveKey("natAggregate")) // false -> omitted
+				Expect(m).ShouldNot(HaveKey("deviceGuess"))  // "" -> omitted
+				Expect(m).Should(HaveKey("ips"))             // populated -> present
+				Expect(m["ips"]).ShouldNot(BeEmpty())
+			}
+		})
+
+		It("omits enrichment keys on the client detail drill-down too", func() {
+			m := jsonBody(exec(http.MethodGet, "/api/ui/clients/laptop", nil))
+			Expect(m).ShouldNot(HaveKey("natAggregate"))
+			Expect(m).ShouldNot(HaveKey("deviceGuess"))
+			Expect(m).Should(HaveKey("ips"))
+		})
+	})
+})
+
+var _ = Describe("privacy DTO merge (applyTo)", func() {
+	// base carries values the flat Privacy panel never renders; a Save from that
+	// panel must not reset them to Go zero.
+	base := func() config.PrivacyConfig {
+		var p config.PrivacyConfig
+		p.Decoy.CorpusWeight = 99
+		p.Decoy.MissChaffPct = 42
+		p.Decoy.ShadowTTL = true
+		p.Decoy.DualStackPct = 33
+		p.Decoy.OffHoursFloorQPM = 1.5
+		p.Decoy.DeviceClass.PhantomDevicesPct = 7 // will be overwritten by the wire field
+		p.QueryCaseRandomization = true
+		p.ShadowBlockedQueries = true
+
+		return p
+	}
+
+	It("preserves off-DTO fields the wire shape never carries", func() {
+		var j privacyJSON
+		j.Decoy.Enable = true
+		j.Decoy.QueriesPerMinute = 5
+
+		out := j.applyTo(base())
+
+		Expect(out.Decoy.CorpusWeight).Should(BeEquivalentTo(99))
+		Expect(out.Decoy.MissChaffPct).Should(BeEquivalentTo(42))
+		Expect(out.Decoy.ShadowTTL).Should(BeTrue())
+		Expect(out.Decoy.DualStackPct).Should(BeEquivalentTo(33))
+		Expect(out.Decoy.OffHoursFloorQPM).Should(BeNumerically("==", 1.5))
+		Expect(out.QueryCaseRandomization).Should(BeTrue())
+		Expect(out.ShadowBlockedQueries).Should(BeTrue())
+		// carried fields still take the wire value
+		Expect(out.Decoy.Enable).Should(BeTrue())
+		Expect(out.Decoy.QueriesPerMinute).Should(BeNumerically("==", 5))
+	})
+
+	It("round-trips every wire field through privacyToJSON then applyTo", func() {
+		var p config.PrivacyConfig
+		p.Decoy.Enable = true
+		p.Decoy.QueriesPerMinute = 6
+		p.Decoy.ReplayWeight = 3
+		p.Decoy.ListWeight = 2
+		p.Decoy.ActiveHoursStart = 8
+		p.Decoy.ActiveHoursEnd = 22
+		p.Decoy.RefreshURL = "https://example/list"
+		p.Decoy.PersonaProfile = "enterprise"
+		p.Decoy.TargetQPMPeak = 300
+		p.Decoy.TargetQPMTrough = 60
+		p.Decoy.CohortPct = 77
+		p.Decoy.CompanionPct = 42
+		p.Decoy.ClusterPct = 11
+		p.Decoy.StepPct = 66
+		p.Decoy.SessionCoherence = true
+		p.Decoy.RevisitCadence = true
+		p.Decoy.PersonaCover = true
+		p.Decoy.PersonaAttribution = true
+		p.Decoy.CohortJitterMs = 90
+		p.Decoy.CohortCompanionPct = 25
+		p.Decoy.DeviceClass.Enable = true
+		p.Decoy.DeviceClass.VendorTelemetry = true
+		p.Decoy.DeviceClass.VendorFamilies = []string{"apple", "google"}
+		p.Decoy.DeviceClass.PhantomDevicesPct = 25
+		p.TTLJitter.Enable = true
+		p.TTLJitter.PercentPct = 15
+		p.EDNSPadding.Enable = true
+
+		got := privacyToJSON(p).applyTo(config.PrivacyConfig{})
+
+		// every field the wire shape carries must survive the round-trip identically
+		Expect(got.Decoy).Should(Equal(p.Decoy))
+		Expect(got.TTLJitter.Enable).Should(BeTrue())
+		Expect(got.TTLJitter.PercentPct).Should(BeEquivalentTo(15))
+		Expect(got.EDNSPadding.Enable).Should(BeTrue())
+	})
+
+	It("defaults an empty personaProfile to \"auto\" so a partial body still validates", func() {
+		var j privacyJSON // PersonaProfile == ""
+		out := j.applyTo(config.PrivacyConfig{})
+		Expect(out.Decoy.PersonaProfile).Should(Equal("auto"))
 	})
 })

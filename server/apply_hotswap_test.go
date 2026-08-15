@@ -400,4 +400,67 @@ var _ = Describe("Config apply hot-swap", func() {
 		Expect(ListenersCompatible(a, pathChanged)).Should(BeFalse(),
 			"a prometheus path change must force the full restart")
 	})
+
+	// The full compatibility matrix: every listener/router/store-affecting knob
+	// must force a full restart, while a pure resolver-config change hot-swaps.
+	// Each case starts from a common baseline `a` and mutates exactly ONE field
+	// on `b`, so the assertion isolates that field's effect.
+	DescribeTable("ListenersCompatible forces a restart on any listener-affecting change",
+		func(mutate func(b *config.Config), compatible bool) {
+			a := buildCfg("ads.example")
+			b := buildCfg("ads.example")
+			mutate(b)
+
+			Expect(ListenersCompatible(a, b)).Should(Equal(compatible))
+		},
+		Entry("identical config is hot-swappable", func(_ *config.Config) {}, true),
+		Entry("DNS port change forces restart", func(b *config.Config) {
+			b.Ports.DNS = config.ListenConfig{GetHostPort("127.0.0.1", hotswapDNSPort+1)}
+		}, false),
+		Entry("HTTP port change forces restart", func(b *config.Config) {
+			b.Ports.HTTP = config.ListenConfig{"127.0.0.1:12346"}
+		}, false),
+		Entry("DoH path change forces restart", func(b *config.Config) {
+			b.Ports.DOHPath = "/other-dns-query"
+		}, false),
+		Entry("proxy-protocol change forces restart", func(b *config.Config) {
+			b.Ports.ProxyProtocol = config.ProxyProtocolListeners{config.ProxyProtocolTypeHttp}
+		}, false),
+		Entry("freeBind change forces restart", func(b *config.Config) {
+			b.Ports.FreeBind = true
+		}, false),
+		Entry("certFile change forces restart (TLS)", func(b *config.Config) {
+			b.CertFile = "/etc/blocky/new.crt"
+		}, false),
+		Entry("keyFile change forces restart (TLS)", func(b *config.Config) {
+			b.KeyFile = "/etc/blocky/new.key"
+		}, false),
+		Entry("minTLSServeVersion change forces restart (TLS)", func(b *config.Config) {
+			b.MinTLSServeVer = config.TLSVersion13
+		}, false),
+		Entry("http3 toggle forces restart", func(b *config.Config) {
+			b.HTTP3.Enable = true
+		}, false),
+		Entry("queryLog target change forces restart", func(b *config.Config) {
+			b.QueryLog.Target = config.Secret("/var/lib/blocky/new.db")
+		}, false),
+		Entry("queryLog type change forces restart", func(b *config.Config) {
+			// baseline leaves Type at the zero value (Console); flip to a different type
+			b.QueryLog.Type = config.QueryLogTypeSqlite
+		}, false),
+		Entry("decoy enable toggle forces restart", func(b *config.Config) {
+			b.Privacy.Decoy.Enable = true
+		}, false),
+		Entry("list-updater enable toggle forces restart", func(b *config.Config) {
+			b.Lists.Updater.Enable = true
+		}, false),
+		Entry("pure resolver-config change hot-swaps (block type)", func(b *config.Config) {
+			b.Blocking.BlockType = "nxDomain"
+		}, true),
+		Entry("a decoy KNOB change (not enable) hot-swaps", func(b *config.Config) {
+			// the decoy engine lives in the resolver bundle; only enable/disable
+			// (which wires the source into the router) forces a restart
+			b.Privacy.Decoy.CohortJitterMs = 999
+		}, true),
+	)
 })

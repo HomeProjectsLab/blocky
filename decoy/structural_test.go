@@ -148,6 +148,37 @@ var _ = Describe("Structural emission", func() {
 			Eventually(snapshot, "1s", "10ms").Should(HaveLen(1))
 			Expect(snapshot()[0].Req.Question[0].Name).Should(Equal("fallback.example."))
 		})
+
+		Describe("emitCohort contract", func() {
+			It("returns false with no source (non-sqlite query log)", func() {
+				eng := NewEngine(cfg, nil, nil)
+				Expect(eng.emitCohort(context.Background())).Should(BeFalse())
+			})
+
+			It("returns false at cold start (empty recorded cohort)", func() {
+				eng, _ := capturing(&mockSource{})
+				Expect(eng.emitCohort(context.Background())).Should(BeFalse())
+			})
+
+			It("returns true and re-anchors the session to the real primary's eTLD+1", func() {
+				src := &mockSource{cohort: []querylog.CohortMember{
+					{Domain: "shop.example.com", Qtype: dns.TypeA, DelayMs: 0},
+					{Domain: "cdn.example.net", Qtype: dns.TypeA, DelayMs: 20},
+				}}
+				cfg.SessionCoherence = true
+				eng, snapshot := capturing(src)
+
+				Expect(eng.emitCohort(context.Background())).Should(BeTrue())
+
+				eng.sessMu.Lock()
+				dom := eng.sessionDomain
+				eng.sessMu.Unlock()
+				Expect(dom).Should(Equal("example.com"), "session anchored to the primary's registrable domain")
+
+				// the async burst eventually fires both recorded members.
+				Eventually(func() int { return len(snapshot()) }, "2s", "10ms").Should(BeNumerically(">=", 2))
+			})
+		})
 	})
 
 	Describe("session walk (#1)", func() {
