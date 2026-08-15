@@ -84,6 +84,14 @@ type statsAPI struct {
 	mu     sync.Mutex
 	reader *querylog.Reader // constructed lazily: the writer must create the DB file first
 
+	// client-class refresh throttle. RefreshClientClasses is a 7-day query-log
+	// WINDOW scan — far too slow for the request path (seconds to tens of seconds
+	// once the log is large) — so clientClasses kicks it in the background at most
+	// once per interval and always serves the cheap cached client_class table.
+	classMu         sync.Mutex
+	classRefreshAt  time.Time
+	classRefreshing bool
+
 	// sysUsage holds the latest system-usage sample (per-core CPU / RAM / disk +
 	// R/W), published by a persistent sampler on the server-lifetime ctx and
 	// merged into GET /api/ui/system. nil until the first sample / on non-linux.

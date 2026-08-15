@@ -127,11 +127,18 @@ var _ = Describe("Clients + privacy UI API", func() {
 
 	Describe("GET /api/ui/clients/classes", func() {
 		It("lists auto-classified clients", func() {
-			rec := exec(http.MethodGet, "/api/ui/clients/classes", nil)
+			// The recompute now runs off the request path (a 7-day window scan is
+			// too slow to block on), so the auto classes land a moment after the
+			// first GET kicks the background refresh. Poll until they appear.
+			var classes []any
+			Eventually(func() int {
+				rec := exec(http.MethodGet, "/api/ui/clients/classes", nil)
+				Expect(rec.Code).Should(Equal(http.StatusOK))
+				classes = jsonBody(rec)["classes"].([]any)
 
-			Expect(rec.Code).Should(Equal(http.StatusOK))
-			classes := jsonBody(rec)["classes"].([]any)
-			Expect(classes).Should(HaveLen(2)) // laptop + phone; <20 queries => unknown
+				return len(classes)
+			}, "3s", "20ms").Should(Equal(2)) // laptop + phone; <20 queries => unknown
+
 			names := []string{}
 			for _, c := range classes {
 				m := c.(map[string]any)

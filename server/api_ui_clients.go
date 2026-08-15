@@ -6,10 +6,15 @@ import (
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/querylog"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// clientClassRefreshInterval bounds how often the expensive 7-day client-class
+// recompute runs off the request path.
+const clientClassRefreshInterval = 5 * time.Minute
 
 // clientClassifier is the slice of *querylog.DecoySource the clients UI needs to
 // read/override per-client device classes. nil (no decoy store) => 503.
@@ -37,7 +42,7 @@ func (s *statsAPI) clientClasses(rw http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	_ = s.classifier.RefreshClientClasses() // best-effort; stale list is still useful
+	s.maybeRefreshClasses() // non-blocking, throttled; the list below is served from cache
 
 	list, err := s.classifier.ListClientClasses()
 	if err != nil {
@@ -57,6 +62,34 @@ func (s *statsAPI) clientClasses(rw http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(rw, http.StatusOK, map[string]any{"classes": out})
+}
+
+// maybeRefreshClasses kicks a background client-class recompute at most once per
+// clientClassRefreshInterval, and never blocks the caller. RefreshClientClasses
+// is a 7-day query-log WINDOW scan that grows with log size (tens of seconds on
+// a large log), so running it on the request path made GET /clients/classes hang
+// and the device-class table never render. The cached client_class table is
+// served immediately instead; the decoy engine also refreshes on its own cadence.
+func (s *statsAPI) maybeRefreshClasses() {
+	s.classMu.Lock()
+	if s.classRefreshing || (!s.classRefreshAt.IsZero() && time.Since(s.classRefreshAt) < clientClassRefreshInterval) {
+		s.classMu.Unlock()
+
+		return
+	}
+	s.classRefreshing = true
+	s.classMu.Unlock()
+
+	go func() {
+		if err := s.classifier.RefreshClientClasses(); err != nil {
+			log.Log().Warnf("client-class refresh failed: %v", err)
+		}
+
+		s.classMu.Lock()
+		s.classRefreshing = false
+		s.classRefreshAt = time.Now()
+		s.classMu.Unlock()
+	}()
 }
 
 // putClientClass sets (or clears, with "" / "auto") a client's manual class override.
