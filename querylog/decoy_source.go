@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/publicsuffix"
@@ -127,7 +128,8 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{}); err != nil {
+	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{},
+		&clientIdentity{}, &clientPerson{}, &clientProfile{}); err != nil {
 		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
 
@@ -1240,6 +1242,106 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 	}
 
 	return ClientPersona{IP: row.ClientIP, Fp: row.toFpSample()}, nil
+}
+
+// --- manual client display-name override (Phase 2) --------------------------
+
+// clientIdentity is the manual display-name override for a client. Keyed on
+// client_name like clientClass: a DHCP/rDNS/config rename splits a device's
+// stored rows across two keys — an override does NOT re-key history (blueprint
+// R6). Copies the clientClass storage shape verbatim.
+type clientIdentity struct {
+	Client    string `gorm:"column:client;primaryKey"`
+	Name      string `gorm:"column:name"`
+	UpdatedAt time.Time
+}
+
+func (clientIdentity) TableName() string { return "client_identity" }
+
+// clientPerson maps a client to a household member. Registered for AutoMigrate
+// only; read/write methods are Phase 5 (opt-in, most sensitive).
+type clientPerson struct {
+	Client    string `gorm:"column:client;primaryKey"`
+	Person    string `gorm:"column:person"`
+	UpdatedAt time.Time
+}
+
+func (clientPerson) TableName() string { return "client_person" }
+
+// clientProfile is the precomputed presence histogram. Registered for
+// AutoMigrate only; the timer-refreshed compute is Phase 3 (opt-in).
+type clientProfile struct {
+	Client      string `gorm:"column:client;primaryKey"`
+	HourHistUTC string `gorm:"column:hour_hist_utc"` // 24-int CSV of active-hour counts, UTC buckets
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	UpdatedAt   time.Time
+}
+
+func (clientProfile) TableName() string { return "client_profile" }
+
+// sanitizeDisplayName bounds a user-supplied client name: control characters are
+// stripped (it is rendered in the UI), the result is trimmed and capped at 63
+// runes. Unicode letters/marks are kept so real names ("Alex's iPhone") survive.
+func sanitizeDisplayName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+
+	if r := []rune(s); len(r) > 63 {
+		s = string(r[:63])
+	}
+
+	return s
+}
+
+// ClientName returns the manual display-name override for client, or "" when
+// none is set. One primary-key lookup — safe to call per row. Mirrors ClientClass.
+func (s *DecoySource) ClientName(client string) (string, error) {
+	var name string
+
+	err := s.db.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", client).Scan(&name).Error
+
+	return name, err
+}
+
+// ClientNames returns every set display-name override as client_name→name, so
+// the clients list can layer names in one query instead of one lookup per row.
+func (s *DecoySource) ClientNames() (map[string]string, error) {
+	var rows []clientIdentity
+	if err := s.db.Raw("SELECT client, name FROM client_identity WHERE name <> ''").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		out[r.Client] = r.Name
+	}
+
+	return out, nil
+}
+
+// SetClientName sets (or clears, with an empty/blank name) the display-name
+// override for client. The name is sanitized (control chars stripped, capped at
+// 63 runes) since it is rendered in the UI. Mirrors SetClientClassOverride:
+// upsert, creates the row if the client has no identity yet.
+func (s *DecoySource) SetClientName(client, name string) error {
+	if client == "" {
+		return errors.New("client must not be empty")
+	}
+
+	name = sanitizeDisplayName(name)
+	now := time.Now()
+
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "client"}},
+		DoUpdates: clause.Assignments(map[string]any{"name": name, "updated_at": now}),
+	}).Create(&clientIdentity{Client: client, Name: name, UpdatedAt: now}).Error
 }
 
 // qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)

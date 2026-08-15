@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+// errShared rejects a per-device action (naming) on a NAT/shared client (R3).
+var errShared = errors.New("client is a shared/NAT aggregate — a per-device name does not apply")
 
 // clientClassRefreshInterval bounds how often the expensive 7-day client-class
 // recompute runs off the request path.
@@ -22,6 +26,9 @@ type clientClassifier interface {
 	ListClientClasses() ([]querylog.ClientClassInfo, error)
 	SetClientClassOverride(client, class string) error
 	RefreshClientClasses() error
+	ClientName(client string) (string, error)
+	ClientNames() (map[string]string, error)
+	SetClientName(client, name string) error
 }
 
 type clientClassJSON struct {
@@ -119,6 +126,50 @@ func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
 	rw.WriteHeader(http.StatusNoContent)
 }
 
+// putClientName sets (or clears, with a blank name) a client's manual display-name
+// override. 503 when no classifier store; rejects a NAT/shared aggregate — a
+// per-device name is meaningless for many devices behind one identity (R3).
+func (s *statsAPI) putClientName(rw http.ResponseWriter, req *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "device identity not available"})
+
+		return
+	}
+
+	var body struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	client := chi.URLParam(req, "client")
+
+	// R3: a shared/NAT identity must not carry a per-device name. Check via the
+	// same enrich the list uses; the reader is optional so skip the gate if absent.
+	if reader, err := s.getReader(); err == nil && reader != nil {
+		from, to, terr := parseTimeRange(req)
+		if terr == nil {
+			if shared, serr := reader.ClientIsShared(client, from, to); serr == nil && shared {
+				badRequest(rw, errShared)
+
+				return
+			}
+		}
+	}
+
+	if err := s.classifier.SetClientName(client, body.Name); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
+}
+
 // Clients + privacy UI endpoints. Registered alongside the other stats
 // endpoints (they share the lazy sqlite reader and the config store).
 //
@@ -160,6 +211,18 @@ func (s *statsAPI) clients(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Layer stored display-name overrides over auto-recognition (one query for
+	// the whole page). Best-effort: a store error must not blank the client list.
+	if s.classifier != nil {
+		if names, nerr := s.classifier.ClientNames(); nerr == nil {
+			for i := range list {
+				if n := names[list[i].Name]; n != "" {
+					list[i].DisplayName = n
+				}
+			}
+		}
+	}
+
 	writeJSON(rw, http.StatusOK, map[string]any{"clients": list})
 }
 
@@ -181,6 +244,13 @@ func (s *statsAPI) clientDetail(rw http.ResponseWriter, req *http.Request) {
 		internalError(rw, err)
 
 		return
+	}
+
+	// Layer the stored display-name override (best-effort; PK lookup).
+	if s.classifier != nil {
+		if n, nerr := s.classifier.ClientName(detail.Name); nerr == nil {
+			detail.DisplayName = n
+		}
 	}
 
 	writeJSON(rw, http.StatusOK, detail)

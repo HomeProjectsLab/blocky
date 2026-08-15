@@ -607,6 +607,36 @@ var _ = Describe("DecoySource", func() {
 			Expect(src.SetClientClassOverride("x", "toaster")).Should(MatchError(ContainSubstring("invalid device class")))
 		})
 
+		It("stores, reads, sanitizes and clears a manual display name", func() {
+			src := seedLog("names.db", nil)
+
+			n, e := src.ClientName("laptop")
+			Expect(e).Should(Succeed())
+			Expect(n).Should(BeEmpty()) // none set yet
+
+			// control chars stripped, trimmed, capped at 63 runes
+			Expect(src.SetClientName("laptop", "  Alex's iPhone\n\x00  ")).Should(Succeed())
+			n, _ = src.ClientName("laptop")
+			Expect(n).Should(Equal("Alex's iPhone"))
+
+			Expect(src.SetClientName("laptop", strings.Repeat("x", 100))).Should(Succeed())
+			n, _ = src.ClientName("laptop")
+			Expect([]rune(n)).Should(HaveLen(63))
+
+			names, e := src.ClientNames()
+			Expect(e).Should(Succeed())
+			Expect(names).Should(HaveKey("laptop"))
+
+			// blank clears; then it drops out of the bulk map
+			Expect(src.SetClientName("laptop", "   ")).Should(Succeed())
+			n, _ = src.ClientName("laptop")
+			Expect(n).Should(BeEmpty())
+			names, _ = src.ClientNames()
+			Expect(names).ShouldNot(HaveKey("laptop"))
+
+			Expect(src.SetClientName("", "x")).Should(MatchError(ContainSubstring("must not be empty")))
+		})
+
 		It("samples a client of a given effective class for attribution", func() {
 			now := time.Now()
 			rows := beacon("iotdev", "10.0.0.5",

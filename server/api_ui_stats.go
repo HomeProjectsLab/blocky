@@ -51,6 +51,7 @@ func registerStatsUIEndpoints(
 	router.Get("/api/ui/clients", s.clients)
 	router.Get("/api/ui/clients/classes", s.clientClasses)
 	router.Put("/api/ui/clients/classes/{client}", s.putClientClass)
+	router.Put("/api/ui/clients/names/{client}", s.putClientName)
 	router.Get("/api/ui/clients/{name}", s.clientDetail)
 	router.Get("/api/ui/privacy", s.getPrivacy)
 	router.Put("/api/ui/privacy", s.putPrivacy)

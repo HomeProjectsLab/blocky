@@ -433,6 +433,9 @@ type ClientRow struct {
 	Queries  int64  `json:"queries"`
 	Blocked  int64  `json:"blocked"`
 	LastSeen string `json:"lastSeen"`
+	// DisplayName is the manual name override (client_identity), layered by the
+	// server over auto-recognition as the winning display facet (blueprint P2).
+	DisplayName string `json:"displayName,omitempty"`
 	// DNS-native client identity enrichment.
 	IPs          []string `json:"ips,omitempty"`
 	NatAggregate bool     `json:"natAggregate,omitempty"`
@@ -540,6 +543,9 @@ type ClientDetail struct {
 	Transports   []TopItem   `json:"transports"`
 	Fingerprints []FpCluster `json:"fingerprints"`
 	TopDomains   []TopItem   `json:"topDomains"`
+	// DisplayName is the manual name override (client_identity), layered by the
+	// server over auto-recognition as the winning display facet (blueprint P2).
+	DisplayName string `json:"displayName,omitempty"`
 	// DNS-native client identity enrichment (see client_enrich.go).
 	IPs          []string `json:"ips,omitempty"`
 	NatAggregate bool     `json:"natAggregate,omitempty"`

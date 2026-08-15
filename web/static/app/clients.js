@@ -3,6 +3,7 @@
 import { getJSON, send } from "./api.js";
 import { lineChart } from "./chart.js";
 import { fmtNum, fmtDateTime, fmtPct } from "./format.js";
+import { promptDialog, toast } from "./modal.js";
 
 const body = document.getElementById("cl-body");
 const empty = document.getElementById("cl-empty");
@@ -145,6 +146,35 @@ function domainList(domains) {
 
 let detailChart = null;
 
+// nameEditor: a manual display-name override for this client. Hidden for a
+// shared/NAT aggregate — a per-device name is meaningless for many devices
+// behind one identity, and the server rejects it anyway (blueprint R3).
+function nameEditor(d) {
+    const wrap = document.createElement("div");
+    wrap.className = "cl-name-edit";
+    const cur = d.displayName || "";
+    const lbl = document.createElement("span");
+    lbl.className = "empty";
+    lbl.textContent = cur ? `Custom name: ${cur}` : "No custom name";
+    const btn = document.createElement("button");
+    btn.className = "btn-sub";
+    btn.textContent = cur ? "Rename" : "Set name";
+    btn.addEventListener("click", async () => {
+        const name = await promptDialog("Display name for this client", {
+            title: "Rename client", value: cur, placeholder: "e.g. Alex's iPhone",
+        });
+        if (name === null) return; // cancelled
+        try {
+            await send("PUT", `/api/ui/clients/names/${encodeURIComponent(d.name)}`, { name });
+            toast(name.trim() ? `Named → ${name.trim()}` : "Custom name cleared");
+            openDetail(d.name); // reload drawer with the new name
+            load();             // refresh the list underneath
+        } catch (err) { toast("Could not save: " + err.message, { type: "error" }); }
+    });
+    wrap.append(lbl, btn);
+    return wrap;
+}
+
 async function openDetail(name) {
     if (detailChart) { detailChart.destroy(); detailChart = null; }
     title.textContent = name;
@@ -154,11 +184,13 @@ async function openDetail(name) {
     try { d = await getJSON(`/api/ui/clients/${encodeURIComponent(name)}`); }
     catch (err) { detail.innerHTML = `<p class="empty">Could not load: ${err.message}</p>`; return; }
 
+    title.textContent = d.displayName || name;
     detail.innerHTML = "";
     const stat = document.createElement("p");
     stat.className = "empty";
     stat.textContent = `${fmtNum(d.queries)} queries · ${fmtNum(d.blocked)} blocked (last 24h)`;
     detail.append(stat);
+    if (!d.shared) detail.append(nameEditor(d));
 
     const idHTML = identityHTML(d);
     if (idHTML) {
@@ -253,7 +285,7 @@ async function load() {
     for (const c of rows) {
         const tr = document.createElement("tr");
         tr.innerHTML =
-            `<td>${escapeHTML(c.name || "—")}</td>` +
+            `<td>${escapeHTML(c.displayName || c.name || "—")}</td>` +
             `<td class="cl-identity">${identityHTML(c) || "—"}</td>` +
             `<td class="num">${fmtNum(c.queries)}</td>` +
             `<td class="num">${fmtNum(c.blocked)}</td>` +

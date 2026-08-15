@@ -303,3 +303,15 @@ func (r *Reader) enrichClient(name string, from, to time.Time) (clientEnrich, er
 
 	return row.toEnrich(), nil
 }
+
+// ClientIsShared reports whether name is a NAT/shared aggregate over the window
+// (too many distinct fingerprints to be one device). Callers reject per-device
+// actions — naming, profiling, person-mapping — on such a client (blueprint R3).
+func (r *Reader) ClientIsShared(name string, from, to time.Time) (bool, error) {
+	e, err := r.enrichClient(name, from, to)
+	if err != nil {
+		return false, err
+	}
+
+	return e.NatAggregate, nil
+}
