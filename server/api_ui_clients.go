@@ -160,6 +160,15 @@ type privacyJSON struct {
 		PersonaProfile   string  `json:"personaProfile"`
 		TargetQPMPeak    float64 `json:"targetQpmPeak"`
 		TargetQPMTrough  float64 `json:"targetQpmTrough"`
+		// Structural emission ("cohort") layer — shape the sequence/texture of decoys.
+		CohortPct          uint `json:"cohortPct"`
+		CompanionPct       uint `json:"companionPct"`
+		ClusterPct         uint `json:"clusterPct"`
+		StepPct            uint `json:"stepPct"`
+		SessionCoherence   bool `json:"sessionCoherence"`
+		RevisitCadence     bool `json:"revisitCadence"`
+		PersonaCover       bool `json:"personaCover"`
+		PersonaAttribution bool `json:"personaAttribution"`
 	} `json:"decoy"`
 	// DeviceClass is DecoyConfig.DeviceClass, surfaced at the top level of the wire
 	// shape so the flat privacy.js panel renderer can bind it like the other sections.
@@ -191,6 +200,14 @@ func privacyToJSON(p config.PrivacyConfig) privacyJSON {
 	j.Decoy.PersonaProfile = p.Decoy.PersonaProfile
 	j.Decoy.TargetQPMPeak = p.Decoy.TargetQPMPeak
 	j.Decoy.TargetQPMTrough = p.Decoy.TargetQPMTrough
+	j.Decoy.CohortPct = p.Decoy.CohortPct
+	j.Decoy.CompanionPct = p.Decoy.CompanionPct
+	j.Decoy.ClusterPct = p.Decoy.ClusterPct
+	j.Decoy.StepPct = p.Decoy.StepPct
+	j.Decoy.SessionCoherence = p.Decoy.SessionCoherence
+	j.Decoy.RevisitCadence = p.Decoy.RevisitCadence
+	j.Decoy.PersonaCover = p.Decoy.PersonaCover
+	j.Decoy.PersonaAttribution = p.Decoy.PersonaAttribution
 	j.DeviceClass.Enable = p.Decoy.DeviceClass.Enable
 	j.DeviceClass.VendorTelemetry = p.Decoy.DeviceClass.VendorTelemetry
 	j.DeviceClass.VendorFamilies = p.Decoy.DeviceClass.VendorFamilies
@@ -202,9 +219,12 @@ func privacyToJSON(p config.PrivacyConfig) privacyJSON {
 	return j
 }
 
-func (j privacyJSON) toConfig() config.PrivacyConfig {
-	var p config.PrivacyConfig
-
+// applyTo overlays the wire fields onto an existing config (the current stored
+// privacy config, with defaults applied), so any decoy knob NOT carried by the
+// wire shape keeps its current value instead of being reset to a Go zero. This
+// is what stops a Save on the (partial) Privacy panel from wiping the fields it
+// doesn't render.
+func (j privacyJSON) applyTo(p config.PrivacyConfig) config.PrivacyConfig {
 	p.Decoy.Enable = j.Decoy.Enable
 	p.Decoy.QueriesPerMinute = j.Decoy.QueriesPerMinute
 	p.Decoy.ReplayWeight = j.Decoy.ReplayWeight
@@ -218,6 +238,14 @@ func (j privacyJSON) toConfig() config.PrivacyConfig {
 	}
 	p.Decoy.TargetQPMPeak = j.Decoy.TargetQPMPeak
 	p.Decoy.TargetQPMTrough = j.Decoy.TargetQPMTrough
+	p.Decoy.CohortPct = j.Decoy.CohortPct
+	p.Decoy.CompanionPct = j.Decoy.CompanionPct
+	p.Decoy.ClusterPct = j.Decoy.ClusterPct
+	p.Decoy.StepPct = j.Decoy.StepPct
+	p.Decoy.SessionCoherence = j.Decoy.SessionCoherence
+	p.Decoy.RevisitCadence = j.Decoy.RevisitCadence
+	p.Decoy.PersonaCover = j.Decoy.PersonaCover
+	p.Decoy.PersonaAttribution = j.Decoy.PersonaAttribution
 	p.Decoy.DeviceClass.Enable = j.DeviceClass.Enable
 	p.Decoy.DeviceClass.VendorTelemetry = j.DeviceClass.VendorTelemetry
 	p.Decoy.DeviceClass.VendorFamilies = j.DeviceClass.VendorFamilies
@@ -260,8 +288,17 @@ func (s *statsAPI) putPrivacy(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Overlay onto the CURRENT config (defaults applied) instead of a zero value,
+	// so decoy knobs the wire shape doesn't carry are preserved across a save.
+	cur, err := s.store.GetPrivacy()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
 	// SetPrivacy validates the full candidate config before persisting.
-	if err := s.store.SetPrivacy(body.toConfig()); err != nil {
+	if err := s.store.SetPrivacy(body.applyTo(cur)); err != nil {
 		badRequest(rw, err)
 
 		return

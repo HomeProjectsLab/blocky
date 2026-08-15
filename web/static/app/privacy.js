@@ -33,6 +33,16 @@ const SECTIONS = [
         { field: "targetQpmPeak", type: "number", step: "1", min: "0", label: "Busy-hour target (q/min)", help: "Total egress aimed for at the daily peak. Overrides the profile when set away from the home default (40)." },
         { field: "targetQpmTrough", type: "number", step: "1", min: "0", label: "Quiet-hour target (q/min)", help: "Total egress aimed for pre-dawn. Overrides the profile when set away from the home default (6)." },
     ]],
+    ["decoy", "Structural noise (cohorts & sessions)", "Shapes the SEQUENCE and TEXTURE of decoys after real browsing instead of firing independent random lookups — so the noise looks like real page loads and sessions, not a random-domain generator. Needs recorded traffic to learn from; falls back to synthetic at cold start.", [
+        { field: "cohortPct", type: "number", min: "0", max: "100", label: "Cohort replay %", help: "% of structural emissions that replay a whole RECORDED page-load cohort (real timing/texture, including its blocked members) instead of a synthetic burst." },
+        { field: "companionPct", type: "number", min: "0", max: "100", label: "Companion %", help: "% of your real queries that trigger a browse-style companion cluster derived from that domain (the main source of page-load-shaped noise)." },
+        { field: "clusterPct", type: "number", min: "0", max: "100", label: "Cluster %", help: "% of timer-driven emissions that fire a small related burst (secondary to Companion)." },
+        { field: "sessionCoherence", type: "toggle", label: "Session coherence", help: "Walk plausible session chains between related domains instead of independent random picks." },
+        { field: "stepPct", type: "number", min: "0", max: "100", label: "Session step %", help: "Within a session, chance to advance to a topically-plausible next domain vs. starting a fresh session." },
+        { field: "revisitCadence", type: "toggle", label: "Revisit cadence", help: "Re-emit visited domains on their learned revisit interval (jittered) instead of flat-random." },
+        { field: "personaCover", type: "toggle", label: "Persona-compensating cover", help: "Shape TOTAL egress to a household diurnal target so an eavesdropper can't read your activity level, not just which queries are real." },
+        { field: "personaAttribution", type: "toggle", label: "Persona attribution", help: "Attribute decoys to sampled real clients (their IP + fingerprint) so each client's on-wire profile stays consistent under noise." },
+    ]],
     ["deviceClass", "Device-class shaping", "Classifies each client from its DNS behaviour (IoT / workstation / server) and shapes its cover to match — IoT and servers beacon to fixed vendor telemetry, they don't browse, so browsing-shaped noise for them is itself a tell. Manage & override per-client classes on the Clients page.", [
         { field: "enable", type: "toggle", label: "Enable device-class shaping", help: "Off = every client gets the same browsing-shaped cover." },
         { field: "vendorTelemetry", type: "toggle", label: "Emit vendor-telemetry chaff", help: "Cover IoT/server clients with fixed vendor beacon lookups instead of browse companions." },
