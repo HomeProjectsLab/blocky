@@ -89,7 +89,7 @@ var _ = Describe("Clients + privacy UI API", func() {
 		DeferCleanup(func() { _ = src.Close() })
 
 		router = chi.NewRouter()
-		registerStatsUIEndpoints(router, cfg, querylog.NewHub(), store, src)
+		registerStatsUIEndpoints(context.Background(), router, cfg, querylog.NewHub(), store, src)
 	})
 
 	Describe("GET /api/ui/clients", func() {
@@ -212,7 +212,7 @@ var _ = Describe("Clients + privacy UI API", func() {
 
 		It("returns 503 when the config store is nil", func() {
 			router = chi.NewRouter()
-			registerStatsUIEndpoints(router, &config.Config{}, querylog.NewHub(), nil, nil)
+			registerStatsUIEndpoints(context.Background(), router, &config.Config{}, querylog.NewHub(), nil, nil)
 
 			Expect(exec(http.MethodGet, "/api/ui/privacy", nil).Code).Should(Equal(http.StatusServiceUnavailable))
 			Expect(exec(http.MethodPut, "/api/ui/privacy", []byte(`{}`)).Code).Should(Equal(http.StatusServiceUnavailable))

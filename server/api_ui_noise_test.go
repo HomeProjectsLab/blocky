@@ -81,7 +81,7 @@ var _ = Describe("Noise (decoy) UI API", func() {
 		cfg.QueryLog = config.QueryLog{Type: config.QueryLogTypeSqlite, Target: config.Secret(dbPath)}
 
 		router = chi.NewRouter()
-		registerStatsUIEndpoints(router, cfg, querylog.NewHub(), nil, nil)
+		registerStatsUIEndpoints(context.Background(), router, cfg, querylog.NewHub(), nil, nil)
 	})
 
 	It("overview counts decoys, distinct fake domains and source mix (excludes real)", func() {

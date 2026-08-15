@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
@@ -21,9 +23,13 @@ import (
 // statsAPI so the server can Close its lazily-opened read-only reader on
 // shutdown/rebuild (otherwise each apply leaks one sqlite RO connection).
 func registerStatsUIEndpoints(
-	router *chi.Mux, cfg *config.Config, hub *querylog.Hub, store *configstore.Store, classifier clientClassifier,
+	ctx context.Context, router *chi.Mux, cfg *config.Config, hub *querylog.Hub,
+	store *configstore.Store, classifier clientClassifier,
 ) *statsAPI {
 	s := &statsAPI{qlCfg: cfg.QueryLog, hub: hub, store: store, classifier: classifier, start: time.Now()}
+
+	// persistent system-usage sampler on the server-lifetime ctx (survives applies)
+	s.startSampler(ctx)
 
 	router.Route("/api/ui/stats", func(r chi.Router) {
 		r.Get("/overview", s.overview)
@@ -77,6 +83,11 @@ type statsAPI struct {
 
 	mu     sync.Mutex
 	reader *querylog.Reader // constructed lazily: the writer must create the DB file first
+
+	// sysUsage holds the latest system-usage sample (per-core CPU / RAM / disk +
+	// R/W), published by a persistent sampler on the server-lifetime ctx and
+	// merged into GET /api/ui/system. nil until the first sample / on non-linux.
+	sysUsage atomic.Pointer[sysSnapshot]
 }
 
 // getReader lazily opens the read-only sqlite handle. Errors are not cached:

@@ -281,7 +281,7 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		classifier = server.decoySource
 	}
 
-	httpRouter, statsCloser := createHTTPRouter(cfg, openAPIImpl, store, server, server.qlHub, blStats, classifier)
+	httpRouter, statsCloser := createHTTPRouter(ctx, cfg, openAPIImpl, store, server, server.qlHub, blStats, classifier)
 	server.persistentClosers = append(server.persistentClosers, statsCloser) // stats RO reader, closed in Stop
 	server.registerDoHEndpoints(httpRouter, cfg)
 

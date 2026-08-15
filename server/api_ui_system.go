@@ -33,7 +33,7 @@ func (s *statsAPI) system(rw http.ResponseWriter, _ *http.Request) {
 		queriesTotal, _ = reader.TotalQueries()
 	}
 
-	writeJSON(rw, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"version":         util.Version,
 		"buildTime":       util.BuildTime,
 		"uptimeSeconds":   int64(time.Since(s.start).Seconds()),
@@ -42,7 +42,23 @@ func (s *statsAPI) system(rw http.ResponseWriter, _ *http.Request) {
 		"dbConfigBytes":   dbConfigBytes,
 		"dbQuerylogBytes": dbQuerylogBytes,
 		"queriesTotal":    queriesTotal,
-	})
+	}
+
+	// Merge the latest system-usage sample when the sampler has published one
+	// (linux only; nil before the first tick / on other platforms). Absent fields
+	// are the degrade contract: the UI header stays hidden until they appear.
+	if snap := s.sysUsage.Load(); snap != nil {
+		out["cpuPerCore"] = snap.CPUPerCore
+		out["cpuTotal"] = snap.CPUTotal
+		out["memUsed"] = snap.MemUsed
+		out["memTotal"] = snap.MemTotal
+		out["diskUsed"] = snap.DiskUsed
+		out["diskTotal"] = snap.DiskTotal
+		out["diskReadBps"] = snap.DiskReadBps
+		out["diskWriteBps"] = snap.DiskWriteBps
+	}
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 func fileSize(path string) int64 {

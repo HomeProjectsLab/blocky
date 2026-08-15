@@ -85,6 +85,20 @@ a { color: var(--accent); }
     background: var(--muted);
 }
 .ticker-text { overflow: hidden; text-overflow: ellipsis; }
+
+/* header system-usage strip (per-core CPU / RAM / disk / IO), fed by app.js */
+.sysbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 1.25rem;
+    padding: 0.3rem 1rem;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--ink2); background: var(--bg1);
+    border-top: 1px solid var(--grid);
+}
+.sysbar-item { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+.sysbar-label { color: var(--muted); letter-spacing: 0.06em; }
+.sysbar-value { color: var(--ink); }
+.cpu-bars { display: inline-flex; align-items: flex-end; gap: 1px; height: 14px; }
+.cpu-bar { width: 4px; min-height: 2px; border-radius: 1px 1px 0 0; background: var(--c-resolved); }
 @media (prefers-reduced-motion: no-preference) {
     .ticker-text.tick { animation: tickfade 0.4s ease-out; }
     @keyframes tickfade { from { opacity: 0.35; } to { opacity: 1; } }
