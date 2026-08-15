@@ -25,7 +25,7 @@ import (
 )
 
 type logEntry struct {
-	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2"`
+	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2;index:idx_decoy_request_ts,priority:2"`
 	ClientIP      string
 	ClientName    string `gorm:"index;index:idx_client_name_request_ts,priority:1"`
 	DurationMs    int64
@@ -43,7 +43,7 @@ type logEntry struct {
 	SNI           string `gorm:"column:sni"`
 	EDNSUDPSize   uint16 `gorm:"column:edns_udp_size"`
 	EDNSOptCodes  string `gorm:"column:edns_opt_codes"` // wire order, e.g. "10,8,12"
-	Decoy         bool   `gorm:"index"`
+	Decoy         bool   `gorm:"index;index:idx_decoy_request_ts,priority:1"`
 	DecoySource   string `gorm:"index"` // provenance label for decoys (empty for real rows)
 	FpDetail      string // JSON with the per-query fingerprint noise
 }

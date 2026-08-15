@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -19,7 +20,18 @@ import (
 // individual rows and is time-bounded + index-backed).
 type Reader struct {
 	db *gorm.DB
+
+	// TotalQueries is polled ~once/second by the dashboard and is a COUNT(*) over
+	// the whole (unboundedly growing) log_entries table, so it is cached with a
+	// short TTL — a display total doesn't need per-second freshness, and the raw
+	// scan otherwise thrashes the disk on a large DB.
+	totalMu    sync.Mutex
+	totalCache int64
+	totalAt    time.Time
 }
+
+// totalQueriesTTL bounds how often TotalQueries re-runs its COUNT(*).
+const totalQueriesTTL = 30 * time.Second
 
 // NewReader opens the query-log database read-only (mode=ro, busy_timeout).
 func NewReader(sqlitePath string) (*Reader, error) {
@@ -394,9 +406,21 @@ func itemFromRow(e *logEntry) QueryItem {
 
 // TotalQueries counts all raw log rows (decoys included), for /api/ui/system.
 func (r *Reader) TotalQueries() (int64, error) {
-	var count int64
+	r.totalMu.Lock()
+	defer r.totalMu.Unlock()
 
-	return count, r.db.Model(&logEntry{}).Count(&count).Error
+	if !r.totalAt.IsZero() && time.Since(r.totalAt) < totalQueriesTTL {
+		return r.totalCache, nil
+	}
+
+	var count int64
+	if err := r.db.Model(&logEntry{}).Count(&count).Error; err != nil {
+		return r.totalCache, err // serve the last good value on a transient error
+	}
+
+	r.totalCache, r.totalAt = count, time.Now()
+
+	return count, nil
 }
 
 // ClientRow is one entry of the /api/ui/clients list response. The ips/

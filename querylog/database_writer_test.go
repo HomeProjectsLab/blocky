@@ -369,6 +369,7 @@ var _ = Describe("DatabaseWriter", func() {
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_client_name"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_request_ts"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_client_name_request_ts"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_decoy_request_ts"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_question_name"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_transport"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_fp_hash"`).WillReturnResult(sqlmock.NewResult(0, 0))
