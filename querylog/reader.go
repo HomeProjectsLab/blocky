@@ -399,12 +399,19 @@ func (r *Reader) TotalQueries() (int64, error) {
 	return count, r.db.Model(&logEntry{}).Count(&count).Error
 }
 
-// ClientRow is one entry of the /api/ui/clients list response.
+// ClientRow is one entry of the /api/ui/clients list response. The ips/
+// natAggregate/fpCount/deviceGuess fields are derived from the raw log_entries
+// rows (see client_enrich.go); they're optional so an unenriched row stays lean.
 type ClientRow struct {
 	Name     string `json:"name"`
 	Queries  int64  `json:"queries"`
 	Blocked  int64  `json:"blocked"`
 	LastSeen string `json:"lastSeen"`
+	// DNS-native client identity enrichment.
+	IPs          []string `json:"ips,omitempty"`
+	NatAggregate bool     `json:"natAggregate,omitempty"`
+	FpCount      int      `json:"fpCount,omitempty"`
+	DeviceGuess  string   `json:"deviceGuess,omitempty"`
 }
 
 // ClientList ranks clients by query count in the range (from the hourly aggregates).
@@ -425,12 +432,24 @@ func (r *Reader) ClientList(from, to time.Time) ([]ClientRow, error) {
 		return nil, err
 	}
 
+	// one extra windowed scan of log_entries yields IPs / fp count / device guess
+	// per client (the aggregates lack client_ip and a distinct-fp count).
+	enrich, err := r.enrichClients(from, to)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make([]ClientRow, 0, len(rows))
 	for i := range rows {
-		out = append(out, ClientRow{
+		row := ClientRow{
 			Name: rows[i].Name, Queries: rows[i].Queries, Blocked: rows[i].Blocked,
 			LastSeen: normalizeSQLiteTime(rows[i].LastHour),
-		})
+		}
+		if e, ok := enrich[rows[i].Name]; ok {
+			row.IPs, row.NatAggregate, row.FpCount, row.DeviceGuess = e.IPs, e.NatAggregate, e.FpCount, e.DeviceGuess
+		}
+
+		out = append(out, row)
 	}
 
 	return out, nil
@@ -482,6 +501,11 @@ type ClientDetail struct {
 	Transports   []TopItem   `json:"transports"`
 	Fingerprints []FpCluster `json:"fingerprints"`
 	TopDomains   []TopItem   `json:"topDomains"`
+	// DNS-native client identity enrichment (see client_enrich.go).
+	IPs          []string `json:"ips,omitempty"`
+	NatAggregate bool     `json:"natAggregate,omitempty"`
+	FpCount      int      `json:"fpCount,omitempty"`
+	DeviceGuess  string   `json:"deviceGuess,omitempty"`
 }
 
 // ClientDetail assembles the drill-down for one client (keyed by the exact
@@ -539,6 +563,14 @@ func (r *Reader) ClientDetail(name string, from, to time.Time) (*ClientDetail, e
 	if err := r.fingerprintClusters(d, name, from, to); err != nil {
 		return nil, err
 	}
+
+	// derive IPs / distinct-fp count / device guess from the raw rows
+	e, err := r.enrichClient(name, from, to)
+	if err != nil {
+		return nil, err
+	}
+
+	d.IPs, d.NatAggregate, d.FpCount, d.DeviceGuess = e.IPs, e.NatAggregate, e.FpCount, e.DeviceGuess
 
 	return d, nil
 }

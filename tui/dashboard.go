@@ -24,7 +24,7 @@ type Dashboard struct {
 	overview  Overview
 	decoy     DecoyOverview
 	topDom    []TopItem
-	topCli    []TopItem
+	clients   []ClientInfo
 	vitals    Vitals
 	rows      []QueryItem // newest last
 	paused    bool
@@ -158,8 +158,8 @@ func (d *Dashboard) refreshOnce() {
 		d.topDom = t
 	}
 
-	if t, e := d.api.Top("client", 8); e == nil {
-		d.topCli = t
+	if cl, e := d.api.Clients(); e == nil {
+		d.clients = cl
 	}
 }
 
@@ -357,8 +357,50 @@ func (d *Dashboard) drawSidePanels(s tcell.Screen, x, w, h int, base tcell.Style
 	drawTop(s, x, 7, half-1, base, d.topDom, w-x-1)
 
 	cy := 7 + half
-	drawText(s, x, cy, hdr, "TOP CLIENTS")
-	drawTop(s, x, cy+1, half-1, base, d.topCli, w-x-1)
+	drawText(s, x, cy, hdr, "CLIENTS")
+	drawClients(s, x, cy+1, h-2, base, d.clients, w-x-1)
+}
+
+// drawClients renders the identified-client list: one head line per client
+// (hostname  queries/blocked  [NAT xN]) plus a dim sub-line (ip · guess) when
+// there is room and info to show. Stops at maxY, leaving the footer clear.
+func drawClients(s tcell.Screen, x, y, maxY int, base tcell.Style, clients []ClientInfo, width int) {
+	dim := base.Dim(true)
+
+	for _, c := range clients {
+		if y > maxY {
+			break
+		}
+
+		nat := ""
+		if c.NatAggregate {
+			nat = fmt.Sprintf(" [NAT x%d]", c.FpCount)
+		}
+
+		head := fmt.Sprintf("%s  %d/%d%s", c.Name, c.Queries, c.Blocked, nat)
+		drawText(s, x, y, base, trunc(head, width))
+		y++
+
+		ip := ""
+		if len(c.IPs) > 0 && c.IPs[0] != c.Name {
+			ip = c.IPs[0]
+		}
+
+		var sub string
+		switch {
+		case ip != "" && c.DeviceGuess != "":
+			sub = ip + " " + c.DeviceGuess
+		case ip != "":
+			sub = ip
+		default:
+			sub = c.DeviceGuess
+		}
+
+		if sub != "" && y <= maxY {
+			drawText(s, x, y, dim, "  "+trunc(sub, width-2))
+			y++
+		}
+	}
 }
 
 func drawTop(s tcell.Screen, x, y, rows int, base tcell.Style, items []TopItem, width int) {

@@ -91,9 +91,11 @@ func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
 //
 // Contract:
 //
-//	GET  /api/ui/clients            -> {"clients":[{name,queries,blocked,lastSeen}]}
+//	GET  /api/ui/clients            -> {"clients":[{name,queries,blocked,lastSeen,
+//	                                   ips[],natAggregate,fpCount,deviceGuess}]}
 //	GET  /api/ui/clients/{name}     -> ClientDetail (history, transports,
-//	                                   fingerprints[], topDomains) — see querylog.Reader
+//	                                   fingerprints[], topDomains, plus ips[]/
+//	                                   natAggregate/fpCount/deviceGuess) — see querylog.Reader
 //	GET  /api/ui/privacy            -> the privacy config block (see privacyJSON)
 //	PUT  /api/ui/privacy            -> apply a new privacy config block, 204 on success
 //

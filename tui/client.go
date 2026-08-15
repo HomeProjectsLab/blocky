@@ -53,6 +53,19 @@ type TopItem struct {
 	Count int64  `json:"count"`
 }
 
+// ClientInfo mirrors one /api/ui/clients entry (DNS-native identification).
+// The last four fields are omitempty server-side: treat missing as none/0/false/"".
+type ClientInfo struct {
+	Name         string   `json:"name"`
+	IPs          []string `json:"ips"`
+	Queries      int64    `json:"queries"`
+	Blocked      int64    `json:"blocked"`
+	LastSeen     string   `json:"lastSeen"`
+	NatAggregate bool     `json:"natAggregate"`
+	FpCount      int      `json:"fpCount"`
+	DeviceGuess  string   `json:"deviceGuess"`
+}
+
 // Client is a thin JSON client for the blocky /api/ui/* endpoints.
 type Client struct {
 	Base string // e.g. http://localhost:80
@@ -106,6 +119,16 @@ func (c *Client) Top(col string, n int) ([]TopItem, error) {
 	err := c.getJSON(fmt.Sprintf("/api/ui/stats/top?col=%s&n=%d", col, n), &out)
 
 	return out.Items, err
+}
+
+// Clients fetches the identified-client list from /api/ui/clients.
+func (c *Client) Clients() ([]ClientInfo, error) {
+	var out struct {
+		Clients []ClientInfo `json:"clients"`
+	}
+	err := c.getJSON("/api/ui/clients", &out)
+
+	return out.Clients, err
 }
 
 // Stream opens the SSE feed and calls onQuery for every "query" event until the

@@ -93,6 +93,22 @@ function fpPanel(fingerprints) {
 
 function escapeHTML(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
+// DNS-native identity chips: distinct IP(s) (deduped against the name/PTR),
+// server-side device/vendor guess, and a NAT-aggregate warning badge.
+function identityHTML(c) {
+    const chips = [];
+    const ips = (c.ips || []).filter((ip) => ip && ip !== c.name);
+    for (const ip of ips) chips.push(`<span class="chip">${escapeHTML(ip)}</span>`);
+    if (c.deviceGuess) chips.push(`<span class="chip cc-iot">${escapeHTML(c.deviceGuess)}</span>`);
+    if (c.natAggregate) {
+        const n = c.fpCount || 0;
+        chips.push(`<span class="chip cc-server" title="Many devices share this one address — traffic here can't be split further per-device.">⚠ NAT · ${fmtNum(n)} devices</span>`);
+    } else if (c.fpCount) {
+        chips.push(`<span class="chip">${fmtNum(c.fpCount)} device fingerprints</span>`);
+    }
+    return chips.join(" ");
+}
+
 function section(heading) {
     const h = document.createElement("h2");
     h.className = "sub-h";
@@ -126,6 +142,14 @@ async function openDetail(name) {
     stat.className = "empty";
     stat.textContent = `${fmtNum(d.queries)} queries · ${fmtNum(d.blocked)} blocked (last 24h)`;
     detail.append(stat);
+
+    const idHTML = identityHTML(d);
+    if (idHTML) {
+        const idRow = document.createElement("div");
+        idRow.className = "fp-feats cl-identity";
+        idRow.innerHTML = idHTML;
+        detail.append(idRow);
+    }
 
     if (d.history && d.history.length > 1) {
         detail.append(section("Activity"));
@@ -213,6 +237,7 @@ async function load() {
         const tr = document.createElement("tr");
         tr.innerHTML =
             `<td>${escapeHTML(c.name || "—")}</td>` +
+            `<td class="cl-identity">${identityHTML(c) || "—"}</td>` +
             `<td class="num">${fmtNum(c.queries)}</td>` +
             `<td class="num">${fmtNum(c.blocked)}</td>` +
             `<td>${c.lastSeen ? fmtDateTime(c.lastSeen) : "—"}</td>`;
