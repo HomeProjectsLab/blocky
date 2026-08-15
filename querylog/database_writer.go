@@ -75,6 +75,9 @@ type DatabaseWriter struct {
 	// aggregate is true for sqlite targets: the hourly aggregate tables (see
 	// aggregates.go) back the /api/ui stats reader, which is sqlite-only.
 	aggregate bool
+	// dbPath is the sqlite file path (empty for remote DBs); the disk guardian
+	// stats its directory to keep the filesystem below the free-space target.
+	dbPath string
 }
 
 func NewDatabaseWriter(ctx context.Context, dbType config.QueryLogType, target string, logRetentionDays uint64,
@@ -91,7 +94,17 @@ func NewDatabaseWriter(ctx context.Context, dbType config.QueryLogType, target s
 			return nil, err
 		}
 
-		return newDatabaseWriter(ctx, dialector, logRetentionDays, dbFlushPeriod, dbType)
+		w, err := newDatabaseWriter(ctx, dialector, logRetentionDays, dbFlushPeriod, dbType)
+		if err != nil {
+			return nil, err
+		}
+
+		// keep the DB filesystem below the free-space target by pruning oldest
+		// raw rows (stats live in the aggregate tables and are preserved)
+		w.dbPath = target
+		go w.diskGuardian(ctx)
+
+		return w, nil
 	}
 
 	return nil, fmt.Errorf("incorrect database type provided: %s", dbType)
@@ -126,6 +139,11 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 		}
 
 		sqlDB.SetMaxOpenConns(1)
+
+		// Enable incremental auto-vacuum on a FRESH db (before any table exists) so
+		// the disk guardian can return freed pages to the OS without a full,
+		// 2x-space VACUUM. No-op on a pre-existing db created without it.
+		db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
 	}
 
 	// Migrate the schema
