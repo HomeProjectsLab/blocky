@@ -23,7 +23,7 @@ HERE="$REPO_ROOT/deploy/rpi"
 
 BASE_URL="${BASE_URL:-https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2024-11-19/2024-11-19-raspios-bookworm-arm64-lite.img.xz}"
 BASE_IMG="${BASE_IMG:-}"
-OUT="${OUT:-$REPO_ROOT/blocky-rpi3-arm64.img.xz}"
+OUT="${OUT:-$REPO_ROOT/jungleblock-rpi3-arm64.img.xz}"
 SELF_TEST=0
 RAW="${RAW:-0}"
 
