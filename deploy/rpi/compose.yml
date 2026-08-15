@@ -1,7 +1,11 @@
 # blocky appliance — container stack for the Raspberry Pi image.
 #
-# Updates are pull-based: push a new image to ghcr, Watchtower notices within
-# its poll interval and restarts the container. No SSH into the appliance.
+# Updates are pull-based: push a new image to ghcr and the box picks it up via
+# `docker compose pull && up -d` — on every boot (bootstrap.sh) and every few
+# minutes (blocky-update.timer, a host systemd unit). We do NOT use Watchtower:
+# containrrr/watchtower is abandoned and its Docker API client (v1.25) is too
+# old for a modern Docker Engine (min API 1.40), so it crash-looped forever and
+# never updated anything. The host docker CLI always matches the daemon's API.
 services:
   blocky:
     image: ghcr.io/homeprojectslab/blocky:latest
@@ -19,8 +23,6 @@ services:
       - /boot/firmware/appliance.yml:/appliance.yml:ro
     cap_add:
       - NET_BIND_SERVICE # bind :53 and :80 without running as root
-    labels:
-      - com.centurylinklabs.watchtower.enable=true
     healthcheck:
       test: ["CMD", "/app/blocky", "healthcheck"]
       interval: 30s
@@ -31,15 +33,3 @@ services:
   # The HDMI console dashboard is NOT here: it runs as a host systemd unit
   # (blocky-dashboard.service) bound to tty1, because a container with tty:true
   # draws into a dockerd-held PTY that never renders on the physical console.
-
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    # --label-enable: only touch containers that opt in above, so Watchtower
-    # never restarts itself or anything else the operator adds later.
-    command: --interval 30 --cleanup --label-enable
-    labels:
-      - com.centurylinklabs.watchtower.enable=false

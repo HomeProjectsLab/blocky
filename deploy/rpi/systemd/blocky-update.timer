@@ -1,0 +1,12 @@
+[Unit]
+Description=blocky appliance auto-update timer (checks ghcr for a newer image)
+
+[Timer]
+# First check shortly after boot (bootstrap already pulled once), then every
+# 5 minutes. Persistent catches up a missed run after downtime.
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

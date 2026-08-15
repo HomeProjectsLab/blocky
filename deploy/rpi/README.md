@@ -43,7 +43,7 @@ Then point your LAN's DHCP DNS (or each device) at the Pi's IP. The web UI is at
 
 ## Updates are pull-based — no SSH needed
 
-The appliance runs from containers and a **Watchtower** sidecar polls
+The appliance runs from containers and pull a newer image via a host systemd timer (blocky-update.timer) — polling
 `ghcr.io/homeprojectslab/blocky:latest` **every 30 s**. Push a new image and the
 Pi restarts itself onto it within the poll interval — which is why the box needs
 no inbound access at all.
@@ -61,7 +61,7 @@ Two consequences worth knowing:
 
 | Path | Purpose |
 |------|---------|
-| `/opt/blocky/compose.yml` | resolver + dashboard + Watchtower stack |
+| `/opt/blocky/compose.yml` | resolver container (dashboard + auto-update are host units) |
 | `/opt/blocky/bootstrap.sh` | first-boot Docker install, config seed, `compose up` |
 | `/etc/systemd/system/blocky-stack.service` | brings the stack up at boot |
 | `/boot/firmware/appliance.yml` | first-boot seed config (port 80, recursive default, noise on) |

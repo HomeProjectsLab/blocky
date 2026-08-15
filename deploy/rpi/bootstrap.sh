@@ -78,4 +78,4 @@ log "starting stack"
 docker compose -f "$COMPOSE" pull --quiet || log "pull failed, using cached images"
 docker compose -f "$COMPOSE" up -d --remove-orphans
 
-log "up. web UI on :80, DNS on :53, Watchtower polling for updates."
+log "up. web UI on :80, DNS on :53, auto-update timer active."

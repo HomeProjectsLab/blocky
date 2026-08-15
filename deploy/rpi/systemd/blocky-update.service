@@ -1,0 +1,16 @@
+[Unit]
+Description=blocky appliance auto-update (pull latest image, recreate if changed)
+Documentation=https://github.com/HomeProjectsLab/blocky
+Requires=blocky-stack.service
+After=blocky-stack.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Replaces the abandoned Watchtower container (its Docker API client v1.25 is
+# too old for a modern Docker Engine, min API 1.40, so it crash-looped and never
+# updated). Uses the HOST docker CLI, so the API version always matches the
+# daemon. `up -d` recreates the container only when the pulled image changed.
+ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml pull --quiet blocky
+ExecStart=/usr/bin/docker compose -f /opt/blocky/compose.yml up -d blocky
+ExecStartPost=-/usr/bin/docker image prune -f

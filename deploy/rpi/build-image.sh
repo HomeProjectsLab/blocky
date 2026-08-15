@@ -130,7 +130,7 @@ mount "$ROOTLP" "$ROOT_MNT"
 
 # --- 4. inject ----------------------------------------------------------------
 echo ">> injecting blocky stack + units + config…"
-# The appliance runs from containers so Watchtower can update it in place
+# The appliance runs from containers so a new image can be pulled in place
 # (no SSH into the box). The native binary is still injected as a rescue tool
 # for offline debugging, but nothing starts it.
 install -Dm755 "$BIN" "$ROOT_MNT/usr/local/bin/blocky"
@@ -143,6 +143,13 @@ install -Dm644 "$HERE/systemd/blocky-dashboard.service" "$ROOT_MNT/etc/systemd/s
 install -d "$ROOT_MNT/etc/systemd/system/multi-user.target.wants"
 ln -sf ../blocky-stack.service     "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-stack.service"
 ln -sf ../blocky-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/blocky-dashboard.service"
+
+# Auto-update (replaces the abandoned Watchtower container): a host systemd
+# timer pulls the latest image and recreates blocky if it changed.
+install -Dm644 "$HERE/systemd/blocky-update.service" "$ROOT_MNT/etc/systemd/system/blocky-update.service"
+install -Dm644 "$HERE/systemd/blocky-update.timer"   "$ROOT_MNT/etc/systemd/system/blocky-update.timer"
+install -d "$ROOT_MNT/etc/systemd/system/timers.target.wants"
+ln -sf ../blocky-update.timer "$ROOT_MNT/etc/systemd/system/timers.target.wants/blocky-update.timer"
 ln -sf /dev/null "$ROOT_MNT/etc/systemd/system/getty@tty1.service"   # host blocky-dashboard.service owns tty1
 # The user is seeded via userconf.txt, so RPi's first-boot account dialog has
 # nothing to do — but it stays enabled and spams "Failed to start userconfig"
