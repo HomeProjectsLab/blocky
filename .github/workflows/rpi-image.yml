@@ -24,34 +24,34 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Cross-compile blocky (linux/arm64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o blocky-arm64 .
+      - name: Cross-compile jungleblock (linux/arm64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o jungleblock-arm64 .
 
       - name: Bake image (privileged)
         run: |
           docker run --privileged --rm \
-            -v "$PWD":/repo -v "$PWD/blocky-arm64":/blocky-arm64:ro -w /repo \
-            -e BLOCKY_BIN=/blocky-arm64 -e OUT=/repo/blocky-rpi3-arm64.img.xz \
+            -v "$PWD":/repo -v "$PWD/jungleblock-arm64":/jungleblock-arm64:ro -w /repo \
+            -e BLOCKY_BIN=/jungleblock-arm64 -e OUT=/repo/jungleblock-rpi3-arm64.img.xz \
             ubuntu:24.04 bash -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq && apt-get install -y -qq util-linux dosfstools e2fsprogs xz-utils fdisk curl ca-certificates >/dev/null
               deploy/rpi/build-image.sh'
 
       - name: Checksums
-        run: sha256sum blocky-rpi3-arm64.img.xz | tee blocky-rpi3-arm64.img.xz.sha256
+        run: sha256sum jungleblock-rpi3-arm64.img.xz | tee jungleblock-rpi3-arm64.img.xz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: blocky-rpi3-arm64-image
+          name: jungleblock-rpi3-arm64-image
           path: |
-            blocky-rpi3-arm64.img.xz
-            blocky-rpi3-arm64.img.xz.sha256
+            jungleblock-rpi3-arm64.img.xz
+            jungleblock-rpi3-arm64.img.xz.sha256
 
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            blocky-rpi3-arm64.img.xz
-            blocky-rpi3-arm64.img.xz.sha256
+            jungleblock-rpi3-arm64.img.xz
+            jungleblock-rpi3-arm64.img.xz.sha256

@@ -1,5 +1,5 @@
-site_name: blocky
-site_description: blocky Documentation
+site_name: JungleBlock
+site_description: JungleBlock Documentation
 theme:
   name: material
   features:
