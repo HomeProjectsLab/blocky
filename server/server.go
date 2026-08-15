@@ -260,6 +260,12 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 
 	server.live.Store(bundle)
 
+	// First-boot only: hand freed pages back to the OS so the startup memstats
+	// logged by printConfiguration reflect steady state. FreeOSMemory does a
+	// synchronous madvise on top of the STW GC, so it must NOT run on the per-apply
+	// hot-swap path (printConfiguration's own runtime.GC is the cheap part kept there).
+	debug.FreeOSMemory()
+
 	server.printConfiguration(bundle)
 
 	server.registerDNSHandlers(ctx)
@@ -918,9 +924,12 @@ func (s *Server) printConfiguration(b *resolverBundle) {
 
 	logger().Info("runtime information:")
 
-	// force garbage collector
+	// A plain GC here (per boot AND per hot-swap apply) is what actually reclaims a
+	// retired bundle's sqlite writer FDs: closeDB shuts the *sql.DB but gorm's cached
+	// prepared statements keep the underlying file descriptor alive until their
+	// finalizers run. This is cheap (no madvise) — the expensive debug.FreeOSMemory()
+	// that the finding flagged is first-boot-only, in NewServer.
 	runtime.GC()
-	debug.FreeOSMemory()
 
 	logger().Infof("  numCPU =       %d", runtime.NumCPU())
 	logger().Infof("  numGoroutine = %d", runtime.NumGoroutine())

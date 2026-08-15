@@ -241,8 +241,21 @@ func (s *Store) RawYAML() (string, error) {
 }
 
 // SetRawYAML validates data through the full config pipeline and persists it
-// only on success. The stored blob is untouched when validation fails.
+// only on success. The stored blob is untouched when validation fails. It takes
+// s.mu so a raw-editor write serializes against the section writers
+// (SetPrivacy/SetLocalDNSZone) the same way those already serialize against each
+// other — otherwise a section writer built from a pre-save snapshot silently
+// reverts this save.
 func (s *Store) SetRawYAML(data string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.setRawYAML(data)
+}
+
+// setRawYAML is the unlocked body of SetRawYAML. Callers that already hold s.mu
+// (SetPrivacy, SetLocalDNSZone) call this directly to avoid self-deadlock.
+func (s *Store) setRawYAML(data string) error {
 	if err := s.ValidateRaw(data); err != nil {
 		return err
 	}

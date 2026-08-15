@@ -65,7 +65,7 @@ func (s *Store) SetLocalDNSZone(zoneText string) error {
 		return fmt.Errorf("can't marshal merged config: %w", err)
 	}
 
-	return s.SetRawYAML(string(merged))
+	return s.setRawYAML(string(merged))
 }
 
 // nestedMap normalizes a yaml.v2 submap (map[any]any) or a map[string]any into

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"testing"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
@@ -700,3 +701,121 @@ var _ = Describe("CustomDNSResolver", func() {
 		})
 	})
 })
+
+// --- Fuzz + property tests for the customDNS answer path ---------------------
+//
+// Invariant under test: for a *present* mapped name, resolution never SERVFAILs
+// and never panics regardless of the stored RR type vs. the queried qtype. A
+// present-but-wrong type yields NODATA (NOERROR + empty answer), not an error.
+// Property: queried type present -> answer returned; absent -> empty answer.
+
+// fuzzRR returns a representative RR of the given DNS type, named on the mapped
+// domain. CNAME is included for the no-panic/no-SERVFAIL invariant but is
+// excluded from the present/absent property below (a CNAME is chased, so it is
+// returned even for a differing qtype — standard DNS, not NODATA).
+func fuzzRR(qtype uint16) dns.RR {
+	hdr := dns.RR_Header{Name: "fuzz.example.", Class: dns.ClassINET, Rrtype: qtype, Ttl: 3600}
+
+	switch qtype {
+	case dns.TypeA:
+		return &dns.A{Hdr: hdr, A: net.ParseIP("1.2.3.4")}
+	case dns.TypeAAAA:
+		return &dns.AAAA{Hdr: hdr, AAAA: net.ParseIP("2001:db8::1")}
+	case dns.TypeTXT:
+		return &dns.TXT{Hdr: hdr, Txt: []string{"fuzz", "value"}}
+	case dns.TypeSRV:
+		return &dns.SRV{Hdr: hdr, Priority: 1, Weight: 5, Port: 8080, Target: "svc.example."}
+	case dns.TypeCNAME:
+		return &dns.CNAME{Hdr: hdr, Target: "other.example."}
+	case dns.TypeMX:
+		return &dns.MX{Hdr: hdr, Preference: 10, Mx: "mail.example."}
+	case dns.TypeNS:
+		return &dns.NS{Hdr: hdr, Ns: "ns.example."}
+	case dns.TypePTR:
+		return &dns.PTR{Hdr: hdr, Ptr: "ptr.example."}
+	case dns.TypeCAA:
+		return &dns.CAA{Hdr: hdr, Flag: 0, Tag: "issue", Value: "ca.example"}
+	default:
+		return nil
+	}
+}
+
+// fuzzTypes is the set of RR types both stored and queried by the fuzz/property
+// tests. Keep A/AAAA/TXT/SRV/CNAME first so the special-cased answer paths are
+// always exercised.
+var fuzzTypes = []uint16{ //nolint:gochecknoglobals
+	dns.TypeA, dns.TypeAAAA, dns.TypeTXT, dns.TypeSRV, dns.TypeCNAME,
+	dns.TypeMX, dns.TypeNS, dns.TypePTR, dns.TypeCAA,
+}
+
+// checkCustomDNSAnswerPath asserts the invariants for one (storedType, queriedType)
+// pair. It fails the test (via t) on any violation.
+func checkCustomDNSAnswerPath(t *testing.T, storedType, queriedType uint16) {
+	t.Helper()
+
+	rr := fuzzRR(storedType)
+	if rr == nil {
+		return // type not in our representative set
+	}
+
+	sut := NewCustomDNSResolver(config.CustomDNS{
+		Mapping:             config.CustomDNSMapping{"fuzz.example.": {rr}},
+		FilterUnmappedTypes: true,
+	})
+	sut.Next(NewNoOpResolver())
+
+	resp, err := sut.Resolve(context.Background(), newRequest("fuzz.example.", dns.Type(queriedType)))
+	// Present name must never SERVFAIL.
+	if err != nil {
+		t.Fatalf("stored=%d queried=%d: unexpected error (SERVFAIL): %v", storedType, queriedType, err)
+	}
+	if resp == nil || resp.Res == nil {
+		t.Fatalf("stored=%d queried=%d: nil response for present name", storedType, queriedType)
+	}
+	if resp.Res.Rcode == dns.RcodeServerFailure {
+		t.Fatalf("stored=%d queried=%d: SERVFAIL rcode on present name", storedType, queriedType)
+	}
+
+	// present/absent property. CNAME is chased, so skip it as a stored type.
+	if storedType == dns.TypeCNAME {
+		return
+	}
+
+	got := len(resp.Res.Answer)
+	if queriedType == storedType {
+		if got == 0 {
+			t.Fatalf("stored=%d queried=%d: type present but no answer returned", storedType, queriedType)
+		}
+	} else if got != 0 {
+		t.Fatalf("stored=%d queried=%d: type absent but %d answer(s) returned (expected NODATA)",
+			storedType, queriedType, got)
+	}
+}
+
+// TestCustomDNSAnswerPathProperty exhaustively checks the present/absent property
+// over every (stored, queried) type pair.
+func TestCustomDNSAnswerPathProperty(t *testing.T) {
+	for _, st := range fuzzTypes {
+		for _, qt := range fuzzTypes {
+			checkCustomDNSAnswerPath(t, st, qt)
+		}
+	}
+}
+
+// FuzzCustomDNSAnswerPath fuzzes the stored RR type and queried qtype (indices
+// into fuzzTypes) and asserts the same invariants on random combinations.
+func FuzzCustomDNSAnswerPath(f *testing.F) {
+	// Seed corpus: cover the matching-type case, a cross-type case, and CNAME.
+	f.Add(uint8(0), uint8(0)) // A / A
+	f.Add(uint8(0), uint8(1)) // A / AAAA
+	f.Add(uint8(2), uint8(5)) // TXT / MX
+	f.Add(uint8(4), uint8(0)) // CNAME / A (chase)
+	f.Add(uint8(7), uint8(7)) // PTR / PTR
+	f.Add(uint8(8), uint8(3)) // CAA / SRV
+
+	f.Fuzz(func(t *testing.T, a, b uint8) {
+		storedType := fuzzTypes[int(a)%len(fuzzTypes)]
+		queriedType := fuzzTypes[int(b)%len(fuzzTypes)]
+		checkCustomDNSAnswerPath(t, storedType, queriedType)
+	})
+}

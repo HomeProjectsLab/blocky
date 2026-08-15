@@ -214,15 +214,40 @@ var _ = Describe("Local DNS UI endpoints", func() {
 		Expect(m["error"]).Should(ContainSubstring("good.lan"))
 	})
 
-	It("rejects malformed records assembled from rows", func() {
+	It("rejects malformed records assembled from rows and persists nothing", func() {
+		// seed a known-good zone so we can prove the bad PUT left it untouched
+		Expect(store.SetLocalDNSZone("good.lan.\t3600\tIN\tA\t10.0.0.1\n")).Should(Succeed())
+
 		put := ldnsExec(http.MethodPut, "/api/ui/localdns/",
 			[]byte(`{"records":[{"name":"bad.lan","type":"A","value":"not-an-ip"}]}`))
 		Expect(put.Code).Should(Equal(http.StatusBadRequest))
+
+		// the rejected PUT must not have overwritten the stored zone
+		stored, err := store.GetLocalDNSZone()
+		Expect(err).Should(Succeed())
+		Expect(stored).Should(Equal("good.lan.\t3600\tIN\tA\t10.0.0.1\n"))
+		Expect(stored).ShouldNot(ContainSubstring("bad.lan"))
 	})
 
 	It("rejects a malformed JSON body", func() {
 		put := ldnsExec(http.MethodPut, "/api/ui/localdns/", []byte(`{oops`))
 		Expect(put.Code).Should(Equal(http.StatusBadRequest))
+	})
+
+	It("rejects a row that the zone parser silently drops (';' comment) and persists nothing", func() {
+		// a name containing ';' assembles to a line the parser treats as a comment:
+		// it validates (empty zone) but the submitted record vanishes. The round-trip
+		// count guard must turn that into a 400 instead of a misleading 200. (Found by
+		// FuzzAssembleZone.)
+		Expect(store.SetLocalDNSZone("keep.lan.\t3600\tIN\tA\t10.0.0.1\n")).Should(Succeed())
+
+		put := ldnsExec(http.MethodPut, "/api/ui/localdns/",
+			[]byte(`{"records":[{"name":";evil","type":"A","value":"10.0.0.9"}]}`))
+		Expect(put.Code).Should(Equal(http.StatusBadRequest))
+
+		stored, err := store.GetLocalDNSZone()
+		Expect(err).Should(Succeed())
+		Expect(stored).Should(Equal("keep.lan.\t3600\tIN\tA\t10.0.0.1\n")) // untouched
 	})
 
 	It("returns 503 when the store is nil (GET and PUT)", func() {

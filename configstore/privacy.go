@@ -46,5 +46,5 @@ func (s *Store) SetPrivacy(p config.PrivacyConfig) error {
 		return fmt.Errorf("can't marshal merged config: %w", err)
 	}
 
-	return s.SetRawYAML(string(merged))
+	return s.setRawYAML(string(merged))
 }

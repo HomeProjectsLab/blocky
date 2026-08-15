@@ -98,6 +98,18 @@ func (u *uiAPI) putLocalDNS(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Structured rows must round-trip 1:1. A row whose name/type/value contains a
+	// zone-comment ';' or is otherwise degenerate assembles to a line the parser
+	// silently skips (0 records) or splits (>1) — validateZone still passes, so
+	// without this the PUT would 200 yet drop/mangle the submitted record. The raw
+	// escape hatch is exempt: it may legitimately carry comments and blank lines.
+	if body.Zone == nil && countRecords(text) != len(body.Records) {
+		writeJSON(rw, http.StatusBadRequest,
+			map[string]string{"error": "a record did not round-trip (check for ';' or empty name/type)"})
+
+		return
+	}
+
 	if err := u.store.SetLocalDNSZone(text); err != nil {
 		badRequest(rw, err)
 
@@ -160,6 +172,19 @@ func validateZone(text string) (string, error) {
 	}
 
 	return "", nil
+}
+
+// countRecords returns how many resource records text parses to. On a parse
+// error it returns the count so far; callers gate on validateZone first.
+func countRecords(text string) int {
+	zp := dns.NewZoneParser(strings.NewReader(text), "", "")
+
+	n := 0
+	for _, ok := zp.Next(); ok; _, ok = zp.Next() {
+		n++
+	}
+
+	return n
 }
 
 // fqdn appends a trailing dot to a hostname unless it already has one or is an

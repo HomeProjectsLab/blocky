@@ -145,10 +145,19 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 		// the file header is written — and the WAL DSN writes it on open — so the
 		// pragma alone is a no-op (the db stays auto_vacuum=NONE even when fresh). A
 		// single VACUUM right after the pragma actually applies the new mode, on both
-		// a fresh WAL db and a pre-existing appliance db. Done once at startup (VACUUM
-		// needs ~2x space) before the guardian runs, never under disk pressure.
-		db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
-		db.Exec("VACUUM")
+		// a fresh WAL db and a pre-existing appliance db. VACUUM needs ~2x space and
+		// rewrites the whole file, so gate it on the current mode: the writer is
+		// rebuilt on every config hot-swap, and re-VACUUMing a multi-GB appliance DB
+		// on each apply holds a long write lock and can hit SQLITE_FULL under the disk
+		// guardian's steady state. auto_vacuum=2 (INCREMENTAL) means the mode is
+		// already applied, so subsequent applies become a cheap PRAGMA read.
+		var mode int
+		db.Raw("PRAGMA auto_vacuum").Scan(&mode)
+
+		if mode != 2 {
+			db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
+			db.Exec("VACUUM")
+		}
 	}
 
 	// Migrate the schema
