@@ -155,6 +155,40 @@ var _ = Describe("Egress hardening", func() {
 			Expect(calls).Should(Equal(2))
 		})
 
+		It("caps the suppression window so a huge authoritative TTL doesn't starve cover", func() {
+			src := newHardeningSource(nil, nil, nil)
+
+			var calls int
+			eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {
+				calls++
+
+				a := &dns.A{
+					// 1h authoritative TTL — would freeze this name for a full hour
+					// without the cap, capping decoy re-use at ~pool/3600s.
+					Hdr: dns.RR_Header{Name: req.Req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+					A:   net.ParseIP("192.0.2.1"),
+				}
+				msg := new(dns.Msg)
+				msg.Answer = []dns.RR{a}
+
+				return &model.Response{Res: msg}, nil
+			})
+			eng.cfg.FingerprintMatch = false
+
+			base := time.Now()
+			eng.now = func() time.Time { return base }
+
+			q := decoyQuery{name: "bigttl.example", qtype: dns.TypeA}
+
+			eng.resolveOne(context.Background(), q)
+			Expect(calls).Should(Equal(1))
+
+			// just past the cap (not the 3600s authoritative TTL) → re-emittable
+			base = base.Add((shadowTTLCapSecs + 1) * time.Second)
+			eng.resolveOne(context.Background(), q)
+			Expect(calls).Should(Equal(2))
+		})
+
 		It("does not suppress when ShadowTTL is off", func() {
 			src := newHardeningSource(nil, nil, nil)
 

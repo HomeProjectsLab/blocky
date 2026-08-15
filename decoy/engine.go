@@ -51,6 +51,17 @@ const (
 	// ttlFallbackSecs is the suppression window applied when a decoy's response
 	// carries no answer TTL (NXDOMAIN / empty) — a short negative-cache stand-in.
 	ttlFallbackSecs = 30
+	// shadowTTLCapSecs caps how long a (name,qtype) is shadow-TTL suppressed. The
+	// anti-fingerprint tell is a name RE-APPEARING sooner than a real client would
+	// re-resolve it — and real clients (browsers pin ~60s regardless of the
+	// authoritative TTL) re-query on their own cache expiry, NOT the upstream TTL.
+	// Suppressing for the full authoritative TTL (routinely 300-3600s+, sometimes a
+	// day) far exceeds that and starves the compensating-cover volume: the engine
+	// wants to emit at targetCurve QPM but can only re-use its small decoy-name pool
+	// once per full TTL, capping egress at ~pool/TTL — orders of magnitude below
+	// target. Capping at a client-cache-sized window keeps the tell covered while
+	// letting cover actually reach its rate.
+	shadowTTLCapSecs = 60
 	// heartbeatInterval is the fixed-ish cadence (#3) of connectivity/NTP chatter
 	// fired by heartbeatLoop; jittered ± heartbeatJitterMs so it isn't a clean tick.
 	heartbeatInterval = 55 * time.Second
@@ -287,13 +298,39 @@ type Engine struct {
 	backoff   float64    // current decoy-rate multiplier in [backoffMin, 1]
 }
 
+// maxConcurrentEmits bounds how many timer emissions run at once (see Run). emit
+// does per-emission full-table sqlite sampling + a blocking upstream resolve, so
+// running it inline serialized the whole engine behind that latency — the
+// configured QueriesPerMinute/targetQpm was silently unreachable (~1 emit per
+// DB-scan). A small pool overlaps that I/O while capping load on a Pi-class box.
+//
+// ponytail: fixed pool sized for I/O-wait overlap, not CPU. The real ceiling is
+// per-emit full-table scan cost (SessionSeed/NextInSession window scans,
+// SampleCohort ORDER BY RANDOM()); if 8× headroom isn't enough, cache those
+// derivations (short-TTL) so emit() stops scanning the log per emission.
+const maxConcurrentEmits = 8
+
+// lockedSource makes a *rand.Rand safe for concurrent use (the stdlib's own
+// global rand does exactly this). The engine's rnd is now read from the emit
+// worker pool, the companion/cohort burst goroutines and the heartbeat loop at
+// once; a bare math/rand.Source is not goroutine-safe.
+type lockedSource struct {
+	mu  sync.Mutex
+	src rand.Source64
+}
+
+func (s *lockedSource) Int63() int64    { s.mu.Lock(); defer s.mu.Unlock(); return s.src.Int63() }
+func (s *lockedSource) Uint64() uint64  { s.mu.Lock(); defer s.mu.Unlock(); return s.src.Uint64() }
+func (s *lockedSource) Seed(seed int64) { s.mu.Lock(); defer s.mu.Unlock(); s.src.Seed(seed) }
+
 func NewEngine(cfg config.DecoyConfig, source Source, resolve ResolveFunc) *Engine {
 	return &Engine{
-		cfg:         cfg,
-		source:      source,
-		resolve:     resolve,
-		logger:      log.PrefixedLog("decoy"),
-		rnd:         rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // noise timing, not crypto
+		cfg:     cfg,
+		source:  source,
+		resolve: resolve,
+		logger:  log.PrefixedLog("decoy"),
+		//nolint:gosec // noise timing, not crypto; locked for concurrent emit workers
+		rnd:         rand.New(&lockedSource{src: rand.NewSource(time.Now().UnixNano()).(rand.Source64)}),
 		now:         time.Now,
 		ttlSuppress: map[string]time.Time{},
 		cookies:     map[string]string{},
@@ -354,6 +391,15 @@ func (e *Engine) Run(ctx context.Context) {
 	timer := time.NewTimer(e.nextInterval())
 	defer timer.Stop()
 
+	// Dispatch each emission to a bounded worker pool instead of running it inline:
+	// emit() blocks on full-table DB sampling + an upstream resolve, and inline that
+	// serialized the engine behind that latency (the configured rate was unreachable
+	// — decoys UNDER-generated). The scheduler now keeps firing at effectiveQPM while
+	// up to maxConcurrentEmits emissions run in parallel. When the pool is saturated
+	// the tick is dropped: natural backpressure so a slow box can't pile unbounded
+	// scans onto the DB.
+	sem := make(chan struct{}, maxConcurrentEmits)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -363,7 +409,15 @@ func (e *Engine) Run(ctx context.Context) {
 			// hours effectiveQPM (via nextInterval) collapses to the low
 			// always-on floor rather than stopping, so an observer can't read the
 			// window edges as a clean on/off step.
-			e.emit(ctx)
+			select {
+			case sem <- struct{}{}:
+				go func() {
+					defer func() { <-sem }()
+					e.emit(ctx)
+				}()
+			default:
+				// pool saturated (box can't keep up) — drop this emission
+			}
 
 			timer.Reset(e.nextInterval())
 		}
@@ -1162,6 +1216,9 @@ func (e *Engine) noteTTL(key string, resp *model.Response) {
 	}
 
 	ttl := respTTL(resp)
+	if ttl > shadowTTLCapSecs {
+		ttl = shadowTTLCapSecs // don't outlast a real client's DNS cache; see const
+	}
 
 	now := e.now()
 
