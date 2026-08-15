@@ -1,6 +1,8 @@
 package configstore
 
 import (
+	"sync"
+
 	"github.com/0xERR0R/blocky/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -41,6 +43,43 @@ var _ = Describe("Store privacy", func() {
 		Expect(err).Should(Succeed())
 		Expect(cfg.Upstreams.EffectiveStrategy("default")).
 			Should(Equal(config.UpstreamStrategyRecursive))
+	})
+
+	It("does not lose a concurrent SetPrivacy vs SetLocalDNSZone update", func() {
+		p, err := store.GetPrivacy()
+		Expect(err).Should(Succeed())
+		p.Decoy.Enable = true
+		p.Decoy.ActiveHoursStart = 9
+		p.Decoy.ActiveHoursEnd = 21
+
+		// two writers touching DIFFERENT sections concurrently; each rewrites the
+		// whole document from its own snapshot, so without serialization one
+		// section's change is clobbered (last full-document write wins).
+		var wg sync.WaitGroup
+
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			defer GinkgoRecover()
+			Expect(store.SetPrivacy(p)).Should(Succeed())
+		}()
+
+		go func() {
+			defer wg.Done()
+			defer GinkgoRecover()
+			Expect(store.SetLocalDNSZone("host.lan. 3600 IN A 10.0.0.5\n")).Should(Succeed())
+		}()
+
+		wg.Wait()
+
+		got, err := store.GetPrivacy()
+		Expect(err).Should(Succeed())
+		Expect(got.Decoy.Enable).Should(BeTrue(), "privacy change survived the concurrent zone write")
+
+		zone, err := store.GetLocalDNSZone()
+		Expect(err).Should(Succeed())
+		Expect(zone).Should(ContainSubstring("10.0.0.5"), "zone change survived the concurrent privacy write")
 	})
 
 	It("rejects an invalid privacy section without persisting", func() {

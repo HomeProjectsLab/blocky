@@ -25,10 +25,12 @@ func registerLocalDNSUIEndpoints(router *chi.Mux, store *configstore.Store) {
 }
 
 type localDNSRow struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"`
-	TTL   uint32 `json:"ttl"`
-	Value string `json:"value"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// TTL is a pointer so an explicit 0 (a legitimate do-not-cache value) is
+	// distinguishable from an omitted field: nil defaults to 3600, 0 is honored.
+	TTL   *uint32 `json:"ttl"`
+	Value string  `json:"value"`
 }
 
 func (u *uiAPI) getLocalDNS(rw http.ResponseWriter, _ *http.Request) {
@@ -48,10 +50,11 @@ func (u *uiAPI) getLocalDNS(rw http.ResponseWriter, _ *http.Request) {
 
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		hdr := rr.Header()
+		ttl := hdr.Ttl
 		rows = append(rows, localDNSRow{
 			Name:  hdr.Name,
 			Type:  dns.TypeToString[hdr.Rrtype],
-			TTL:   hdr.Ttl,
+			TTL:   &ttl,
 			Value: strings.TrimPrefix(rr.String(), hdr.String()),
 		})
 	}
@@ -114,9 +117,9 @@ func assembleZone(rows []localDNSRow) string {
 
 	for _, r := range rows {
 		name := fqdn(strings.TrimSpace(r.Name))
-		ttl := r.TTL
-		if ttl == 0 {
-			ttl = 3600
+		ttl := uint32(3600)
+		if r.TTL != nil {
+			ttl = *r.TTL // honor an explicit 0 (do-not-cache); only nil defaults
 		}
 
 		typ := strings.ToUpper(strings.TrimSpace(r.Type))

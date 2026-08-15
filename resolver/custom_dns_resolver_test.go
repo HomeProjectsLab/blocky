@@ -536,6 +536,30 @@ var _ = Describe("CustomDNSResolver", func() {
 				})
 			})
 		})
+		When("An explicit PTR is configured for an IP that also has a forward A", func() {
+			BeforeEach(func() {
+				// forward A for 10.0.0.5 synthesizes reverse 5.0.0.10.in-addr.arpa -> host.lan
+				cfg.Mapping["host.lan"] = config.CustomDNSEntries{&dns.A{A: net.ParseIP("10.0.0.5")}}
+				// explicit PTR for the SAME arpa name, pointing elsewhere
+				cfg.Zone.RRs["5.0.0.10.in-addr.arpa."] = config.CustomDNSEntries{
+					&dns.PTR{Ptr: "other.lan.", Hdr: dns.RR_Header{Rrtype: dns.TypePTR, Ttl: zoneTTL}},
+				}
+			})
+
+			It("serves the explicit PTR, not the synthesized reverse", func() {
+				Expect(sut.Resolve(ctx, newRequest("5.0.0.10.in-addr.arpa.", PTR))).
+					Should(
+						SatisfyAll(
+							WithTransform(ToAnswer, SatisfyAll(
+								HaveLen(1),
+								ContainElement(BeDNSRecord("5.0.0.10.in-addr.arpa.", PTR, "other.lan.")),
+							)),
+							HaveResponseType(ResponseTypeCUSTOMDNS),
+							HaveReason("CUSTOM DNS"),
+							HaveReturnCode(dns.RcodeSuccess),
+						))
+			})
+		})
 		When("Domain mapping is defined", func() {
 			It("subdomain must also match", func() {
 				Expect(sut.Resolve(ctx, newRequest("ABC.CUSTOM.DOMAIN.", A))).

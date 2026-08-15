@@ -104,9 +104,28 @@ func (r *CustomDNSResolver) LookupReverse(ip net.IP) []string {
 	return names
 }
 
+// hasExplicitPTR reports whether an explicit PTR record is configured under the
+// given (arpa) name in the static mapping.
+func (r *CustomDNSResolver) hasExplicitPTR(name string) bool {
+	for _, entry := range r.mapping[name] {
+		if entry.Header().Rrtype == dns.TypePTR {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (r *CustomDNSResolver) handleReverseDNS(request *model.Request) *model.Response {
 	question := request.Req.Question[0]
 	if question.Qtype == dns.TypePTR {
+		// An explicitly configured PTR record wins over a reverse synthesized from a
+		// forward A/AAAA for the same IP: skip synthesis so processRequest serves the
+		// operator's explicit PTR (from r.mapping) generically instead.
+		if r.hasExplicitPTR(util.ExtractDomain(question)) {
+			return nil
+		}
+
 		// reverseAddresses is keyed by dns.ReverseAddr output, which is lower case:
 		// DNS names are case insensitive, so normalize before looking up.
 		urls, found := r.reverseAddresses[strings.ToLower(question.Name)]

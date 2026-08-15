@@ -36,6 +36,12 @@ const (
 	diskGuardMaxSteps  = 100    // bound work per tick (<= 2M rows)
 )
 
+// freeFractionFn is the free-space probe; a var so tests can simulate disk
+// pressure without a real full filesystem.
+//
+//nolint:gochecknoglobals
+var freeFractionFn = freeFraction
+
 // diskGuardian runs the disk-pressure loop until ctx is cancelled. Started only
 // for sqlite targets (see NewDatabaseWriter).
 func (d *DatabaseWriter) diskGuardian(ctx context.Context) {
@@ -49,7 +55,7 @@ func (d *DatabaseWriter) diskGuardian(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.enforceDiskTarget(dir)
+			d.enforceDiskTarget(ctx, dir)
 		}
 	}
 }
@@ -57,10 +63,10 @@ func (d *DatabaseWriter) diskGuardian(ctx context.Context) {
 // enforceDiskTarget prunes oldest raw rows until the DB filesystem is at least
 // diskFreeTargetFrac free, the recent-data floor is reached, or the per-tick
 // work bound is hit.
-func (d *DatabaseWriter) enforceDiskTarget(dir string) {
+func (d *DatabaseWriter) enforceDiskTarget(ctx context.Context, dir string) {
 	logger := log.PrefixedLog("disk_guardian")
 
-	free, err := freeFraction(dir)
+	free, err := freeFractionFn(dir)
 	if err != nil {
 		return // unsupported platform or transient stat error: skip quietly
 	}
@@ -77,6 +83,13 @@ func (d *DatabaseWriter) enforceDiskTarget(dir string) {
 	var total int64
 
 	for step := 0; step < diskGuardMaxSteps; step++ {
+		// Stop before touching the DB if this bundle was retired (config apply):
+		// after retireGrace the retire path closes these conns, so continuing would
+		// hit "database is closed" and leave the goroutine spinning on a dead DB.
+		if ctx.Err() != nil {
+			return
+		}
+
 		deleted, err := d.pruneOldest(floor, diskGuardBatch)
 		if err != nil {
 			logger.Errorf("prune failed: %v", err)
@@ -89,15 +102,20 @@ func (d *DatabaseWriter) enforceDiskTarget(dir string) {
 			break // nothing older than the floor remains
 		}
 
-		// return freed pages to the OS (no-op unless auto_vacuum=INCREMENTAL)
+		// Return freed pages to the OS (auto_vacuum=INCREMENTAL is enabled at
+		// startup), then checkpoint-truncate: under WAL the delete + vacuum only
+		// shrinks the main .db file at a checkpoint, and the -wal grows during the
+		// loop, so without this the re-stat below can never rise and the free-space
+		// early-exit is dead (the loop would only stop at the floor or step bound).
 		d.db.Exec("PRAGMA incremental_vacuum")
+		d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 
-		if free, err = freeFraction(dir); err != nil || free >= diskFreeTargetFrac {
+		if free, err = freeFractionFn(dir); err != nil || free >= diskFreeTargetFrac {
 			break
 		}
 	}
 
-	free, _ = freeFraction(dir)
+	free, _ = freeFractionFn(dir)
 
 	switch {
 	case free >= diskFreeTargetFrac:

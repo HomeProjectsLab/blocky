@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -96,6 +97,28 @@ type Server struct {
 
 	// swappable — the whole point: an apply rebuilds this and swaps it atomically
 	live atomic.Pointer[resolverBundle]
+
+	// retired bundles whose delayed flush+close (time.AfterFunc, retireGrace) is
+	// still pending. Drained synchronously in Stop so a shutdown within retireGrace
+	// doesn't drop their buffered query-log entries (AfterFunc timers die on exit).
+	retiredMu sync.Mutex
+	retired   map[*resolverBundle]struct{}
+}
+
+// retireBundle flushes a retired bundle's query-log buffers, closes its DB
+// conns (after the flush lands — the flush needs them open) and closes its io.
+// Called from the delayed AfterFunc on a normal retire and synchronously from
+// Stop for any retiree still pending at shutdown.
+func (s *Server) retireBundle(b *resolverBundle) {
+	for _, fl := range b.logFlushers {
+		_ = fl.Flush()
+	}
+
+	for _, c := range b.dbClosers {
+		_ = c()
+	}
+
+	closeAll(b.closers)
 }
 
 // SwapUpstreams replaces one group's upstreams in the running resolver tree
@@ -427,17 +450,25 @@ func (s *Server) ApplyConfig(serverCtx context.Context, cfg *config.Config) erro
 		// Resolve() calls that captured the old chain can finish.
 		old.cancel()
 
+		s.retiredMu.Lock()
+		if s.retired == nil {
+			s.retired = make(map[*resolverBundle]struct{})
+		}
+
+		s.retired[old] = struct{}{}
+		s.retiredMu.Unlock()
+
 		time.AfterFunc(retireGrace, func() {
-			for _, fl := range old.logFlushers {
-				_ = fl.Flush()
-			}
+			// Claim the retiree under the lock: whoever removes it owns the
+			// flush+close. If Stop already drained it, this is a no-op.
+			s.retiredMu.Lock()
+			_, pending := s.retired[old]
+			delete(s.retired, old)
+			s.retiredMu.Unlock()
 
-			// close DB conns AFTER the flush lands (the flush above needs them open)
-			for _, c := range old.dbClosers {
-				_ = c()
+			if pending {
+				s.retireBundle(old)
 			}
-
-			closeAll(old.closers)
 		})
 	}
 
@@ -475,6 +506,10 @@ func ListenersCompatible(a, b *config.Config) bool {
 		a.KeyFile == b.KeyFile &&
 		a.MinTLSServeVer == b.MinTLSServeVer &&
 		reflect.DeepEqual(a.HTTP3, b.HTTP3) &&
+		// /metrics is registered into the router once at NewServer from
+		// cfg.Prometheus (enable/path); the hot-swap rebuilds only the resolver
+		// bundle, not the router, so a prometheus change must force a full restart.
+		reflect.DeepEqual(a.Prometheus, b.Prometheus) &&
 		// the query-log hub, decoy source and stats reader are frozen into the
 		// router once and key on the sqlite target; a change to any of these
 		// makes them stale, so force a restart
@@ -1133,6 +1168,19 @@ func (s *Server) Stop(ctx context.Context) error {
 				logger().Warn("failed to close query log database: ", err)
 			}
 		}
+	}
+
+	// Drain any bundles retired within the last retireGrace: their delayed
+	// AfterFunc flush hasn't fired yet and process-exit would drop those timers,
+	// losing the bundle's buffered query-log entries. Claim them under the lock so
+	// a concurrently-firing AfterFunc doesn't double-close.
+	s.retiredMu.Lock()
+	pending := s.retired
+	s.retired = nil
+	s.retiredMu.Unlock()
+
+	for b := range pending {
+		s.retireBundle(b)
 	}
 
 	return nil

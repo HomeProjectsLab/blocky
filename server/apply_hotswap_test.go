@@ -52,6 +52,16 @@ func newBundleServer(r resolver.ChainedResolver, cfg *config.Config) *Server {
 
 const hotswapDNSPort = 57500
 
+// recordingFlusher is a logFlushers stand-in that counts Flush calls, for the
+// retired-bundle drain spec.
+type recordingFlusher struct{ calls *int32 }
+
+func (f recordingFlusher) Flush() error {
+	atomic.AddInt32(f.calls, 1)
+
+	return nil
+}
+
 var _ = Describe("Config apply hot-swap", func() {
 	var (
 		ctx         context.Context
@@ -343,6 +353,28 @@ var _ = Describe("Config apply hot-swap", func() {
 			"sqlite DB connections should not accumulate across applies")
 	})
 
+	It("flushes bundles retired within retireGrace on Stop (no lost query-log entries)", func() {
+		var liveCalls, retiredCalls int32
+
+		s := &Server{}
+		s.live.Store(&resolverBundle{
+			logFlushers: []interface{ Flush() error }{recordingFlusher{&liveCalls}},
+		})
+
+		// a bundle retired less than retireGrace ago: its delayed AfterFunc flush
+		// hasn't fired yet, and process-exit would drop that timer
+		retired := &resolverBundle{
+			logFlushers: []interface{ Flush() error }{recordingFlusher{&retiredCalls}},
+		}
+		s.retired = map[*resolverBundle]struct{}{retired: {}}
+
+		Expect(s.Stop(context.Background())).Should(Succeed())
+
+		Expect(atomic.LoadInt32(&liveCalls)).Should(BeNumerically("==", 1), "live bundle flushed on Stop")
+		Expect(atomic.LoadInt32(&retiredCalls)).Should(BeNumerically("==", 1),
+			"a bundle retired within retireGrace must be flushed on Stop, not dropped with its AfterFunc")
+	})
+
 	It("refuses a listener-affecting change for hot-swap", func() {
 		a := buildCfg("ads.example")
 		b := buildCfg("ads.example")
@@ -353,5 +385,19 @@ var _ = Describe("Config apply hot-swap", func() {
 
 		// a pure resolver-config change stays hot-swappable
 		Expect(ListenersCompatible(a, buildCfg("other.example"))).Should(BeTrue())
+	})
+
+	It("refuses a prometheus change for hot-swap (the router is built once)", func() {
+		a := buildCfg("ads.example")
+
+		enabled := buildCfg("ads.example")
+		enabled.Prometheus.Enable = true
+		Expect(ListenersCompatible(a, enabled)).Should(BeFalse(),
+			"toggling prometheus must force the full restart that rebuilds the router")
+
+		pathChanged := buildCfg("ads.example")
+		pathChanged.Prometheus.Path = "/other-metrics"
+		Expect(ListenersCompatible(a, pathChanged)).Should(BeFalse(),
+			"a prometheus path change must force the full restart")
 	})
 })

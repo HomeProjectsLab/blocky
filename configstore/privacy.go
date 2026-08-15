@@ -23,6 +23,12 @@ func (s *Store) GetPrivacy() (config.PrivacyConfig, error) {
 // pipeline (SetRawYAML -> ValidateRaw -> LoadFromYAML) before persist; nothing
 // is written if validation fails.
 func (s *Store) SetPrivacy(p config.PrivacyConfig) error {
+	// Serialize the read-modify-write: each section writer rewrites the WHOLE
+	// document from its own snapshot, so a concurrent SetLocalDNSZone would
+	// otherwise clobber this change (last full-document write wins).
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	raw, err := s.RawYAML()
 	if err != nil {
 		return err

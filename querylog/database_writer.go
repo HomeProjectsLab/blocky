@@ -140,10 +140,15 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 
 		sqlDB.SetMaxOpenConns(1)
 
-		// Enable incremental auto-vacuum on a FRESH db (before any table exists) so
-		// the disk guardian can return freed pages to the OS without a full,
-		// 2x-space VACUUM. No-op on a pre-existing db created without it.
+		// Enable incremental auto-vacuum so the disk guardian can return freed pages
+		// to the OS via incremental_vacuum. SQLite silently ignores the pragma once
+		// the file header is written — and the WAL DSN writes it on open — so the
+		// pragma alone is a no-op (the db stays auto_vacuum=NONE even when fresh). A
+		// single VACUUM right after the pragma actually applies the new mode, on both
+		// a fresh WAL db and a pre-existing appliance db. Done once at startup (VACUUM
+		// needs ~2x space) before the guardian runs, never under disk pressure.
 		db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
+		db.Exec("VACUUM")
 	}
 
 	// Migrate the schema

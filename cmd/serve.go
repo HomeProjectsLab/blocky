@@ -191,6 +191,11 @@ func serve(
 				return newCfg, nil
 			}
 
+			// logging is global and not part of ListenersCompatible, so a
+			// log-only change takes this hot-swap path; reapply it here or the
+			// level/format/timestamp change would be ignored until a full restart.
+			log.Configure(&newCfg.Log)
+
 			if err := srv.ApplyConfig(serverCtx, newCfg); err != nil {
 				log.Log().Errorf("can't apply new config, keeping the running config: %v", err)
 

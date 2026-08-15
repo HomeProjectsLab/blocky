@@ -35,6 +35,12 @@ func (s *Store) GetLocalDNSZone() (string, error) {
 // through the full pipeline (SetRawYAML) before persist; nothing is written on
 // failure.
 func (s *Store) SetLocalDNSZone(zoneText string) error {
+	// Serialize the read-modify-write: each section writer rewrites the WHOLE
+	// document from its own snapshot, so a concurrent SetPrivacy would otherwise
+	// clobber this change (last full-document write wins).
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	raw, err := s.RawYAML()
 	if err != nil {
 		return err
