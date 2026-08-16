@@ -1,7 +1,6 @@
 package lists
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -282,7 +281,7 @@ func (u *Updater) latestTrancoID(ctx context.Context) (string, error) {
 	return resp.ListID, nil
 }
 
-// downloadTranco fetches the top-1m zip and returns a newline-joined,
+// downloadTranco fetches the top-1m list and returns a newline-joined,
 // normalized domain list (one per line).
 func (u *Updater) downloadTranco(ctx context.Context, id string) ([]byte, error) {
 	body, err := u.get(ctx, fmt.Sprintf("%s/download/%s/1000000", u.cfg.TrancoURL, id))
@@ -290,45 +289,31 @@ func (u *Updater) downloadTranco(ctx context.Context, id string) ([]byte, error)
 		return nil, err
 	}
 
-	return trancoZipToDomains(body)
+	return trancoCSVToDomains(body)
 }
 
-// trancoZipToDomains extracts top-1m.csv ("rank,domain") from the zip and
-// returns normalized "domain\n" lines.
-func trancoZipToDomains(zipBytes []byte) ([]byte, error) {
-	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
-	if err != nil {
-		return nil, fmt.Errorf("tranco download is not a zip: %w", err)
+// trancoCSVToDomains parses the raw "rank,domain" CSV served by the Tranco
+// /download/<id>/<count> endpoint (plain text/csv, not a zip) and returns
+// normalized "domain\n" lines.
+func trancoCSVToDomains(csvBytes []byte) ([]byte, error) {
+	var out bytes.Buffer
+	if err := scanNormalized(bytes.NewReader(csvBytes), func(line string) {
+		if i := strings.IndexByte(line, ','); i >= 0 {
+			line = line[i+1:] // strip "rank," prefix
+		}
+		if d := normalizeDomain(line); d != "" {
+			out.WriteString(d)
+			out.WriteByte('\n')
+		}
+	}); err != nil {
+		return nil, err
 	}
 
-	for _, f := range zr.File {
-		if !strings.HasSuffix(f.Name, ".csv") {
-			continue
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			return nil, err
-		}
-		defer rc.Close()
-
-		var out bytes.Buffer
-		if err := scanNormalized(rc, func(line string) {
-			if i := strings.IndexByte(line, ','); i >= 0 {
-				line = line[i+1:] // strip "rank," prefix
-			}
-			if d := normalizeDomain(line); d != "" {
-				out.WriteString(d)
-				out.WriteByte('\n')
-			}
-		}); err != nil {
-			return nil, err
-		}
-
-		return out.Bytes(), nil
+	if out.Len() == 0 {
+		return nil, errors.New("tranco download contained no domains")
 	}
 
-	return nil, errors.New("no csv in tranco zip")
+	return out.Bytes(), nil
 }
 
 // --- blocklistproject ------------------------------------------------------

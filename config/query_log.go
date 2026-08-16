@@ -16,7 +16,7 @@ type QueryLog struct {
 	// Log target type: mysql, postgresql, timescale, sqlite, csv, csv-client, console, dnstap, or none.
 	Type QueryLogType `yaml:"type"`
 	// Delete log entries older than this many days. 0 disables retention cleanup.
-	LogRetentionDays uint64 `yaml:"logRetentionDays"`
+	LogRetentionDays uint64 `default:"60" yaml:"logRetentionDays"`
 	// Maximum number of attempts to create the query log writer on startup.
 	CreationAttempts int `default:"3" yaml:"creationAttempts"`
 	// Delay between query log writer creation attempts.

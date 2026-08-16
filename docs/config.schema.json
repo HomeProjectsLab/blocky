@@ -787,7 +787,8 @@
         },
         "logRetentionDays": {
           "type": "integer",
-          "description": "Delete log entries older than this many days. 0 disables retention cleanup."
+          "description": "Delete log entries older than this many days. 0 disables retention cleanup.",
+          "default": 60
         },
         "creationAttempts": {
           "type": "integer",

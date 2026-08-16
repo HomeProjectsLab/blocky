@@ -1,7 +1,6 @@
 package lists
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
@@ -95,14 +94,11 @@ func (f *fakeStore) PruneBlocklist(category string) error {
 	return nil
 }
 
-func makeTrancoZip(domains []string) []byte {
+func makeTrancoCSV(domains []string) []byte {
 	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, _ := zw.Create("top-1m.csv")
 	for i, d := range domains {
-		fmt.Fprintf(w, "%d,%s\n", i+1, d)
+		fmt.Fprintf(&buf, "%d,%s\n", i+1, d)
 	}
-	_ = zw.Close()
 
 	return buf.Bytes()
 }
@@ -135,9 +131,9 @@ var _ = Describe("List updater", func() {
 		})
 	})
 
-	Describe("trancoZipToDomains", func() {
+	Describe("trancoCSVToDomains", func() {
 		It("extracts and normalizes domains from the csv", func() {
-			out, err := trancoZipToDomains(makeTrancoZip([]string{"A.com", "b.org", "bad"}))
+			out, err := trancoCSVToDomains(makeTrancoCSV([]string{"A.com", "b.org", "bad"}))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(strings.Fields(string(out))).To(Equal([]string{"a.com", "b.org"}))
 		})
@@ -163,7 +159,7 @@ var _ = Describe("List updater", func() {
 				case strings.Contains(url, "/api/lists/date/latest"):
 					return []byte(`{"list_id":"ID2"}`), nil
 				case strings.Contains(url, "/download/ID2/1000000"):
-					return makeTrancoZip([]string{"a.com", "b.com", "c.com"}), nil
+					return makeTrancoCSV([]string{"a.com", "b.com", "c.com"}), nil
 				}
 
 				return nil, fmt.Errorf("unexpected url %s", url)

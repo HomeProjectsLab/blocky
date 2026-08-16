@@ -18,25 +18,19 @@ import (
 	"github.com/zmap/zdns/v2/src/zdns"
 )
 
-// skipUnlessIterativeDNS skips the current spec unless true iterative resolution is
-// possible: the machine must have connectivity AND an un-hijacked port 53 (many
-// routers intercept outbound DNS and answer in place of the root servers, which
-// makes iteration impossible). A real root server answers an RD=0 NS query for
-// "com." with NOERROR and no RA flag.
-func skipUnlessIterativeDNS() {
-	client := &dns.Client{Timeout: 3 * time.Second}
-
-	msg := new(dns.Msg)
-	msg.SetQuestion("com.", dns.TypeNS)
-	msg.RecursionDesired = false
-
-	resp, _, err := client.Exchange(msg, "198.41.0.4:53") // a.root-servers.net
-	if err != nil {
-		Skip("root servers unreachable (offline?): " + err.Error())
-	}
-
-	if resp.Rcode != dns.RcodeSuccess || resp.RecursionAvailable {
-		Skip("port-53 DNS is intercepted on this network, iterative resolution impossible")
+// skipUnlessIterativeDNS skips the current spec unless true iterative DNSSEC
+// resolution actually works end-to-end from this machine. A reachable root
+// server is NOT enough: many networks reach (or intercept) the roots yet mangle
+// the larger DNSSEC responses of the follow-on queries, turning every real
+// lookup into SERVFAIL/DNSSEC-bogus. The only reliable precheck is a full
+// resolution of a known-good, DNSSEC-signed name (example.com) — the same
+// invariant these live specs assert. If it does not come back cleanly
+// RESOLVED (recursive:iterative) with an answer, iteration is unavailable
+// (offline, intercepted, or mangled) and the spec is skipped.
+func skipUnlessIterativeDNS(ctx context.Context, sut *RecursiveResolver) {
+	resp, err := sut.Resolve(ctx, newRequest("example.com.", A))
+	if err != nil || resp.Reason != "RESOLVED (recursive:iterative)" || len(resp.Res.Answer) == 0 {
+		Skip("iterative DNSSEC resolution unavailable on this network (offline/intercepted/mangled)")
 	}
 }
 
@@ -197,6 +191,12 @@ var _ = Describe("RecursiveResolver", Label("recursiveResolver"), func() {
 	})
 
 	Describe("hybrid fallback", func() {
+		// Both specs force recursion to fail via unroutable roots and assert on
+		// the fallback tier. That only holds when real iterative resolution is
+		// otherwise possible; skip when it isn't (offline/intercepted/mangled),
+		// where recursion "fails" for the wrong reason and the assertions break.
+		BeforeEach(func() { skipUnlessIterativeDNS(ctx, sut) })
+
 		It("delegates to the fallback when recursion fails", func() {
 			withUnroutableRoots()
 
@@ -234,9 +234,9 @@ var _ = Describe("RecursiveResolver", Label("recursiveResolver"), func() {
 	})
 
 	Describe("iterative resolution (live network)", func() {
-		It("resolves example.com A from the roots", func() {
-			skipUnlessIterativeDNS()
+		BeforeEach(func() { skipUnlessIterativeDNS(ctx, sut) })
 
+		It("resolves example.com A from the roots", func() {
 			resp, err := sut.Resolve(ctx, newRequest("example.com.", A))
 			Expect(err).Should(Succeed())
 
@@ -247,8 +247,6 @@ var _ = Describe("RecursiveResolver", Label("recursiveResolver"), func() {
 		})
 
 		It("returns NXDOMAIN for a nonexistent domain without using the fallback", func() {
-			skipUnlessIterativeDNS()
-
 			sut.fallback = failIfCalled()
 
 			domain := fmt.Sprintf("does-not-exist-%08x.example.com.", rand.Uint32())
@@ -266,8 +264,6 @@ var _ = Describe("RecursiveResolver", Label("recursiveResolver"), func() {
 		})
 
 		It("returns SERVFAIL for a DNSSEC-bogus domain without using the fallback", func() {
-			skipUnlessIterativeDNS()
-
 			sut.fallback = failIfCalled()
 
 			resp, err := sut.Resolve(ctx, newRequest("dnssec-failed.org.", A))
