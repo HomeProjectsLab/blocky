@@ -154,8 +154,10 @@ func (s *statsAPI) allowPerDevice(rw http.ResponseWriter, req *http.Request, cli
 	}
 
 	from, to, err := parseTimeRange(req)
-	if err != nil {
-		// bad range: gate on the default 24h window instead of skipping the gate
+	if err != nil || to.Sub(from) < time.Hour {
+		// bad, inverted or near-empty range: gate on the default 24h window
+		// instead of skipping the gate — a valid 1s window scans zero rows and
+		// would let a NAT aggregate through as "not shared"
 		to = time.Now()
 		from = to.Add(-24 * time.Hour)
 	}

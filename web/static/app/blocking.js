@@ -48,7 +48,9 @@ applyBtn.addEventListener("click", async () => {
 });
 
 // ---- runtime status (enable/disable is instant, no apply needed) ----
+let countdownTimer = null;
 async function refreshStatus() {
+    clearInterval(countdownTimer); countdownTimer = null;
     try {
         const s = await getJSON("/api/blocking/status");
         dot.className = "status-dot " + (s.enabled ? "on" : "off");
@@ -56,8 +58,15 @@ async function refreshStatus() {
             state.textContent = "Blocking is on.";
         } else {
             const grp = s.disabledGroups?.length ? ` (${s.disabledGroups.join(", ")})` : "";
-            const secs = s.autoEnableInSec ? ` — back on in ${s.autoEnableInSec}s` : "";
-            state.textContent = `Blocking is off${grp}${secs}.`;
+            let secs = s.autoEnableInSec || 0;
+            state.textContent = `Blocking is off${grp}${secs ? ` — back on in ${secs}s` : ""}.`;
+            if (secs) {
+                // tick locally, then re-poll at zero so the dot flips without a reload
+                countdownTimer = setInterval(() => {
+                    if (--secs <= 0) { refreshStatus(); return; }
+                    state.textContent = `Blocking is off${grp} — back on in ${secs}s.`;
+                }, 1000);
+            }
         }
     } catch (err) { state.textContent = "Status unavailable: " + err.message; }
 }

@@ -127,13 +127,20 @@ var _ = Describe("EDNS0 utils", func() {
 				eso := new(dns.EDNS0_SUBNET)
 				eso.Code = dns.EDNS0SUBNET
 				opt.Option = append(opt.Option, eso)
+				opt.SetDo()
+				opt.SetUDPSize(1232)
 				baseMsg.Extra = append(baseMsg.Extra, opt)
 			})
 
-			It("should remove it", func() {
+			It("should remove it but keep the OPT record (DO bit, UDP size)", func() {
 				Expect(RemoveEdns0Option[*dns.EDNS0_SUBNET](baseMsg)).Should(BeTrue())
 
 				Expect(baseMsg).ShouldNot(HaveEdnsOption(dns.EDNS0SUBNET))
+
+				opt := baseMsg.IsEdns0()
+				Expect(opt).ShouldNot(BeNil())
+				Expect(opt.Do()).Should(BeTrue())
+				Expect(opt.UDPSize()).Should(Equal(uint16(1232)))
 			})
 		})
 

@@ -51,6 +51,35 @@ var _ = Describe("QueryLogConfig", func() {
 		})
 	})
 
+	Describe("validate", func() {
+		var c QueryLog
+
+		BeforeEach(func() {
+			c = QueryLog{}
+			Expect(defaults.Set(&c)).Should(Succeed())
+			c.Type = QueryLogTypeSqlite
+		})
+
+		It("passes with defaults", func() {
+			Expect(c.validate()).Should(Succeed())
+		})
+
+		It("rejects flushInterval <= 0", func() {
+			c.FlushInterval = 0
+			Expect(c.validate()).Should(MatchError(ContainSubstring("flushInterval")))
+		})
+
+		It("rejects creationAttempts < 1", func() {
+			c.CreationAttempts = 0
+			Expect(c.validate()).Should(MatchError(ContainSubstring("creationAttempts")))
+		})
+
+		It("skips validation for console/none types", func() {
+			Expect((&QueryLog{Type: QueryLogTypeConsole}).validate()).Should(Succeed())
+			Expect((&QueryLog{Type: QueryLogTypeNone}).validate()).Should(Succeed())
+		})
+	})
+
 	Describe("LogConfig", func() {
 		It("should log configuration", func() {
 			cfg.LogConfig(logger)

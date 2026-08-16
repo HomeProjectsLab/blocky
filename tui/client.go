@@ -216,6 +216,11 @@ func (c *Client) Clients() ([]ClientInfo, error) {
 	return out.Clients, err
 }
 
+// streamStallTimeout is 3x the server's 15s ping interval: if nothing (not even
+// a ping) arrives for this long the TCP is silently dead — close and reconnect.
+// var (not const) so tests can shrink it.
+var streamStallTimeout = 45 * time.Second
+
 // Stream opens the SSE feed and calls onQuery for every "query" event until the
 // connection drops or ctx-cancelled body close. Blocks; run in a goroutine.
 func (c *Client) Stream(onQuery func(QueryItem)) error {
@@ -229,7 +234,26 @@ func (c *Client) Stream(onQuery func(QueryItem)) error {
 		return fmt.Errorf("stream: %s", resp.Status)
 	}
 
-	return readSSE(resp.Body, onQuery)
+	// ping-absence watchdog: a dead TCP with no FIN/RST otherwise blocks the
+	// read for minutes (kernel keepalive) while the ticker freezes
+	wd := time.AfterFunc(streamStallTimeout, func() { resp.Body.Close() })
+	defer wd.Stop()
+
+	return readSSE(&watchdogReader{r: resp.Body, t: wd}, onQuery)
+}
+
+// watchdogReader resets t on every read so the AfterFunc only fires when the
+// stream has been silent for the full timeout.
+type watchdogReader struct {
+	r io.Reader
+	t *time.Timer
+}
+
+func (w *watchdogReader) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	w.t.Reset(streamStallTimeout)
+
+	return n, err
 }
 
 // readSSE parses a text/event-stream, emitting one QueryItem per

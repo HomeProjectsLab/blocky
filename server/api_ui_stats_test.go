@@ -140,6 +140,29 @@ var _ = Describe("Stats UI API", func() {
 			Expect(cols).Should(HaveKey("blocked"))
 			Expect(cols["domain"].([]any)[0].(map[string]any)).Should(HaveKeyWithValue("name", "example.com"))
 		})
+
+		It("dedupes duplicated col tokens instead of running one query per token", func() {
+			rec := exec("/api/ui/stats/top?col=" + strings.Repeat("domain,", 10000) + "domain&n=5")
+
+			Expect(rec.Code).Should(Equal(http.StatusOK))
+			Expect(jsonBody(rec)).Should(HaveKey("items"))
+		})
+
+		It("rejects too many distinct col tokens", func() {
+			Expect(exec("/api/ui/stats/top?col=a,b,c,d,e,f,g,h,i").Code).Should(Equal(http.StatusBadRequest))
+		})
+	})
+
+	Describe("parseTimeRange", func() {
+		It("anchors the default from on a supplied past to", func() {
+			past := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+			req := httptest.NewRequest(http.MethodGet, "/x?to="+past, nil)
+
+			from, to, err := parseTimeRange(req)
+			Expect(err).Should(Succeed())
+			Expect(from).Should(Equal(to.Add(-24 * time.Hour)))
+			Expect(from.Before(to)).Should(BeTrue())
+		})
 	})
 
 	Describe("GET /api/ui/stats/latency", func() {

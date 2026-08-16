@@ -110,17 +110,15 @@ func (v *Validator) computeNSEC3Hash(name string, hashAlg uint8, salt string, it
 	cacheKey := fmt.Sprintf("%s:%d:%s:%d", name, hashAlg, salt, iterations)
 
 	// Check cache first
-	if cached, ok := v.nsec3HashCache.Load(cacheKey); ok {
-		if hash, ok := cached.(string); ok {
-			return hash, nil
-		}
+	if cached, _ := v.nsec3HashCache.Get(cacheKey); cached != nil {
+		return *cached, nil
 	}
 
 	// Compute hash using the miekg/dns library's built-in NSEC3 hash function
 	hash := dns.HashName(name, hashAlg, iterations, salt)
 
-	// Store in cache
-	v.nsec3HashCache.Store(cacheKey, hash)
+	// Store in cache (bounded LRU: the key embeds the attacker-controlled qname)
+	v.nsec3HashCache.Put(cacheKey, &hash, v.cacheExpiration)
 
 	return hash, nil
 }
