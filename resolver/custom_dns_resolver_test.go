@@ -176,6 +176,41 @@ var _ = Describe("CustomDNSResolver", func() {
 					// will not delegate to next resolver
 					m.AssertNotCalled(GinkgoT(), "Resolve", mock.Anything)
 				})
+				// Regression for the "local DNS still redirects upstream" report: an
+				// AAAA query for a zone name that only has an A record must be answered
+				// NODATA locally, NOT forwarded — forwarding leaks the real origin's
+				// AAAA and the client reaches the public server over IPv6.
+				It("ip6 query for an A-only zone name should return NODATA locally (not leaked upstream)", func() {
+					Expect(sut.Resolve(ctx, newRequest("example.zone.", AAAA))).
+						Should(
+							SatisfyAll(
+								HaveNoAnswer(),
+								HaveResponseType(ResponseTypeCUSTOMDNS),
+								HaveReason("CUSTOM DNS"),
+								HaveReturnCode(dns.RcodeSuccess),
+							))
+					// must resolve locally, never delegate to the upstream resolver
+					m.AssertNotCalled(GinkgoT(), "Resolve", mock.Anything)
+				})
+				// HTTPS (type 65) and SVCB (type 64) are the types browsers actually
+				// emit and the likely culprit behind the "still redirecting" report:
+				// they must be answered NODATA locally for an A-only zone name, never
+				// forwarded (forwarding leaks the origin's HTTPS/ECH hints).
+				DescribeTable("unmapped browser type for an A-only zone name returns NODATA locally (not leaked upstream)",
+					func(qtype dns.Type) {
+						Expect(sut.Resolve(ctx, newRequest("example.zone.", qtype))).
+							Should(
+								SatisfyAll(
+									HaveNoAnswer(),
+									HaveResponseType(ResponseTypeCUSTOMDNS),
+									HaveReason("CUSTOM DNS"),
+									HaveReturnCode(dns.RcodeSuccess),
+								))
+						m.AssertNotCalled(GinkgoT(), "Resolve", mock.Anything)
+					},
+					Entry("HTTPS (type 65)", HTTPS),
+					Entry("SVCB (type 64)", dns.Type(dns.TypeSVCB)),
+				)
 				It("defined ip4 query should be resolved", func() {
 					Expect(sut.Resolve(ctx, newRequest("custom.domain.", A))).
 						Should(

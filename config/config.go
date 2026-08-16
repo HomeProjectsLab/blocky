@@ -1010,6 +1010,20 @@ func (cfg *Config) migrate(logger *logrus.Entry) bool {
 	usesDepredOpts = cfg.Blocking.migrate(logger) || usesDepredOpts
 	usesDepredOpts = cfg.HostsFile.migrate(logger) || usesDepredOpts
 
+	// A local override zone (records the UI writes into customDNS.zone) must never
+	// leak unmapped query types upstream: with filterUnmappedTypes=false, a type
+	// not defined for a matched name (AAAA, and the HTTPS/SVCB browsers send) is
+	// forwarded to the real upstream, leaking the origin's records so the client
+	// still reaches the public server ("local DNS still redirects"). The flag is
+	// only DEFAULTED true; a legacy or hand-edited blob with an explicit false +
+	// a zone still leaks. Pin it true whenever a zone is present.
+	if len(cfg.CustomDNS.Zone.RRs) > 0 && !cfg.CustomDNS.FilterUnmappedTypes {
+		logger.Warn("customDNS.filterUnmappedTypes forced to true: a local override zone is configured, " +
+			"so unmapped query types (AAAA/HTTPS/SVCB) are answered locally instead of forwarded upstream")
+
+		cfg.CustomDNS.FilterUnmappedTypes = true
+	}
+
 	return usesDepredOpts
 }
 

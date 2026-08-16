@@ -33,6 +33,31 @@ func TestOverlayEditMarksDirty(t *testing.T) {
 	}
 }
 
+// A customDNS overlay edit (the Local-DNS UI writing a zone) must flip Status()
+// dirty so the pending-apply banner shows and the resolver rebuilds with the new
+// record — the "config never applied" footgun behind the redirects-upstream report.
+func TestLocalDNSZoneMarksDirty(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.MarkApplied()
+
+	if dirty, _, _, err := s.Status(); err != nil || dirty {
+		t.Fatalf("want clean after apply, got dirty=%v err=%v", dirty, err)
+	}
+
+	if err := s.SetLocalDNSZone("host.lan. 3600 IN A 10.0.0.5\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	if dirty, _, _, err := s.Status(); err != nil || !dirty {
+		t.Fatalf("want dirty after local zone edit, got dirty=%v err=%v", dirty, err)
+	}
+}
+
 // VerifyConfigDB must reject a SQLite file that is not a config database (the
 // querylog.db-upload case) and accept a real config.db — without mutating either.
 func TestVerifyConfigDB(t *testing.T) {

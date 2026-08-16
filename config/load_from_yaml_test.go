@@ -37,6 +37,38 @@ ports:
 		})
 	})
 
+	// Regression: a legacy/hand-edited blob with a local override zone AND an
+	// explicit filterUnmappedTypes:false would leak unmapped types (AAAA/HTTPS/
+	// SVCB) upstream. Load must pin it true whenever a zone is present.
+	When("a customDNS zone is present with an explicit filterUnmappedTypes:false", func() {
+		It("forces filterUnmappedTypes true so unmapped types are not leaked upstream", func() {
+			data := []byte(`
+customDNS:
+  filterUnmappedTypes: false
+  zone: |
+    example.zone. 3600 IN A 1.2.3.4
+`)
+			cfg, err := LoadFromYAML(data)
+			Expect(err).Should(Succeed())
+			Expect(cfg.CustomDNS.Zone.RRs).Should(HaveKey("example.zone."))
+			Expect(cfg.CustomDNS.FilterUnmappedTypes).Should(BeTrue())
+		})
+	})
+
+	When("filterUnmappedTypes:false is set with only mappings (no zone)", func() {
+		It("leaves the flag false (legitimate upstream-forward for simple mappings)", func() {
+			data := []byte(`
+customDNS:
+  filterUnmappedTypes: false
+  mapping:
+    custom.domain: 1.2.3.4
+`)
+			cfg, err := LoadFromYAML(data)
+			Expect(err).Should(Succeed())
+			Expect(cfg.CustomDNS.FilterUnmappedTypes).Should(BeFalse())
+		})
+	})
+
 	When("input has an unknown key", func() {
 		It("returns an error (strict mode)", func() {
 			_, err := LoadFromYAML([]byte("notARealKey: true\n"))

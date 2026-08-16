@@ -109,8 +109,22 @@ var _ = Describe("Store customDNS zone", func() {
 			Expect(cfg.CustomDNS.Zone.RRs).Should(HaveKey("new.lan."))
 		})
 
-		It("preserves customTTL / filterUnmappedTypes / mapping when only writing zone", func() {
-			cdnsSeedWithCustomDNS(store)
+		// "local DNS still redirects upstream" guard: the Local-DNS UI writes a
+		// zone but never the filterUnmappedTypes knob. The load path must default it
+		// to true so an unmapped type (AAAA/HTTPS/SVCB) for a local override answers
+		// NODATA instead of leaking upstream. A zone present also PINS it true even
+		// when a legacy/hand-edited blob set it explicitly false — see the next test.
+		It("defaults filterUnmappedTypes to true when the UI writes a zone without the knob", func() {
+			Expect(store.SetLocalDNSZone("host.lan. 3600 IN A 10.0.0.5\n")).Should(Succeed())
+
+			cfg, err := store.LoadConfig()
+			Expect(err).Should(Succeed())
+			Expect(cfg.CustomDNS.Zone.RRs).Should(HaveKey("host.lan."))
+			Expect(cfg.CustomDNS.FilterUnmappedTypes).Should(BeTrue())
+		})
+
+		It("preserves customTTL / mapping and hardens filterUnmappedTypes true when only writing zone", func() {
+			cdnsSeedWithCustomDNS(store) // seeds an explicit filterUnmappedTypes: false + a zone
 
 			Expect(store.SetLocalDNSZone("host.lan. 3600 IN A 10.0.0.5\n")).Should(Succeed())
 
@@ -118,7 +132,9 @@ var _ = Describe("Store customDNS zone", func() {
 			Expect(err).Should(Succeed())
 
 			Expect(cfg.CustomDNS.CustomTTL.ToDuration()).Should(Equal(2 * time.Hour))
-			Expect(cfg.CustomDNS.FilterUnmappedTypes).Should(BeFalse())
+			// a local override zone is present, so the load path pins filterUnmappedTypes
+			// true even though the stored blob set it false — no unmapped-type leak upstream
+			Expect(cfg.CustomDNS.FilterUnmappedTypes).Should(BeTrue())
 			Expect(cfg.CustomDNS.Mapping).Should(HaveKey("printer.lan"))
 
 			// zone was replaced, not appended
