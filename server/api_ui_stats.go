@@ -52,6 +52,7 @@ func registerStatsUIEndpoints(
 	router.Get("/api/ui/clients/classes", s.clientClasses)
 	router.Put("/api/ui/clients/classes/{client}", s.putClientClass)
 	router.Put("/api/ui/clients/names/{client}", s.putClientName)
+	router.Delete("/api/ui/clients/profiles", s.purgeProfiles)
 	router.Get("/api/ui/clients/{name}", s.clientDetail)
 	router.Get("/api/ui/privacy", s.getPrivacy)
 	router.Put("/api/ui/privacy", s.putPrivacy)
@@ -92,6 +93,12 @@ type statsAPI struct {
 	classMu         sync.Mutex
 	classRefreshAt  time.Time
 	classRefreshing bool
+
+	// presence-profile refresh throttle (opt-in Profiling). Same shape as the
+	// class throttle: RefreshClientProfiles is a full agg_hourly scan, off-path.
+	profMu         sync.Mutex
+	profRefreshAt  time.Time
+	profRefreshing bool
 
 	// sysUsage holds the latest system-usage sample (per-core CPU / RAM / disk +
 	// R/W), published by a persistent sampler on the server-lifetime ctx and

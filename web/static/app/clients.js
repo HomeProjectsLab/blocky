@@ -124,6 +124,37 @@ function identityHTML(c) {
     return chips.join(" ");
 }
 
+// presenceHeatmap: a 24-cell hour-of-day strip (local time) shaded by relative
+// activity, so the device's wake/sleep/work rhythm reads at a glance. Data is the
+// precomputed, opt-in presence histogram (absent unless profiling is enabled).
+function presenceHeatmap(presence) {
+    const hrs = presence.hourLocal || [];
+    const max = Math.max(1, ...hrs);
+    const wrap = document.createElement("div");
+    wrap.className = "presence-grid";
+    wrap.style.display = "grid";
+    wrap.style.gridTemplateColumns = "repeat(24, 1fr)";
+    wrap.style.gap = "2px";
+    for (let h = 0; h < 24; h++) {
+        const v = hrs[h] || 0;
+        const cell = document.createElement("div");
+        // intensity 0..1 → opacity of the accent colour; empty hours stay faint.
+        const t = v / max;
+        cell.style.background = v ? `color-mix(in srgb, var(--c-resolved) ${Math.round(15 + t * 85)}%, transparent)` : "var(--c-bg-alt, rgba(127,127,127,.12))";
+        cell.style.aspectRatio = "1";
+        cell.style.borderRadius = "2px";
+        cell.title = `${h.toString().padStart(2, "0")}:00 — ${fmtNum(v)} queries`;
+        wrap.append(cell);
+    }
+    const box = document.createElement("div");
+    box.append(wrap);
+    const legend = document.createElement("p");
+    legend.className = "empty";
+    legend.textContent = `Local hour of day (${presence.tz || "UTC"}) — darker = more active. Opt-in, computed on the box, never exported.`;
+    box.append(legend);
+    return box;
+}
+
 function section(heading) {
     const h = document.createElement("h2");
     h.className = "sub-h";
@@ -211,6 +242,11 @@ async function openDetail(name) {
         requestAnimationFrame(() => { detailChart = lineChart(chartEl, {
             labels: ["queries"], colors: ["var(--c-resolved)"], data: [xs, ys], fmtVal: fmtNum,
         }); });
+    }
+
+    if (d.presence) {
+        detail.append(section("Presence · when this device is active"));
+        detail.append(presenceHeatmap(d.presence));
     }
 
     detail.append(section("Fingerprint · who this client is"));

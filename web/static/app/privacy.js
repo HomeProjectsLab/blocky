@@ -51,6 +51,10 @@ const SECTIONS = [
         { field: "vendorFamilies", type: "multi", options: VENDOR_FAMILIES, label: "Vendor families", help: "Which telemetry families to draw beacon domains from. Select none = the engine's built-in default set." },
         { field: "phantomDevicesPct", type: "number", min: "0", max: "100", label: "Phantom devices %", help: "Share of vendor-telemetry chaff drawn from families NOT in your real fleet, to obscure true fleet size and vendor mix (0–100)." },
     ]],
+    ["profiling", "Presence profiling", "OPT-IN, OFF by default, and 100% local — this data never leaves the box and is never exported. When on, it derives WHEN each device is active (a per-hour wake/sleep/work pattern) from traffic already logged. It profiles everyone on the network, including household members who did not consent, so leave it off unless you have a reason and everyone's agreement. Purge wipes all stored presence data instantly.", [
+        { field: "enable", type: "toggle", label: "Enable presence profiling", help: "Off = no presence histograms are computed or stored." },
+        { field: "tz", type: "text", label: "Time zone (IANA)", help: "e.g. Europe/Zurich. Used to read local wake/sleep hours from UTC-logged activity. Empty = UTC. A wrong zone shifts the whole presence chart by hours." },
+    ]],
     ["ttlJitter", "TTL jitter", "Randomly nudges cached record lifetimes so your cache timing can't be used to profile you.", [
         { field: "enable", type: "toggle", label: "Enable TTL jitter" },
         { field: "percent", type: "number", min: "0", max: "90", label: "Jitter percent", help: "Maximum +/- percentage applied to each TTL (0–90)." },
@@ -117,6 +121,29 @@ function field(sectionKey, def, value) {
     return wrap;
 }
 
+// purgeControl: a button that wipes all stored presence data. Not a config
+// field — a direct action, so it lives outside the save/apply cycle.
+function purgeControl() {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-sub";
+    btn.textContent = "Purge presence data now";
+    btn.addEventListener("click", async () => {
+        if (!confirm("Delete all stored presence data? This cannot be undone.")) return;
+        try {
+            await send("DELETE", "/api/ui/clients/profiles");
+            flash("Presence data purged.");
+        } catch (err) { flash("Could not purge: " + err.message, true); }
+    });
+    const h = document.createElement("p");
+    h.className = "field-help";
+    h.textContent = "Deletes every stored per-device presence histogram immediately. Turning the feature off stops new collection; this erases what was already collected.";
+    wrap.append(btn, h);
+    return wrap;
+}
+
 function render(data) {
     form.innerHTML = "";
     for (const [key, heading, blurb, defs] of SECTIONS) {
@@ -125,6 +152,7 @@ function render(data) {
         const h = document.createElement("h2"); h.textContent = heading; panel.append(h);
         const desc = document.createElement("p"); desc.className = "empty"; desc.textContent = blurb; panel.append(desc);
         for (const def of defs) panel.append(field(key, def, data[key]?.[def.field]));
+        if (key === "profiling") panel.append(purgeControl());
         form.append(panel);
     }
 }

@@ -1032,7 +1032,10 @@ func openDecoySource(cfg *config.Config) (*querylog.DecoySource, error) {
 		return nil, nil
 	}
 
-	if !cfg.Privacy.Decoy.Enable && !cfg.Lists.Updater.Enable && !blockingUsesBlocklistSources(cfg) {
+	// Profiling.Enable must force the handle open too: without it the presence
+	// endpoints silently 503 whenever decoy/lists happen to be disabled (C4/R8).
+	if !cfg.Privacy.Decoy.Enable && !cfg.Privacy.Profiling.Enable &&
+		!cfg.Lists.Updater.Enable && !blockingUsesBlocklistSources(cfg) {
 		return nil, nil
 	}
 

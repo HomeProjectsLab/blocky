@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -20,6 +21,9 @@ type PrivacyConfig struct {
 	// and the answer is normalized back to the client's case. Forwarding path only; the
 	// recursive (zdns) path ignores it until the documented zdns fork lands.
 	QueryCaseRandomization bool `default:"false" yaml:"queryCaseRandomization"`
+	// Profiling is the opt-in, default-OFF presence/sleep/work analysis. Local-only,
+	// never exported. See ProfilingConfig.
+	Profiling ProfilingConfig `yaml:"profiling"`
 	// ShadowBlockedQueries decouples the client answer from the wire query for blocked
 	// domains: the client still gets the block response (ad-blocking intact), but the
 	// real upstream query is also egressed asynchronously and its answer discarded, so
@@ -182,6 +186,26 @@ func (c *DecoyConfig) EffectivePersonaCurve() (peak, trough float64) {
 	return peak, trough
 }
 
+// ProfilingConfig controls the opt-in presence/sleep/work profiling. It is a
+// privacy feature (surfaces WHEN each device is active), so it is OFF by default
+// and its data is local-only and never exported. TZ is a required calibration
+// knob: the hourly aggregates are UTC, so a wrong zone makes sleep/work windows
+// silently wrong by hours.
+type ProfilingConfig struct {
+	Enable bool   `default:"false" yaml:"enable"`
+	TZ     string `yaml:"tz"` // IANA name (e.g. "Europe/Zurich"); empty = UTC
+}
+
+func (c *ProfilingConfig) validate() error {
+	if c.Enable && c.TZ != "" {
+		if _, err := time.LoadLocation(c.TZ); err != nil {
+			return fmt.Errorf("privacy.profiling: tz (%q) is not a valid IANA time zone: %w", c.TZ, err)
+		}
+	}
+
+	return nil
+}
+
 // TTLJitterConfig randomizes cached-answer TTLs by +/- PercentPct percent.
 type TTLJitterConfig struct {
 	Enable     bool `default:"false" yaml:"enable"`
@@ -195,6 +219,10 @@ type EDNSPaddingConfig struct {
 
 func (c *PrivacyConfig) validate(_ *logrus.Entry) error {
 	if err := c.Decoy.validate(); err != nil {
+		return err
+	}
+
+	if err := c.Profiling.validate(); err != nil {
 		return err
 	}
 

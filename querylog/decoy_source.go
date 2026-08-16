@@ -1280,6 +1280,141 @@ type clientProfile struct {
 
 func (clientProfile) TableName() string { return "client_profile" }
 
+// ClientProfileInfo is the decoded presence histogram for one client: queries per
+// UTC hour-of-day (0..23) plus the observed activity span. The server localizes
+// the histogram with the configured TZ before rendering.
+type ClientProfileInfo struct {
+	HourHistUTC [24]int
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	UpdatedAt   time.Time
+}
+
+// encodeHourHist joins a 24-int histogram into the stored CSV form.
+func encodeHourHist(h [24]int) string {
+	parts := make([]string, 24)
+	for i, v := range h {
+		parts[i] = strconv.Itoa(v)
+	}
+
+	return strings.Join(parts, ",")
+}
+
+// decodeHourHist parses the stored CSV back into a 24-int histogram. A malformed
+// or short row yields zeros for the missing slots rather than an error.
+func decodeHourHist(s string) [24]int {
+	var out [24]int
+
+	for i, tok := range strings.Split(s, ",") {
+		if i >= 24 {
+			break
+		}
+
+		out[i], _ = strconv.Atoi(strings.TrimSpace(tok))
+	}
+
+	return out
+}
+
+// RefreshClientProfiles recomputes every client's presence histogram from the
+// hourly aggregates and upserts client_profile. This is a full agg_hourly scan +
+// GROUP BY — heavy recompute-all — so it runs ONLY on the throttled off-request
+// timer (mirrors RefreshClientClasses), never on the request path.
+//
+// ponytail: scans all of agg_hourly (bounded by the writer's aggregate
+// retention). Add a `WHERE hour >= ?` window if that retention ever grows
+// unbounded and stale months dilute the "when is this device active" signal.
+func (s *DecoySource) RefreshClientProfiles() error {
+	var rows []struct {
+		Client string    `gorm:"column:client_name"`
+		Hour   time.Time `gorm:"column:hour"`
+		Cnt    int64     `gorm:"column:cnt"`
+	}
+
+	err := s.db.Raw(`SELECT client_name, hour, SUM(cnt) AS cnt FROM agg_hourly
+		WHERE client_name <> '' GROUP BY client_name, hour`).Scan(&rows).Error
+	if err != nil {
+		return err
+	}
+
+	type acc struct {
+		hist        [24]int
+		first, last time.Time
+	}
+
+	byClient := map[string]*acc{}
+
+	for _, r := range rows {
+		a := byClient[r.Client]
+		if a == nil {
+			a = &acc{}
+			byClient[r.Client] = a
+		}
+
+		a.hist[r.Hour.UTC().Hour()] += int(r.Cnt)
+
+		if a.first.IsZero() || r.Hour.Before(a.first) {
+			a.first = r.Hour
+		}
+
+		if r.Hour.After(a.last) {
+			a.last = r.Hour
+		}
+	}
+
+	now := time.Now()
+
+	for client, a := range byClient {
+		row := clientProfile{
+			Client:      client,
+			HourHistUTC: encodeHourHist(a.hist),
+			FirstSeen:   a.first,
+			LastSeen:    a.last,
+			UpdatedAt:   now,
+		}
+
+		err := s.db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "client"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"hour_hist_utc": row.HourHistUTC,
+				"first_seen":    row.FirstSeen,
+				"last_seen":     row.LastSeen,
+				"updated_at":    row.UpdatedAt,
+			}),
+		}).Create(&row).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ClientProfile returns the precomputed presence histogram for client (one
+// primary-key lookup — cheap, safe on the request path), or a zero-value
+// ClientProfileInfo when the client has no profile row yet.
+func (s *DecoySource) ClientProfile(client string) (ClientProfileInfo, error) {
+	var row clientProfile
+	if err := s.db.Raw(
+		"SELECT client, hour_hist_utc, first_seen, last_seen, updated_at FROM client_profile WHERE client = ? LIMIT 1",
+		client).Scan(&row).Error; err != nil {
+		return ClientProfileInfo{}, err
+	}
+
+	return ClientProfileInfo{
+		HourHistUTC: decodeHourHist(row.HourHistUTC),
+		FirstSeen:   row.FirstSeen,
+		LastSeen:    row.LastSeen,
+		UpdatedAt:   row.UpdatedAt,
+	}, nil
+}
+
+// PurgeProfiles deletes all precomputed presence data (the profiling purge
+// button). Local-only feature, so a purge is a plain table wipe.
+func (s *DecoySource) PurgeProfiles() error {
+	return s.db.Exec("DELETE FROM client_profile").Error
+}
+
 // sanitizeDisplayName bounds a user-supplied client name: control characters are
 // stripped (it is rendered in the UI), the result is trimmed and capped at 63
 // runes. Unicode letters/marks are kept so real names ("Alex's iPhone") survive.

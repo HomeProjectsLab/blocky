@@ -29,7 +29,16 @@ type clientClassifier interface {
 	ClientName(client string) (string, error)
 	ClientNames() (map[string]string, error)
 	SetClientName(client, name string) error
+	// Presence profiling (opt-in). RefreshClientProfiles is the heavy off-request
+	// recompute; ClientProfile is a cheap PK read; PurgeProfiles wipes it all.
+	RefreshClientProfiles() error
+	ClientProfile(client string) (querylog.ClientProfileInfo, error)
+	PurgeProfiles() error
 }
+
+// profileRefreshInterval bounds how often the presence recompute (full agg scan)
+// runs off the request path. Mirrors clientClassRefreshInterval.
+const profileRefreshInterval = 5 * time.Minute
 
 type clientClassJSON struct {
 	Client    string `json:"client"`
@@ -253,7 +262,125 @@ func (s *statsAPI) clientDetail(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// Opt-in presence profiling: layer the precomputed histogram, localized to the
+	// configured TZ. Best-effort — a missing profile or store error just omits it.
+	if p := s.presenceFor(detail.Name, detail.Shared); p != nil {
+		writeJSON(rw, http.StatusOK, struct {
+			*querylog.ClientDetail
+			Presence *presenceJSON `json:"presence,omitempty"`
+		}{detail, p})
+
+		return
+	}
+
 	writeJSON(rw, http.StatusOK, detail)
+}
+
+// presenceJSON is the localized presence histogram surfaced in the drill-down:
+// queries per LOCAL hour-of-day (0..23) plus the zone used and last refresh.
+type presenceJSON struct {
+	HourLocal [24]int `json:"hourLocal"`
+	TZ        string  `json:"tz"`
+	UpdatedAt string  `json:"updatedAt,omitempty"`
+}
+
+// presenceFor returns the localized presence for a client, or nil when profiling
+// is disabled, the store/config is unavailable, the client is a NAT/shared
+// aggregate (R3 — presence of "many devices" is meaningless), or there is no
+// profile row yet. It also kicks the throttled off-request recompute.
+func (s *statsAPI) presenceFor(name string, shared bool) *presenceJSON {
+	if s.classifier == nil || s.store == nil || shared {
+		return nil
+	}
+
+	cfg, err := s.store.GetPrivacy()
+	if err != nil || !cfg.Profiling.Enable {
+		return nil
+	}
+
+	s.maybeRefreshProfiles()
+
+	prof, err := s.classifier.ClientProfile(name)
+	if err != nil {
+		return nil
+	}
+
+	hist, tz := localizeHourHist(prof.HourHistUTC, cfg.Profiling.TZ)
+
+	j := &presenceJSON{HourLocal: hist, TZ: tz}
+	if !prof.UpdatedAt.IsZero() {
+		j.UpdatedAt = prof.UpdatedAt.Format(time.RFC3339)
+	}
+
+	return j
+}
+
+// localizeHourHist rotates a UTC hour-of-day histogram into the configured local
+// zone and returns the zone name used ("UTC" when tz is empty/invalid).
+//
+// ponytail: whole-hour rotation by the zone's CURRENT offset. This drops the
+// :30/:45 fraction of India/Nepal-style zones and ignores the DST seam (a
+// half-year of data crosses a 1h shift). The buckets are hour-granular, so a
+// sub-hour-correct answer isn't representable without re-bucketing raw logs —
+// upgrade path is a per-hour re-bucket in RefreshClientProfiles if it matters.
+func localizeHourHist(utc [24]int, tz string) ([24]int, string) {
+	loc, name := time.UTC, "UTC"
+	if tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc, name = l, tz
+		}
+	}
+
+	_, offsetSec := time.Now().In(loc).Zone()
+	shift := offsetSec / 3600
+
+	var out [24]int
+	for h := 0; h < 24; h++ {
+		out[((h+shift)%24+24)%24] = utc[h]
+	}
+
+	return out, name
+}
+
+// maybeRefreshProfiles kicks a background presence recompute at most once per
+// profileRefreshInterval, never blocking the caller (mirrors maybeRefreshClasses).
+func (s *statsAPI) maybeRefreshProfiles() {
+	s.profMu.Lock()
+	if s.profRefreshing || (!s.profRefreshAt.IsZero() && time.Since(s.profRefreshAt) < profileRefreshInterval) {
+		s.profMu.Unlock()
+
+		return
+	}
+	s.profRefreshing = true
+	s.profMu.Unlock()
+
+	go func() {
+		if err := s.classifier.RefreshClientProfiles(); err != nil {
+			log.Log().Warnf("client-profile refresh failed: %v", err)
+		}
+
+		s.profMu.Lock()
+		s.profRefreshing = false
+		s.profRefreshAt = time.Now()
+		s.profMu.Unlock()
+	}()
+}
+
+// purgeProfiles wipes all precomputed presence data (the profiling purge button).
+func (s *statsAPI) purgeProfiles(rw http.ResponseWriter, _ *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "profiling not available"})
+
+		return
+	}
+
+	if err := s.classifier.PurgeProfiles(); err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
 }
 
 // privacyJSON is the wire shape of the privacy config: explicit json tags keep
@@ -290,6 +417,11 @@ type privacyJSON struct {
 		VendorFamilies    []string `json:"vendorFamilies"`
 		PhantomDevicesPct uint     `json:"phantomDevicesPct"`
 	} `json:"deviceClass"`
+	// Profiling is the opt-in, default-OFF presence analysis (local-only).
+	Profiling struct {
+		Enable bool   `json:"enable"`
+		TZ     string `json:"tz"`
+	} `json:"profiling"`
 	TTLJitter struct {
 		Enable  bool `json:"enable"`
 		Percent uint `json:"percent"`
@@ -326,6 +458,8 @@ func privacyToJSON(p config.PrivacyConfig) privacyJSON {
 	j.DeviceClass.VendorTelemetry = p.Decoy.DeviceClass.VendorTelemetry
 	j.DeviceClass.VendorFamilies = p.Decoy.DeviceClass.VendorFamilies
 	j.DeviceClass.PhantomDevicesPct = p.Decoy.DeviceClass.PhantomDevicesPct
+	j.Profiling.Enable = p.Profiling.Enable
+	j.Profiling.TZ = p.Profiling.TZ
 	j.TTLJitter.Enable = p.TTLJitter.Enable
 	j.TTLJitter.Percent = p.TTLJitter.PercentPct
 	j.EDNSPadding.Enable = p.EDNSPadding.Enable
@@ -366,6 +500,8 @@ func (j privacyJSON) applyTo(p config.PrivacyConfig) config.PrivacyConfig {
 	p.Decoy.DeviceClass.VendorTelemetry = j.DeviceClass.VendorTelemetry
 	p.Decoy.DeviceClass.VendorFamilies = j.DeviceClass.VendorFamilies
 	p.Decoy.DeviceClass.PhantomDevicesPct = j.DeviceClass.PhantomDevicesPct
+	p.Profiling.Enable = j.Profiling.Enable
+	p.Profiling.TZ = j.Profiling.TZ
 	p.TTLJitter.Enable = j.TTLJitter.Enable
 	p.TTLJitter.PercentPct = j.TTLJitter.Percent
 	p.EDNSPadding.Enable = j.EDNSPadding.Enable
