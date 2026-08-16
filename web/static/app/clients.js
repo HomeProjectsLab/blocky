@@ -92,7 +92,7 @@ function fpPanel(fingerprints) {
     return wrap;
 }
 
-function escapeHTML(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function escapeHTML(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 // DNS-native identity chips: distinct IP(s) (deduped against the name/PTR) plus
 // the multi-facet device recognition (OS badge + vendor/model/app chips). These
@@ -140,7 +140,7 @@ function presenceHeatmap(presence) {
         const cell = document.createElement("div");
         // intensity 0..1 → opacity of the accent colour; empty hours stay faint.
         const t = v / max;
-        cell.style.background = v ? `color-mix(in srgb, var(--c-resolved) ${Math.round(15 + t * 85)}%, transparent)` : "var(--c-bg-alt, rgba(127,127,127,.12))";
+        cell.style.background = v ? `color-mix(in srgb, var(--c-resolved) ${Math.round(15 + t * 85)}%, transparent)` : "var(--bg2)";
         cell.style.aspectRatio = "1";
         cell.style.borderRadius = "2px";
         cell.title = `${h.toString().padStart(2, "0")}:00 — ${fmtNum(v)} queries`;
@@ -223,7 +223,7 @@ async function openDetail(name) {
     drawer.hidden = false;
     let d;
     try { d = await getJSON(`/api/ui/clients/${encodeURIComponent(name)}`); }
-    catch (err) { detail.innerHTML = `<p class="empty">Could not load: ${err.message}</p>`; return; }
+    catch (err) { detail.innerHTML = '<p class="empty"></p>'; detail.firstChild.textContent = "Could not load: " + err.message; return; }
 
     title.textContent = d.displayName || name;
     detail.innerHTML = "";
@@ -231,7 +231,7 @@ async function openDetail(name) {
     stat.className = "empty";
     stat.textContent = `${fmtNum(d.queries)} queries · ${fmtNum(d.blocked)} blocked (last 24h)`;
     detail.append(stat);
-    if (!d.shared) detail.append(nameEditor(d));
+    if (!(d.shared || d.natAggregate)) detail.append(nameEditor(d));
 
     const idHTML = identityHTML(d);
     if (idHTML) {
@@ -279,6 +279,7 @@ const ccBody = document.getElementById("cc-body");
 const ccEmpty = document.getElementById("cc-empty");
 const ccMsg = document.getElementById("cc-msg");
 const CLASS_OPTS = ["auto", "iot", "workstation", "server", "unknown"];
+let classRetried = false; // one-shot re-poll guard for the cache-served class table
 
 function classChip(cls) {
     return `<span class="chip cc-${cls || "unknown"}" title="device class · behaviour classifier — inferred from how this client queries DNS">${escapeHTML(cls || "unknown")}</span>`;
@@ -309,7 +310,14 @@ async function loadClasses() {
     try { data = await getJSON("/api/ui/clients/classes"); }
     catch (err) { ccEmpty.hidden = false; ccEmpty.textContent = "Could not load classes: " + err.message; return; }
     const rows = data.classes || [];
-    if (!rows.length) { ccEmpty.hidden = false; ccBody.innerHTML = ""; return; }
+    if (!rows.length) {
+        ccEmpty.hidden = false; ccBody.innerHTML = "";
+        // Classes are cache-served: a cold box recomputes them in a background
+        // goroutine, so the first fetch can be empty. Re-poll once so the table
+        // fills in without a manual reload (identity chips in load() are fresh).
+        if (!classRetried) { classRetried = true; setTimeout(loadClasses, 6000); }
+        return;
+    }
     ccEmpty.hidden = true;
     ccBody.innerHTML = "";
     for (const c of rows) {

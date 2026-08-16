@@ -425,7 +425,12 @@ func drawClients(s tcell.Screen, x, y, maxY int, base tcell.Style, clients []Cli
 			nat = fmt.Sprintf(" [NAT x%d]", c.FpCount)
 		}
 
-		head := fmt.Sprintf("%s  %d/%d%s", c.Name, c.Queries, c.Blocked, nat)
+		name := c.DisplayName
+		if name == "" {
+			name = c.Name
+		}
+
+		head := fmt.Sprintf("%s  %d/%d%s", name, c.Queries, c.Blocked, nat)
 		drawText(s, x, y, base, trunc(head, width))
 		y++
 
@@ -441,7 +446,7 @@ func drawClients(s tcell.Screen, x, y, maxY int, base tcell.Style, clients []Cli
 		if ip != "" {
 			parts = append(parts, ip)
 		}
-		if c.Shared {
+		if c.Shared || c.NatAggregate {
 			parts = append(parts, c.SharedLabel)
 		} else if c.OS != "" || len(c.Vendor) > 0 || len(c.Apps) > 0 {
 			if c.OS != "" {

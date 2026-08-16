@@ -1032,13 +1032,11 @@ func openDecoySource(cfg *config.Config) (*querylog.DecoySource, error) {
 		return nil, nil
 	}
 
-	// Profiling.Enable must force the handle open too: without it the presence
-	// endpoints silently 503 whenever decoy/lists happen to be disabled (C4/R8).
-	if !cfg.Privacy.Decoy.Enable && !cfg.Privacy.Profiling.Enable &&
-		!cfg.Lists.Updater.Enable && !blockingUsesBlocklistSources(cfg) {
-		return nil, nil
-	}
-
+	// Always open the handle for a sqlite query log — it is stable and cheap, and
+	// the classifier must exist from boot so a runtime Privacy toggle (profiling,
+	// person mapping) takes effect on Apply instead of silently 503-ing until a
+	// full process restart. The individual consumers (decoy engine, list updater,
+	// presence endpoints) stay gated on their own live-config flags. (C4/R8.)
 	source, err := querylog.NewDecoySource(cfg.QueryLog.Target.Reveal())
 	if err != nil {
 		return nil, fmt.Errorf("can't open list/decoy source: %w", err)

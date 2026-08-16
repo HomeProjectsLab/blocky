@@ -11,7 +11,7 @@ const peopleBox = document.getElementById("pp-people");
 const body = document.getElementById("pp-body");
 const empty = document.getElementById("pp-empty");
 
-function escapeHTML(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function escapeHTML(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 function deviceLabel(c) {
     const name = c.displayName || c.name || "—";

@@ -90,6 +90,7 @@ type TopItem struct {
 // The last four fields are omitempty server-side: treat missing as none/0/false/"".
 type ClientInfo struct {
 	Name         string   `json:"name"`
+	DisplayName  string   `json:"displayName,omitempty"` // operator's manual name override
 	IPs          []string `json:"ips"`
 	Queries      int64    `json:"queries"`
 	Blocked      int64    `json:"blocked"`
