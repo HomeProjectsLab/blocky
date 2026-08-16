@@ -273,29 +273,30 @@ func panelQPS(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
 	drawGraph(s, body, caps, styBase.Foreground(tcell.ColorAqua), snap.qpsHist)
 }
 
-// panelBlocked: big centered blocked-% over a gauge + count subtitle.
+// panelBlocked: the big blocked-% as the hero, with a proportion bar and count
+// subtitle grouped directly beneath it and the whole block vertically centred so
+// no panel space is left dangling.
 func panelBlocked(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
 	inner := panelBox(s, r, caps.Glyphs, styHdr, "BLOCKED")
 	if inner.Empty() {
 		return
 	}
 
-	num, body := inner.Rows(min(6, inner.H))
-	heroDraw(s, num, styBase.Foreground(tcell.ColorRed).Bold(true), pct(snap.blockFrac()))
+	frac := snap.blockFrac()
+	red := styBase.Foreground(tcell.ColorRed).Bold(true)
 
-	if body.H >= 1 {
-		bw := body.W - 8
-		if bw < 4 {
-			bw = 4
-		}
-
-		drawGauge(s, body.X, body.Y, caps, styBase, "", snap.blockFrac(), bw, pct(snap.blockFrac()))
+	// Too short for the 5-row hero + 2 detail rows: just centre the number.
+	if inner.H < 7 {
+		heroDraw(s, inner, red, pct(frac))
+		return
 	}
 
-	if body.H >= 2 {
-		sub := fmt.Sprintf("%s of %s", fmtCount(snap.overview.Blocked), fmtCount(snap.overview.Queries))
-		drawCentered(s, Rect{body.X, body.Y + 1, body.W, 1}, styDim, sub)
-	}
+	gy := centerY(inner, 7) // 5 hero rows + bar + subtitle, centred as one block
+	heroDraw(s, Rect{inner.X, gy, inner.W, 5}, red, pct(frac))
+	drawGauge(s, inner.X, gy+5, caps, styBase, "", frac, max(4, inner.W-2), "")
+
+	sub := fmt.Sprintf("%s of %s blocked", fmtCount(snap.overview.Blocked), fmtCount(snap.overview.Queries))
+	drawCentered(s, Rect{inner.X, gy + 6, inner.W, 1}, styDim, sub)
 }
 
 // panelCache: big centered cache-% over hit/miss gauges + latency percentiles.
@@ -305,31 +306,29 @@ func panelCache(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
 		return
 	}
 
-	num, body := inner.Rows(min(6, inner.H))
-	heroDraw(s, num, styBase.Foreground(tcell.ColorTeal).Bold(true), pct(snap.cacheFrac()))
-
 	hit := snap.cacheFrac()
-	barW := body.W - 16
-	if barW < 4 {
-		barW = 4
+	teal := styBase.Foreground(tcell.ColorTeal).Bold(true)
+
+	// Too short for the 5-row hero + 3 detail rows: just centre the number.
+	if inner.H < 8 {
+		heroDraw(s, inner, teal, pct(hit))
+		return
 	}
 
-	if body.H >= 1 {
-		drawGauge(s, body.X, body.Y, caps, styBase, "HIT ", hit, barW, pct(hit))
+	gy := centerY(inner, 8) // 5 hero rows + hit + miss + latency, centred as one block
+	heroDraw(s, Rect{inner.X, gy, inner.W, 5}, teal, pct(hit))
+
+	barW := max(4, inner.W-16)
+	drawGauge(s, inner.X, gy+5, caps, styBase, "HIT ", hit, barW, pct(hit))
+	drawGauge(s, inner.X, gy+6, caps, styBase, "MISS", 1-hit, barW, pct(1-hit))
+
+	l := snap.latency
+	if l.P50 == 0 && l.P95 == 0 {
+		l.P50, l.P95 = snap.overview.AvgMs, snap.overview.P95Ms
 	}
 
-	if body.H >= 2 {
-		drawGauge(s, body.X, body.Y+1, caps, styBase, "MISS", 1-hit, barW, pct(1-hit))
-	}
-
-	if body.H >= 3 {
-		l := snap.latency
-		if l.P50 == 0 && l.P95 == 0 {
-			l.P50, l.P95 = snap.overview.AvgMs, snap.overview.P95Ms
-		}
-		lat := fmt.Sprintf("p50 %.0f · p95 %.0f · p99 %.0fms", l.P50, l.P95, l.P99)
-		drawText(s, body.X, body.Y+2, styDim, trunc(lat, body.W))
-	}
+	lat := fmt.Sprintf("p50 %.0f · p95 %.0f · p99 %.0fms", l.P50, l.P95, l.P99)
+	drawCentered(s, Rect{inner.X, gy + 7, inner.W, 1}, styDim, lat)
 }
 
 // panelTopList lists a top-N column (count-first), filling the rect.
