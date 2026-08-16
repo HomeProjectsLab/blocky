@@ -77,14 +77,44 @@ func (s *DecoySource) SetListMeta(source, category, version string) error {
 
 // --- blocklist read (ad-blocker + noise) -----------------------------------
 
-// BlocklistCategories returns each seeded category with its domain count.
+// BlocklistCategories returns each seeded category with its domain count. The
+// underlying GROUP BY COUNT scans all ~3.5M blocklist_domains rows (seconds on a
+// Pi3), so the result is cached and only recomputed after a write invalidates it
+// (see invalidateBlCats). Warmed lazily; computed on the ro pool so a cold warm
+// doesn't serialize behind the writer. Semantics identical to the raw query.
 func (s *DecoySource) BlocklistCategories() ([]BlocklistStat, error) {
+	s.mu.Lock()
+	if s.blCatsValid {
+		out := s.blCats
+		s.mu.Unlock()
+
+		return out, nil
+	}
+	s.mu.Unlock()
+
 	var out []BlocklistStat
-	err := s.db.Raw(
+	err := s.ro.Raw(
 		"SELECT category, COUNT(*) AS n FROM blocklist_domains GROUP BY category ORDER BY category").
 		Scan(&out).Error
+	if err != nil {
+		return nil, err
+	}
 
-	return out, err
+	s.mu.Lock()
+	s.blCats = out
+	s.blCatsValid = true
+	s.mu.Unlock()
+
+	return out, nil
+}
+
+// invalidateBlCats drops the cached BlocklistCategories result after a write that
+// changes blocklist_domains, so the next read recomputes it.
+func (s *DecoySource) invalidateBlCats() {
+	s.mu.Lock()
+	s.blCats = nil
+	s.blCatsValid = false
+	s.mu.Unlock()
 }
 
 // BlocklistCount returns the number of domains in one category.
@@ -168,13 +198,19 @@ func (s *DecoySource) PruneBlocklist(category string) error {
 		return nil // nothing seeded; leave meta untouched
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("DELETE FROM blocklist_domains WHERE category = ?", category).Error; err != nil {
 			return err
 		}
 
 		return tx.Exec("DELETE FROM list_meta WHERE source = ? AND category = ?", "blocklistproject", category).Error
-	})
+	}); err != nil {
+		return err
+	}
+
+	s.invalidateBlCats()
+
+	return nil
 }
 
 // SeedBlocklistIfEmpty inserts a category's domains only when that category has
@@ -243,6 +279,8 @@ func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error
 			return 0, err
 		}
 	}
+
+	s.invalidateBlCats()
 
 	return inserted, s.loadBlMaxRowid()
 }

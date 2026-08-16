@@ -103,6 +103,13 @@ type DecoySource struct {
 	maxRowid   int64 // cached after seeding; decoy_domains is insert-only read-only
 	blMaxRowid int64 // cached max rowid of blocklist_domains for random-rowid sampling
 
+	// cached per-category blocklist counts (the GET /api/ui/blocking read). A full
+	// GROUP BY COUNT over blocklist_domains (~3.5M rows) is seconds on a Pi3; counts
+	// change only on ReplaceBlocklist/PruneBlocklist, so the result is cached here
+	// (guarded by mu), warmed lazily, and invalidated on those write paths.
+	blCats      []BlocklistStat
+	blCatsValid bool
+
 	// cached MIN/MAX rowid of log_entries for indexed random-rowid sampling of the
 	// real-query replay pool, refreshed on leRowidTTL (all guarded by mu).
 	leMinRowid int64
