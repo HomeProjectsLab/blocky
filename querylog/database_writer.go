@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm/logger"
@@ -78,6 +79,9 @@ type DatabaseWriter struct {
 	// dbPath is the sqlite file path (empty for remote DBs); the disk guardian
 	// stats its directory to keep the filesystem below the free-space target.
 	dbPath string
+	// checkpointBusy counts flush TRUNCATE checkpoints that returned BUSY or left
+	// WAL frames uncheckpointed (a reader held a mark) — the WAL-starvation signal.
+	checkpointBusy uint64
 }
 
 func NewDatabaseWriter(ctx context.Context, dbType config.QueryLogType, target string, logRetentionDays uint64,
@@ -484,6 +488,29 @@ func (d *DatabaseWriter) CleanUp() {
 const maxRetainedEntries = 10_000
 
 func (d *DatabaseWriter) doDBWrite() error {
+	if err := d.flushPending(); err != nil {
+		return err // partial failure: keep the old behaviour of skipping the checkpoint
+	}
+
+	// Bound the -wal under sustained decoy writes. SQLite's passive auto-checkpoint
+	// (wal_autocheckpoint pages) can't reset the WAL past a held read-mark, and the
+	// dashboard polls readers continuously, so it starves → the -wal grows unbounded
+	// → every RO reader scans a multi-GB WAL (the 15-20s hang). A TRUNCATE checkpoint
+	// on the flush loop resets it every dbFlushPeriod. It also reclaims the
+	// DecoySource second-writer connection's frames (same file, it never checkpoints).
+	// Run OUTSIDE d.lock: the single MaxOpenConns=1 writer conn already serializes it
+	// against pruneOldest, so holding d.lock across its up-to-5s busy-wait only
+	// needlessly pinned the writer mutex and starved retention. sqlite-only (aggregate).
+	if d.aggregate {
+		d.checkpointWAL()
+	}
+
+	return nil
+}
+
+// flushPending drains the pending-entries buffer under d.lock. Split out of
+// doDBWrite so the WAL checkpoint runs after the lock is released.
+func (d *DatabaseWriter) flushPending() error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
@@ -577,18 +604,35 @@ func (d *DatabaseWriter) doDBWrite() error {
 			Debug("query-log flush complete")
 	}
 
-	// Bound the -wal under sustained decoy writes. SQLite's passive auto-checkpoint
-	// (wal_autocheckpoint pages) can't reset the WAL past a held read-mark, and the
-	// dashboard polls readers continuously, so it starves → the -wal grows unbounded
-	// → every RO reader scans a multi-GB WAL (the 15-20s hang). A TRUNCATE checkpoint
-	// on the flush loop resets it every dbFlushPeriod. Same connection + lock: no new
-	// writer. It also reclaims the DecoySource second-writer connection's frames (same
-	// file, it never checkpoints). Non-fatal; sqlite-only (d.aggregate).
-	if d.aggregate {
-		if err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
-			log.Log().Tracef("wal checkpoint failed: %v", err)
-		}
+	return nil
+}
+
+// checkpointWAL runs a TRUNCATE checkpoint on the writer connection and inspects
+// its result. PRAGMA wal_checkpoint returns (busy, log, checkpointed): busy=1 means
+// a reader/writer held the WAL so it could not reset it, and log>checkpointed means
+// frames remain — either way the WAL was NOT fully truncated, the starvation this
+// checkpoint exists to prevent. That was previously swallowed to Tracef; surface it
+// at WARN with a running counter so a starving WAL is visible in the logs.
+func (d *DatabaseWriter) checkpointWAL() {
+	var res struct {
+		Busy         int `gorm:"column:busy"`
+		Log          int `gorm:"column:log"`
+		Checkpointed int `gorm:"column:checkpointed"`
 	}
 
-	return nil
+	if err := d.db.Raw("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&res).Error; err != nil {
+		log.Log().Tracef("wal checkpoint failed: %v", err)
+
+		return
+	}
+
+	if res.Busy != 0 || res.Log != res.Checkpointed {
+		n := atomic.AddUint64(&d.checkpointBusy, 1)
+		log.PrefixedLog("database_writer").
+			WithField("busy", res.Busy).
+			WithField("wal_frames", res.Log).
+			WithField("checkpointed", res.Checkpointed).
+			WithField("busy_total", n).
+			Warn("WAL TRUNCATE checkpoint left frames (reader holds a mark) — WAL not fully reset")
+	}
 }

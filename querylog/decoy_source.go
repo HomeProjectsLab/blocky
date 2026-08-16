@@ -2,6 +2,7 @@ package querylog
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,11 +66,21 @@ var noiseCorpusCap int64 = 100_000
 // return "" rather than ever emitting a domain the box would itself block.
 const blockResampleTries = 8
 
-// maxDecoyReaders sizes the read-only sampling pool. It equals the decoy engine's
-// maxConcurrentEmits (decoy/engine.go) so each emit worker gets its own reader
-// with no in-process queueing; more is never used, fewer re-introduces the queue.
-// WAL gives one-writer/many-readers, so these coexist with the pinned-1 writer.
-const maxDecoyReaders = 8
+// maxDecoyReaders sizes the read-only sampling pool. It is the decoy engine's
+// maxConcurrentEmits (decoy/engine.go, 8) PLUS uiReadHeadroom so UI-facing reads
+// (ListClientClasses/ClientNames/… on the same pool) can never evict an emit
+// worker's connection — without the headroom the 8 emit conns and every UI read
+// contend the same 8 slots, and a slow UI read starves the emit path (the ~2h
+// stall). WAL gives one-writer/many-readers, so these coexist with the pinned-1
+// writer. (querylog can't import decoy for the const — decoy imports querylog.)
+const uiReadHeadroom = 4
+const maxDecoyReaders = 8 + uiReadHeadroom
+
+// uiReadTimeout bounds every UI-facing read on the ro pool via a context deadline,
+// so an exhausted/slow pool surfaces as a fast error instead of an unbounded hang
+// (busy_timeout only bounds in-DB lock waits, not Go pool-acquisition, which uses
+// context.Background() by default — no deadline). Emit samplers keep no UI deadline.
+const uiReadTimeout = 5 * time.Second
 
 // leRowidTTL bounds how long the cached MIN/MAX log_entries rowid bounds are
 // reused before a refresh. Short, because the disk guardian prunes the oldest
@@ -110,6 +121,16 @@ type DecoySource struct {
 	blCats      []BlocklistStat
 	blCatsValid bool
 
+	// cached client_name→device_key overlay (dominantFPByName). /clients, /people
+	// and /clients/classes translate names↔keys through it; recomputing it is a full
+	// windowed log_entries GROUP BY that grows to seconds after hours of uptime, so
+	// it is served from here and recomputed OFF the request path only (startup warm,
+	// the 5-min class tick, and a background refresh after a name/person write). A
+	// refresh builds a fresh map and swaps the pointer — readers hold the old map
+	// safely, so this is race-clean vs the emit workers. Guarded by mu.
+	fpByName      map[string]string
+	fpByNameValid bool
+
 	// blWarm signals the long-lived background warmer to recompute blCats after an
 	// invalidation, so the ~9s GROUP BY COUNT runs off the request path instead of
 	// on the next visitor. Buffered depth 1 => a burst of ~12 ReplaceBlocklist
@@ -135,6 +156,13 @@ type DecoySource struct {
 	// lastSampleWarn is the unix-nano of the last emitted sampler-error WARN,
 	// used by warnSampleErr to rate-limit (atomic; no lock-order coupling with mu).
 	lastSampleWarn int64
+
+	// fpRefreshing single-flights the off-path overlay recompute: a burst of cold
+	// reads (the tiny boot window before the startup warm lands, or after a transient
+	// scan error) kicks exactly ONE background refreshDominantFP, never a goroutine
+	// per request that would pile the windowed GROUP BY onto the RO pool. Atomic; no
+	// lock-order coupling with mu.
+	fpRefreshing atomic.Bool
 }
 
 // sampleWarnEvery rate-limits the sampler-error WARN: a persistent DB fault
@@ -246,6 +274,12 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	// a reboot is already hot, and re-warm on every invalidation (see blCatsWarmLoop).
 	go s.blCatsWarmLoop()
 	s.signalBlWarm()
+
+	// Warm the client_name→device_key overlay off the request path so the first
+	// /clients, /people or /clients/classes visit after boot serves from cache and
+	// never runs the windowed log_entries GROUP BY inline. Re-warmed on the class
+	// tick and after a name/person write.
+	go s.refreshDominantFP()
 
 	// Class scorer: advance durable device classes from the accumulator on a timer,
 	// independent of any UI visit (heuristics.go).
@@ -1501,6 +1535,68 @@ func (s *DecoySource) RefreshClientClasses() error {
 	return s.refreshSessionModels(since)
 }
 
+// roUI returns the read-only handle bound to a bounded-deadline context so a UI
+// read on an exhausted/slow pool fails fast instead of hanging on pool acquisition
+// (see uiReadTimeout). The caller MUST defer the returned cancel. Emit-path
+// samplers do NOT use this — they keep context.Background() on their dedicated conns.
+func (s *DecoySource) roUI() (*gorm.DB, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), uiReadTimeout)
+
+	return s.ro.WithContext(ctx), cancel
+}
+
+// dominantFPByNameCached serves the cached client_name→device_key overlay so the
+// /clients, /people and /clients/classes request paths do ZERO log_entries scans —
+// literally zero even at t=0. On a cold cache (only the tiny boot window before the
+// startup warm lands, or after a transient scan error) it NEVER computes inline;
+// it kicks a single off-path refresh and serves the passthrough-only overlay (nil)
+// this once. A cold miss is a delayed secondary-name rollup, not a wrong value:
+// fanKeysToNames passes raw device keys through regardless, so names still resolve
+// once the warm publishes (~100ms). All real refreshes stay off the request path.
+func (s *DecoySource) dominantFPByNameCached() map[string]string {
+	s.mu.Lock()
+	m, valid := s.fpByName, s.fpByNameValid
+	s.mu.Unlock()
+
+	if !valid {
+		s.kickDominantFP()
+	}
+
+	return m
+}
+
+// kickDominantFP launches a single background refreshDominantFP, single-flighted so
+// a burst of cold reads spawns one recompute, not one per request (which would pile
+// the windowed GROUP BY onto the RO pool). Self-heals a boot-warm scan error without
+// waiting for the 5-min class tick, and never blocks the caller.
+func (s *DecoySource) kickDominantFP() {
+	if s.fpRefreshing.CompareAndSwap(false, true) {
+		go func() {
+			defer s.fpRefreshing.Store(false)
+			s.refreshDominantFP()
+		}()
+	}
+}
+
+// refreshDominantFP recomputes the overlay off the request path (startup warm, the
+// 5-min class tick, a background refresh after a name/person write) and publishes a
+// FRESH map by pointer swap. A scan error leaves the previous cache untouched (never
+// caches nil), so a transient DB error can't blank the overlay for every reader.
+func (s *DecoySource) refreshDominantFP() map[string]string {
+	since := time.Now().Add(-decoyReplayWindow).UTC()
+
+	m := s.dominantFPByName(since)
+	if m == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	s.fpByName, s.fpByNameValid = m, true
+	s.mu.Unlock()
+
+	return m
+}
+
 // dominantFPByName maps every client_name seen in the window to its STABLE
 // device_key: the modal (most-frequent) non-empty fp_hash it presented, or the
 // name itself when it has no fingerprinted rows. This is the read-side inverse of
@@ -1508,8 +1604,8 @@ func (s *DecoySource) RefreshClientClasses() error {
 // association rows are stored under, and to fan a stored key back out to the
 // current client_name(s) presenting it (people/name rollups).
 //
-// ponytail: one windowed GROUP BY over log_entries; called off the request path
-// (refresh timer + people/clients pages), not per emit.
+// ponytail: one windowed GROUP BY over log_entries; NEVER on the request path —
+// served through dominantFPByNameCached, refreshed off-path only.
 func (s *DecoySource) dominantFPByName(since time.Time) map[string]string {
 	var rows []struct {
 		Name string `gorm:"column:client_name"`
@@ -1517,7 +1613,10 @@ func (s *DecoySource) dominantFPByName(since time.Time) map[string]string {
 		Cnt  int64  `gorm:"column:cnt"`
 	}
 
-	err := s.ro.Raw(`SELECT client_name, fp_hash, COUNT(*) AS cnt
+	ro, cancel := s.roUI()
+	defer cancel()
+
+	err := ro.Raw(`SELECT client_name, fp_hash, COUNT(*) AS cnt
 		FROM log_entries
 		WHERE decoy = 0 AND client_name <> '' AND request_ts >= ?
 		GROUP BY client_name, fp_hash`, since).Scan(&rows).Error
@@ -1561,9 +1660,12 @@ func (s *DecoySource) deviceKey(name string) string {
 
 	var fp string
 
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	// idx_client_name_request_ts pins the client prefix; GROUP BY fp_hash sorts the
 	// (tiny) per-client subset. Error / no fp → fall back to the name.
-	_ = s.ro.Raw(`SELECT fp_hash FROM log_entries INDEXED BY idx_client_name_request_ts
+	_ = ro.Raw(`SELECT fp_hash FROM log_entries INDEXED BY idx_client_name_request_ts
 		WHERE decoy = 0 AND client_name = ? AND fp_hash <> '' AND request_ts >= ?
 		GROUP BY fp_hash ORDER BY COUNT(*) DESC LIMIT 1`, name, since).Scan(&fp).Error
 
@@ -1705,18 +1807,20 @@ func (s *DecoySource) ClientClass(client string) (string, error) {
 // ListClientClasses returns every cached client classification (auto + override +
 // resolved effective), for the management UI.
 func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	var rows []clientClass
-	if err := s.ro.Raw("SELECT client, class, override, updated_at FROM client_class ORDER BY client").Scan(&rows).Error; err != nil {
+	if err := ro.Raw("SELECT client, class, override, updated_at FROM client_class ORDER BY client").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
 	// device_key → a representative current client_name, so the UI shows a name
 	// (not a raw fp hash). The name still round-trips: a PUT with it re-resolves to
 	// the same key. Keys with no current traffic keep the raw key.
-	since := time.Now().Add(-decoyReplayWindow).UTC()
 	keyToName := map[string]string{}
 
-	for name, key := range s.dominantFPByName(since) {
+	for name, key := range s.dominantFPByNameCached() {
 		if _, ok := keyToName[key]; !ok {
 			keyToName[key] = name
 		}
@@ -2009,8 +2113,11 @@ func (s *DecoySource) RefreshClientProfiles() error {
 // primary-key lookup — cheap, safe on the request path), or a zero-value
 // ClientProfileInfo when the client has no profile row yet.
 func (s *DecoySource) ClientProfile(client string) (ClientProfileInfo, error) {
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	var row clientProfile
-	if err := s.ro.Raw(
+	if err := ro.Raw(
 		"SELECT client, hour_hist_utc, first_seen, last_seen, updated_at FROM client_profile WHERE client = ? LIMIT 1",
 		client).Scan(&row).Error; err != nil {
 		return ClientProfileInfo{}, err
@@ -2029,8 +2136,11 @@ func (s *DecoySource) ClientProfile(client string) (ClientProfileInfo, error) {
 // cache table (safe off-request); backs the personas rollup's fleet/per-person
 // presence sums. Keyed by client_name (same key ClientProfile looks up).
 func (s *DecoySource) ListProfiles() (map[string]ClientProfileInfo, error) {
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	var rows []clientProfile
-	if err := s.ro.Raw(
+	if err := ro.Raw(
 		"SELECT client, hour_hist_utc, first_seen, last_seen, updated_at FROM client_profile").
 		Scan(&rows).Error; err != nil {
 		return nil, err
@@ -2080,8 +2190,11 @@ func sanitizeDisplayName(s string) string {
 func (s *DecoySource) ClientName(client string) (string, error) {
 	var name string
 
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	// Resolve to the stable device_key first, so a display name survives an IP change.
-	err := s.ro.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", s.deviceKey(client)).Scan(&name).Error
+	err := ro.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", s.deviceKey(client)).Scan(&name).Error
 
 	return name, err
 }
@@ -2089,8 +2202,11 @@ func (s *DecoySource) ClientName(client string) (string, error) {
 // ClientNames returns every set display-name override as client_name→name, so
 // the clients list can layer names in one query instead of one lookup per row.
 func (s *DecoySource) ClientNames() (map[string]string, error) {
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	var rows []clientIdentity
-	if err := s.ro.Raw("SELECT client, name FROM client_identity WHERE name <> ''").Scan(&rows).Error; err != nil {
+	if err := ro.Raw("SELECT client, name FROM client_identity WHERE name <> ''").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -2114,8 +2230,7 @@ func (s *DecoySource) fanKeysToNames(byKey map[string]string) map[string]string 
 		out[k] = v // passthrough: idle mappings + fp-less/legacy name keys
 	}
 
-	since := time.Now().Add(-decoyReplayWindow).UTC()
-	for name, key := range s.dominantFPByName(since) {
+	for name, key := range s.dominantFPByNameCached() {
 		if v := byKey[key]; v != "" {
 			out[name] = v
 		}
@@ -2137,10 +2252,15 @@ func (s *DecoySource) SetClientName(client, name string) error {
 	now := time.Now()
 	key := s.deviceKey(client) // store under the stable device_key
 
-	return s.db.Clauses(clause.OnConflict{
+	err := s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "client"}},
 		DoUpdates: clause.Assignments(map[string]any{"name": name, "updated_at": now}),
 	}).Create(&clientIdentity{Client: key, Name: name, UpdatedAt: now}).Error
+	if err == nil {
+		go s.refreshDominantFP() // pick up a just-named new device on the next read
+	}
+
+	return err
 }
 
 // ClientPerson returns the household-member mapping for client, or "" when none
@@ -2149,8 +2269,11 @@ func (s *DecoySource) SetClientName(client, name string) error {
 func (s *DecoySource) ClientPerson(client string) (string, error) {
 	var person string
 
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	// Resolve to the stable device_key first (IP-independent person mapping).
-	err := s.ro.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", s.deviceKey(client)).Scan(&person).Error
+	err := ro.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", s.deviceKey(client)).Scan(&person).Error
 
 	return person, err
 }
@@ -2159,8 +2282,11 @@ func (s *DecoySource) ClientPerson(client string) (string, error) {
 // so the people page can roll up per-person footprints in one query. Mirrors
 // ClientNames.
 func (s *DecoySource) ClientPersons() (map[string]string, error) {
+	ro, cancel := s.roUI()
+	defer cancel()
+
 	var rows []clientPerson
-	if err := s.ro.Raw("SELECT client, person FROM client_person WHERE person <> ''").Scan(&rows).Error; err != nil {
+	if err := ro.Raw("SELECT client, person FROM client_person WHERE person <> ''").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -2186,10 +2312,15 @@ func (s *DecoySource) SetClientPerson(client, person string) error {
 	now := time.Now()
 	key := s.deviceKey(client) // store under the stable device_key
 
-	return s.db.Clauses(clause.OnConflict{
+	err := s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "client"}},
 		DoUpdates: clause.Assignments(map[string]any{"person": person, "updated_at": now}),
 	}).Create(&clientPerson{Client: key, Person: person, UpdatedAt: now}).Error
+	if err == nil {
+		go s.refreshDominantFP() // pick up a just-mapped new device on the next read
+	}
+
+	return err
 }
 
 // qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)

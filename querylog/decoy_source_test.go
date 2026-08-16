@@ -3,6 +3,7 @@
 package querylog
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -794,6 +795,78 @@ var _ = Describe("DecoySource", func() {
 			Expect(src.db.Raw(`SELECT COUNT(*) FROM client_class WHERE client = ?`, "10.0.0.42").
 				Scan(&n).Error).Should(Succeed())
 			Expect(n).Should(BeZero())
+		})
+	})
+
+	// Regression for the ~2h /api/ui stall: the client_name→device_key overlay is
+	// served from cache so the /clients + /people request path runs ZERO log_entries
+	// scans, and every UI-facing read on the ro pool is deadline-bounded so an
+	// exhausted/slow pool fails fast instead of hanging forever.
+	Describe("cached overlay + fail-fast reads", func() {
+		newFPSource := func() *DecoySource {
+			p := filepath.Join(GinkgoT().TempDir(), "overlay.db")
+			raw, e := gorm.Open(sqlite.Open(p), &gorm.Config{})
+			Expect(e).Should(Succeed())
+			Expect(raw.AutoMigrate(&realRow{})).Should(Succeed())
+			// one fingerprinted real client so dominantFPByName maps laptop→fpX
+			Expect(raw.Create(&realRow{
+				RequestTS: time.Now(), ClientName: "laptop", QuestionName: "x.com", QuestionType: "A", FpHash: "fpX",
+			}).Error).Should(Succeed())
+			sqlDB, _ := raw.DB()
+			Expect(sqlDB.Close()).Should(Succeed())
+
+			src, e := NewDecoySource(p)
+			Expect(e).Should(Succeed())
+			DeferCleanup(func() { _ = src.Close() })
+
+			return src
+		}
+
+		It("serves the overlay from cache without re-scanning log_entries", func() {
+			src := newFPSource()
+
+			// warm the cache, then DELETE every log_entries row: a fresh scan would now
+			// return an empty overlay, so an identical result proves the cached path.
+			Expect(src.refreshDominantFP()).Should(HaveKeyWithValue("laptop", "fpX"))
+			Expect(src.db.Exec("DELETE FROM log_entries").Error).Should(Succeed())
+
+			Expect(src.dominantFPByNameCached()).Should(HaveKeyWithValue("laptop", "fpX"),
+				"request path must serve the cached overlay, not scan the (now empty) log_entries")
+		})
+
+		It("never scans log_entries inline on a cold cache — it kicks an off-path refresh", func() {
+			src := newFPSource()
+
+			// Force the cold-cache state (cache invalid, no map). log_entries still holds
+			// laptop→fpX, so an INLINE scan would return that map immediately; a nil result
+			// proves the request path did NOT scan, and Eventually proves the kicked
+			// off-path refresh self-heals the cache.
+			src.mu.Lock()
+			src.fpByName, src.fpByNameValid = nil, false
+			src.mu.Unlock()
+
+			Expect(src.dominantFPByNameCached()).Should(BeEmpty(),
+				"cold-cache request path must serve passthrough (nil), never scan log_entries inline")
+
+			Eventually(func() map[string]string { return src.dominantFPByNameCached() }, "2s").
+				Should(HaveKeyWithValue("laptop", "fpX"), "the off-path kick must warm the cache")
+		})
+
+		It("bounds UI reads with a deadline so an exhausted pool errors instead of hanging", func() {
+			src := newFPSource()
+
+			// A ro query bound to an already-expired context must return promptly with
+			// an error (the fail-fast the pool-exhaustion path relies on), never block.
+			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			defer cancel()
+
+			done := make(chan error, 1)
+			go func() {
+				var n int64
+				done <- src.ro.WithContext(ctx).Raw("SELECT COUNT(*) FROM log_entries").Scan(&n).Error
+			}()
+
+			Eventually(done, "2s").Should(Receive(HaveOccurred()))
 		})
 	})
 })

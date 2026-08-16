@@ -803,6 +803,10 @@ func (s *DecoySource) classScorerLoop() {
 			if err := s.scoreDeviceClasses(); err != nil {
 				log.PrefixedLog("heuristics").WithError(err).Warn("class scorer pass failed")
 			}
+
+			// Same 5-min tick refreshes the cached client_name→device_key overlay so
+			// /clients, /people and /clients/classes keep serving it off the request path.
+			s.refreshDominantFP()
 		}
 	}
 }

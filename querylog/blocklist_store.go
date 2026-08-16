@@ -320,6 +320,7 @@ func (s *DecoySource) SeedBlocklistIfEmpty(category string, r io.Reader) (int, e
 func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error) {
 	inserted := 0
 	deleted := false
+	batchNo := 0
 
 	err := streamInsert(r, func(batch []string) error {
 		rows := make([]blocklistDomain, len(batch))
@@ -327,7 +328,7 @@ func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error
 			rows[i] = blocklistDomain{Category: category, Domain: d}
 		}
 
-		return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
 			if !deleted {
 				if err := tx.Exec("DELETE FROM blocklist_domains WHERE category = ?", category).Error; err != nil {
 					return err
@@ -342,7 +343,14 @@ func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error
 			inserted += len(rows)
 
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+
+		batchNo++
+		s.interimCheckpoint(batchNo)
+
+		return nil
 	})
 	if err != nil {
 		return 0, err
@@ -371,6 +379,7 @@ func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error
 func (s *DecoySource) ReplaceDecoy(r io.Reader) (int, error) {
 	inserted := 0
 	deleted := false
+	batchNo := 0
 
 	err := streamInsert(r, func(batch []string) error {
 		rows := make([]decoyDomain, len(batch))
@@ -378,7 +387,7 @@ func (s *DecoySource) ReplaceDecoy(r io.Reader) (int, error) {
 			rows[i] = decoyDomain{Domain: d}
 		}
 
-		return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
 			if !deleted {
 				if err := tx.Exec("DELETE FROM decoy_domains").Error; err != nil {
 					return err
@@ -392,7 +401,14 @@ func (s *DecoySource) ReplaceDecoy(r io.Reader) (int, error) {
 			inserted += len(rows)
 
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+
+		batchNo++
+		s.interimCheckpoint(batchNo)
+
+		return nil
 	})
 	if err != nil {
 		return 0, err
@@ -409,6 +425,22 @@ func (s *DecoySource) ReplaceDecoy(r io.Reader) (int, error) {
 	}
 
 	return inserted, nil
+}
+
+// checkpointEveryBatches spaces the interim PASSIVE checkpoints during a list
+// refresh: a multi-million-row Replace is ~hundreds of decoySeedBatch batches, so
+// checkpointing every N keeps the -wal from ballooning across the whole load
+// without an fsync per batch.
+const checkpointEveryBatches = 16
+
+// interimCheckpoint runs a PASSIVE wal_checkpoint every checkpointEveryBatches so a
+// long ReplaceBlocklist/ReplaceDecoy can't grow the WAL unbounded before the flush
+// loop's periodic TRUNCATE catches up. PASSIVE never blocks on a reader (it flushes
+// what it can and returns), so it's safe mid-load; best-effort, errors ignored.
+func (s *DecoySource) interimCheckpoint(batchNo int) {
+	if batchNo%checkpointEveryBatches == 0 {
+		s.db.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+	}
 }
 
 // streamInsert scans r line-by-line (skipping blanks), buffering into batches of
