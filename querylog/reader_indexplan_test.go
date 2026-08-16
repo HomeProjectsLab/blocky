@@ -360,6 +360,247 @@ func TestDeferredVacuumGatedButIndexAlwaysBuilt(t *testing.T) {
 	}
 }
 
+// --- heuristics index-plan harness (blueprint §5.1) ---------------------------
+
+// heuristicsTableNames are the durable heuristics/persona tables. Any live fold/
+// scorer statement touching one of these must be purge-immune (never joins
+// log_entries) — the structural guarantee that intelligence survives a purge.
+// ("device_class" as a substring also matches _signal / _domainset, which is what
+// we want for the touches-heuristics test.)
+var heuristicsTableNames = []string{
+	"device_identity", "fp_binding", "device_facet", "device_presence",
+	"service_usage", "category_usage", "device_class", "device_class_signal",
+	"device_class_domainset", "persona_link",
+}
+
+// hquery is one heuristics read shape plus the index it MUST plan onto. wantIdx=""
+// means "any index / PK is fine, just not a bare table scan" — enough to fail
+// loudly if a PK or index is ever dropped (the point read degrades to SCAN).
+type hquery struct {
+	name    string
+	sql     string
+	wantIdx string // "" => must be index-backed on *some* index; else this exact name
+}
+
+// heuristicsQueries is the anti-rot registry of every heuristics/persona read the
+// schema's indexes exist to serve (blueprint §2.9). TestHeuristicsQueriesAreIndexBacked
+// EXPLAINs each and asserts it plans onto an index — even on the small tables, so a
+// dropped PK/index fails here instead of silently degrading to a scan in prod.
+// ponytail: static list, not an AST walker — add the parser only past ~50 queries.
+var heuristicsQueries = []hquery{
+	// device_identity — PK point read + recency ordering
+	{"identity_point", "SELECT * FROM device_identity WHERE fp_hash = 'fp1'", ""},
+	{"identity_recency", "SELECT fp_hash FROM device_identity ORDER BY last_seen DESC LIMIT 20", "idx_device_identity_last_seen"},
+	{"identity_new48h", "SELECT fp_hash FROM device_identity WHERE last_seen > '2026-01-01T00:00:00Z' ORDER BY last_seen DESC", "idx_device_identity_last_seen"},
+	// fp_binding — FpCount rides the (client_name,fp_hash) PK prefix, NOT idx_fp_binding_fp
+	{"fpcount", "SELECT COUNT(*) FROM fp_binding WHERE client_name = 'host-1'", ""},
+	{"fp_group_by_identity", "SELECT client_name FROM fp_binding WHERE fp_hash = 'fp1'", "idx_fp_binding_fp"},
+	{"distinct_clients_rollup", "SELECT COUNT(*) FROM fp_binding WHERE fp_binding.fp_hash = 'fp1'", "idx_fp_binding_fp"},
+	// device_facet — per-device recognition, OS max-conf, fleet rollup
+	{"facet_device", "SELECT facet, label, conf FROM device_facet WHERE fp_hash = 'fp1'", ""},
+	{"facet_os_pick", "SELECT label FROM device_facet WHERE fp_hash = 'fp1' AND facet = 'os' ORDER BY conf DESC LIMIT 1", ""},
+	{"facet_fleet", "SELECT COUNT(*) FROM device_facet WHERE facet = 'vendor' AND label = 'Apple'", "idx_device_facet_label"},
+	// device_presence — per-device histogram + the planning heatmap
+	{"presence_device", "SELECT dow, hour, cnt FROM device_presence WHERE fp_hash = 'fp1'", ""},
+	{"presence_heatmap", "SELECT fp_hash, cnt FROM device_presence WHERE dow = 2 AND hour = 20 ORDER BY cnt DESC", "idx_device_presence_dowhour"},
+	// service_usage — per-device list + fleet top-services
+	{"service_device", "SELECT service, hits FROM service_usage WHERE fp_hash = 'fp1'", ""},
+	{"service_fleet", "SELECT service, SUM(hits) AS h FROM service_usage GROUP BY service ORDER BY h DESC", "idx_service_usage_service"},
+	// category_usage — per-device magnitude + fleet CategoryTotals (replaces agg_domains_hourly)
+	{"category_device", "SELECT category, hits FROM category_usage WHERE fp_hash = 'fp1'", ""},
+	{"category_fleet", "SELECT category, SUM(hits) AS h FROM category_usage GROUP BY category", "idx_category_usage_category"},
+	// class — served class point read + the scorer's cursor read + IoT-domain count
+	{"class_point", "SELECT class, override FROM device_class WHERE fp_hash = 'fp1'", ""},
+	{"class_signal_cursor", "SELECT fp_hash, last_ts, domains FROM device_class_signal WHERE fp_hash IN ('fp1','fp2')", ""},
+	{"domainset_count", "SELECT fp_hash, COUNT(*) FROM device_class_domainset WHERE fp_hash IN ('fp1') GROUP BY fp_hash", ""},
+	// persona — "who is this device" + "all devices for person=Alice"
+	{"persona_device", "SELECT person FROM persona_link WHERE fp_hash = 'fp1'", ""},
+	{"persona_person", "SELECT fp_hash FROM persona_link WHERE person = 'Alice'", "idx_persona_link_person"},
+}
+
+// planUsesIndex reports whether the plan has a step that reads via an index/PK
+// (SEARCH/SCAN ... USING INDEX | USING PRIMARY KEY | USING COVERING INDEX).
+func planUsesIndex(plan []string) bool {
+	for _, d := range plan {
+		if strings.Contains(strings.ToUpper(d), "USING") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func planMentions(plan []string, idx string) bool {
+	for _, d := range plan {
+		if strings.Contains(d, idx) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// TestHeuristicsQueriesAreIndexBacked is the blueprint §5.1 gate for the durable
+// heuristics layer. It migrates the heuristics tables and EXPLAINs every read in
+// the heuristicsQueries registry, asserting each plans onto an index (assertion 2,
+// applied even to the small tables), never a bare table scan (assertion 1). It
+// then pins the one wrong-index temptation with a negative assertion: FpCount's
+// client_name filter must ride the (client_name,fp_hash) PK prefix, NEVER
+// idx_fp_binding_fp (which is fp_hash-first and useless for that predicate).
+func TestHeuristicsQueriesAreIndexBacked(t *testing.T) {
+	db := openHeuristicsDB(t)
+
+	for _, q := range heuristicsQueries {
+		plan := explainPlan(t, db, q.sql)
+
+		// Assertion 1: no bare scan of a heuristics table (all are small, so ANY
+		// SCAN without USING means a dropped index/PK).
+		for _, detail := range plan {
+			up := strings.ToUpper(strings.TrimSpace(detail))
+			if strings.HasPrefix(up, "SCAN") && !strings.Contains(up, "USING") {
+				t.Errorf("%s: bare table scan (dropped PK/index?):\n  plan: %v\n  sql:  %s", q.name, plan, q.sql)
+			}
+		}
+
+		// Assertion 2: index-backed, on the specific index when one is named.
+		if !planUsesIndex(plan) {
+			t.Errorf("%s: not index-backed — a dropped PK/index degraded it to a scan:\n  plan: %v\n  sql:  %s",
+				q.name, plan, q.sql)
+		}
+
+		if q.wantIdx != "" && !planMentions(plan, q.wantIdx) {
+			t.Errorf("%s: expected to ride %q but did not:\n  plan: %v\n  sql:  %s",
+				q.name, q.wantIdx, plan, q.sql)
+		}
+	}
+
+	// Negative wrong-index guard: FpCount (client_name filter) must use the PK
+	// prefix, not the fp_hash-keyed idx_fp_binding_fp. A planner slip here would
+	// scan the whole fp_hash index filtering client_name in memory (the §5.1
+	// wrong-index hazard, sibling of the idx_decoy_request_ts trap).
+	fpCount := "SELECT COUNT(*) FROM fp_binding WHERE client_name = 'host-1'"
+	if plan := explainPlan(t, db, fpCount); planMentions(plan, "idx_fp_binding_fp") {
+		t.Errorf("FpCount rides the WRONG index idx_fp_binding_fp (must use the "+
+			"(client_name,fp_hash) PK prefix):\n  plan: %v\n  sql:  %s", plan, fpCount)
+	}
+}
+
+// TestHeuristicsFoldTouchesNoLogEntries is blueprint §5.1 assertion 3 — the
+// structural purge-immunity guarantee. It captures every statement the live write
+// path (the fold) and the class scorer actually run, and asserts NONE references
+// log_entries and NONE bare-scans a big table. If a future change re-derived any
+// heuristic from a log_entries scan, a purge would wipe it — and this fails.
+func TestHeuristicsFoldTouchesNoLogEntries(t *testing.T) {
+	base := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	stream := beaconEntries("host-1", "fp1", []string{"telemetry.tuya.com", "apple.com", "time.nist.gov"}, 30, base, 5*time.Minute)
+
+	// Fold path: capture upsertHeuristics' cursor SELECT, domainset SELECT + upserts.
+	foldDB := openHeuristicsDB(t)
+	foldCap := &captureLogger{on: true}
+	foldDB.Logger = foldCap
+
+	if err := upsertHeuristics(foldDB, stream); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pruneServiceUsage(foldDB); err != nil {
+		t.Fatal(err)
+	}
+
+	foldCap.on = false
+
+	// Scorer path: capture scoreDeviceClasses (Find + device_class/client_class
+	// upserts + the distinct_clients rollup + checkpoint) on a real DecoySource.
+	dbPath := filepath.Join(t.TempDir(), "q.db")
+
+	w, err := NewDatabaseWriter(context.Background(), config.QueryLogTypeSqlite, dbPath, 7, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 30; i++ {
+		w.Write(&LogEntry{
+			Start:        base.Add(time.Duration(i) * 5 * time.Minute),
+			ClientNames:  []string{"host-1"},
+			QuestionName: []string{"telemetry.tuya.com", "time.nist.gov"}[i%2],
+			QuestionType: "A", ResponseType: "RESOLVED",
+		})
+	}
+
+	if err := w.doDBWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	if sqlDB, e := w.db.DB(); e == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
+	}
+
+	src, err := NewDecoySource(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = src.Close() })
+
+	scorerCap := &captureLogger{on: true}
+	src.db.Logger = scorerCap
+
+	if err := src.scoreDeviceClasses(); err != nil {
+		t.Fatal(err)
+	}
+
+	scorerCap.on = false
+
+	captured := append(append([]string{}, foldCap.sql...), scorerCap.sql...)
+	if len(captured) == 0 {
+		t.Fatal("captured no SQL — logger wiring is broken")
+	}
+
+	sawHeuristicsStmt := false
+
+	for _, sql := range captured {
+		low := strings.ToLower(sql)
+
+		touchesHeuristics := false
+
+		for _, tbl := range heuristicsTableNames {
+			if strings.Contains(low, tbl) {
+				touchesHeuristics = true
+
+				break
+			}
+		}
+
+		if !touchesHeuristics {
+			continue // raw insert / aggregate / pragma — not a heuristics statement
+		}
+
+		sawHeuristicsStmt = true
+
+		// Assertion 3: a heuristics statement must never join / read log_entries.
+		if strings.Contains(low, "log_entries") {
+			t.Errorf("heuristics statement references log_entries — a purge would wipe it:\n  sql: %s", sql)
+		}
+
+		// Assertion 1 on the live path: no bare scan of a BIG table (the small
+		// heuristics tables are allowed to scan — scorer Find + prune do, by design).
+		if !touchesBigTable(low) {
+			continue
+		}
+
+		for _, detail := range explainPlan(t, src.db, sql) {
+			up := strings.ToUpper(strings.TrimSpace(detail))
+			if strings.HasPrefix(up, "SCAN") && namesBigTable(up) && !strings.Contains(up, "USING") {
+				t.Errorf("heuristics statement full-scans a big table:\n  plan: %s\n  sql: %s", detail, sql)
+			}
+		}
+	}
+
+	if !sawHeuristicsStmt {
+		t.Fatal("captured no heuristics statement — fold/scorer wiring or capture is wrong")
+	}
+}
+
 func touchesBigTable(lowerSQL string) bool {
 	for _, tbl := range bigTables {
 		if strings.Contains(lowerSQL, tbl) {

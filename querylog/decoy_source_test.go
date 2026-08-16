@@ -349,6 +349,21 @@ var _ = Describe("DecoySource", func() {
 		Expect(e).Should(Succeed())
 		DeferCleanup(func() { _ = src.Close() })
 
+		// The raw seed above bypasses the write path, so fold the same rows into the
+		// durable heuristics accumulator the way doDBWrite would — this is what the
+		// repointed (accumulator-based) RefreshClientClasses now scores from.
+		if len(rows) > 0 {
+			batch := make([]*logEntry, len(rows))
+			for i, r := range rows {
+				batch[i] = &logEntry{
+					RequestTS: r.RequestTS, ClientName: r.ClientName, QuestionName: r.QuestionName,
+					QuestionType: r.QuestionType, ResponseType: r.ResponseType,
+					EffectiveTLDP: r.EffectiveTLDP, FpHash: r.FpHash, Decoy: r.Decoy,
+				}
+			}
+			Expect(upsertHeuristics(src.db, batch)).Should(Succeed())
+		}
+
 		return src
 	}
 

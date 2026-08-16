@@ -279,8 +279,10 @@ func databaseMigration(db *gorm.DB, dbType config.QueryLogType, logRetentionDays
 		// added here (and SQLite cannot ALTER TABLE ... ADD a PRIMARY KEY column).
 
 		// sqlite additionally maintains the hourly aggregate tables for the UI stats
-		// API and the persistent visited-domains noise corpus (decoy source, T3).
-		if err := db.AutoMigrate(&aggHourly{}, &aggDomainHourly{}, &noiseCorpus{}); err != nil {
+		// API, the persistent visited-domains noise corpus (decoy source, T3), and the
+		// durable fingerprint-keyed heuristics tables (folded in doDBWrite, purge-immune).
+		migrate := append([]any{&aggHourly{}, &aggDomainHourly{}, &noiseCorpus{}}, heuristicsTables...)
+		if err := db.AutoMigrate(migrate...); err != nil {
 			return fmt.Errorf("failed to auto-migrate aggregate tables for querylog: %w", err)
 		}
 
@@ -513,7 +515,14 @@ func (d *DatabaseWriter) doDBWrite() error {
 					}
 
 					// persistent visited-domains corpus (T3) rides the same tx
-					return upsertNoiseCorpus(tx, batch)
+					if ncErr := upsertNoiseCorpus(tx, batch); ncErr != nil {
+						return ncErr
+					}
+
+					// durable fingerprint-keyed heuristics (identity/presence/usage/
+					// class accumulators) fold into the SAME tx, so each delta commits
+					// before any purge can delete the raw row it came from.
+					return upsertHeuristics(tx, batch)
 				}
 
 				return nil
@@ -532,6 +541,7 @@ func (d *DatabaseWriter) doDBWrite() error {
 		// cap, not a data path — its failure never holds entries back for retry.
 		if d.aggregate {
 			err = multierror.Append(err, pruneNoiseCorpus(d.db))
+			err = multierror.Append(err, pruneServiceUsage(d.db))
 		}
 
 		// Retain only the failed batches (silent query-log loss otherwise: the old

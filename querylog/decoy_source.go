@@ -119,6 +119,13 @@ type DecoySource struct {
 	blWarmStop chan struct{}
 	blWarmDone chan struct{}
 
+	// class scorer (heuristics.go): the durable-intelligence ticker. classStop/
+	// classDone tie the goroutine to Close (mirrors blWarmStop/blWarmDone); classMu
+	// serializes the ticker against a manual RefreshClientClasses on the writer conn.
+	classStop chan struct{}
+	classDone chan struct{}
+	classMu   sync.Mutex
+
 	// cached MIN/MAX rowid of log_entries for indexed random-rowid sampling of the
 	// real-query replay pool, refreshed on leRowidTTL (all guarded by mu).
 	leMinRowid int64
@@ -206,8 +213,10 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{},
-		&clientIdentity{}, &clientPerson{}, &clientProfile{}, &decoyTransition{}, &decoySessionSeed{}); err != nil {
+	migrate := []any{&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{},
+		&clientIdentity{}, &clientPerson{}, &clientProfile{}, &decoyTransition{}, &decoySessionSeed{}}
+	migrate = append(migrate, heuristicsTables...) // durable heuristics (also migrated by the writer)
+	if err := db.AutoMigrate(migrate...); err != nil {
 		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
 
@@ -222,6 +231,7 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	s := &DecoySource{
 		db: db, ro: ro, rnd: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // noise timing, not crypto
 		blWarm: make(chan struct{}, 1), blWarmStop: make(chan struct{}), blWarmDone: make(chan struct{}),
+		classStop: make(chan struct{}), classDone: make(chan struct{}),
 	}
 
 	if err := s.loadMaxRowid(); err != nil {
@@ -237,6 +247,10 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	go s.blCatsWarmLoop()
 	s.signalBlWarm()
 
+	// Class scorer: advance durable device classes from the accumulator on a timer,
+	// independent of any UI visit (heuristics.go).
+	go s.classScorerLoop()
+
 	return s, nil
 }
 
@@ -245,6 +259,10 @@ func (s *DecoySource) Close() error {
 	// so a mid-flight recompute can never race the pool close.
 	close(s.blWarmStop)
 	<-s.blWarmDone
+
+	// Stop the class scorer (uses s.db) before closing the writer connection below.
+	close(s.classStop)
+	<-s.classDone
 
 	if s.ro != nil {
 		if roDB, err := s.ro.DB(); err == nil {
@@ -1257,18 +1275,6 @@ var (
 	pushSignals    = []string{"push.apple.com", "mtalk.google.com"} // OS push = interactive personal device
 )
 
-// likeHitExpr builds a "CASE WHEN qn LIKE '%p1%' OR … THEN 1 ELSE 0 END" over a
-// signal set (compile-time constants — no user input), summable in the classify
-// scan. Mirrors serverHitExpr; the CTE aliases question_name AS qn.
-func likeHitExpr(sigs []string) string {
-	likes := make([]string, len(sigs))
-	for i, p := range sigs {
-		likes[i] = "qn LIKE '%" + p + "%'"
-	}
-
-	return "CASE WHEN " + strings.Join(likes, " OR ") + " THEN 1 ELSE 0 END"
-}
-
 // deviceKeyExpr is the SQL for a row's STABLE device identity: its fp_hash (wire
 // software fields only — IP-independent by construction, see model.Fingerprint.
 // Hash) when present, else the client_name (legacy / fp-less rows keep the old
@@ -1386,83 +1392,18 @@ func (f classFeatures) classify() string {
 	return ClassWorkstation
 }
 
-// serverHitExpr builds the SQL boolean (1/0-summable) that flags a server-ish row,
-// matching effective_tldp against serverEtldps or question_name against
-// serverNameLikes. Values are inlined (fixed, trusted constants — no user input).
-func serverHitExpr() string {
-	quoted := make([]string, len(serverEtldps))
-	for i, d := range serverEtldps {
-		quoted[i] = "'" + d + "'"
-	}
-
-	likes := make([]string, len(serverNameLikes))
-	for i, p := range serverNameLikes {
-		likes[i] = "qn LIKE '%" + p + "%'"
-	}
-
-	return "CASE WHEN etldp IN (" + strings.Join(quoted, ",") + ") OR " +
-		strings.Join(likes, " OR ") + " THEN 1 ELSE 0 END"
-}
-
-// RefreshClientClasses recomputes every client's auto class from the recent real
-// timeline in one windowed pass and upserts it into client_class. The manual
-// override column is preserved (never touched here). Call on a timer / first use —
-// NOT per emission (single connection, ~110 clients).
-//
-// ponytail: one full window scan of log_entries per refresh (LAG over the
-// timeline; effective_tldp/question_name unindexed). Fine at refresh cadence over
-// the 7-day window; materialize incrementally only if refresh latency shows up.
+// RefreshClientClasses scores every device's auto class from the DURABLE
+// device_class_signal accumulator (folded at write time, purge-immune) instead of
+// re-scanning log_entries — so a "clear all logs" no longer reverts every class to
+// unknown (the bug this layer fixes). Now a manual "score now" nudge over the same
+// accumulator the live ticker reads; the override column is preserved. Call on a
+// timer / first use — NOT per emission (single connection, ~110 devices).
 func (s *DecoySource) RefreshClientClasses() error {
-	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
-
-	query := `WITH gaps AS (
-		SELECT ` + deviceKeyExpr + ` AS c,
-		       effective_tldp AS etldp,
-		       question_type AS qt,
-		       question_name AS qn,
-		       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
-		FROM log_entries
-		WHERE decoy = 0 AND (fp_hash <> '' OR client_name <> '') AND request_ts >= ?
-		WINDOW w AS (PARTITION BY ` + deviceKeyExpr + ` ORDER BY request_ts)
-	)
-	SELECT c,
-	       COUNT(*) AS n,
-	       COUNT(DISTINCT etldp) AS domains,
-	       COUNT(DISTINCT qt) AS qtypes,
-	       SUM(` + serverHitExpr() + `) AS serverhits,
-	       SUM(` + likeHitExpr(gameSignals) + `) AS gamehits,
-	       SUM(` + likeHitExpr(cameraSignals) + `) AS camerahits,
-	       SUM(` + likeHitExpr(speakerSignals) + `) AS speakerhits,
-	       SUM(` + likeHitExpr(printerSignals) + `) AS printerhits,
-	       SUM(` + likeHitExpr(streamSignals) + `) AS streamhits,
-	       SUM(` + likeHitExpr(pushSignals) + `) AS pushhits,
-	       COALESCE(AVG(gap),0) AS meangap,
-	       COALESCE(AVG(gap*gap),0) AS meangap2
-	FROM gaps
-	GROUP BY c`
-
-	var feats []classFeatures
-	if err := s.db.Raw(query, since).Scan(&feats).Error; err != nil {
+	if err := s.scoreDeviceClasses(); err != nil {
 		return err
 	}
 
-	now := time.Now()
-
-	for _, f := range feats {
-		row := clientClass{Client: f.Client, Class: f.classify(), UpdatedAt: now}
-
-		// Upsert the auto class + timestamp only; leave override untouched.
-		err := s.db.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "client"}},
-			DoUpdates: clause.Assignments(map[string]any{
-				"class":      row.Class,
-				"updated_at": row.UpdatedAt,
-			}),
-		}).Create(&row).Error
-		if err != nil {
-			return err
-		}
-	}
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	// Re-key the manual overrides (name, person, class override) from the legacy
 	// client_name key to the stable fp device_key. The auto class above rebuilds
