@@ -36,6 +36,7 @@ func registerStatsUIEndpoints(
 		r.Get("/buckets", s.buckets)
 		r.Get("/top", s.top)
 		r.Get("/latency", s.latency)
+		r.Get("/categories", s.categories)
 	})
 
 	router.Route("/api/ui/noise", func(r chi.Router) {
@@ -303,6 +304,46 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(rw, http.StatusOK, map[string]any{"items": items})
+}
+
+// categories is the global activity-category timeline: per-category query
+// totals over the window (eTLD+1 rule subset, blueprint R5). Opt-in — when
+// profiling is off (privacy default) it returns an empty set, so the dashboard
+// panel simply stays hidden without a separate feature probe.
+func (s *statsAPI) categories(rw http.ResponseWriter, req *http.Request) {
+	reader := s.readerOr503(rw)
+	if reader == nil {
+		return
+	}
+
+	enabled := false
+	if s.store != nil {
+		if cfg, err := s.store.GetPrivacy(); err == nil {
+			enabled = cfg.Profiling.Enable
+		}
+	}
+
+	if !enabled {
+		writeJSON(rw, http.StatusOK, map[string]any{"categories": []querylog.TopItem{}})
+
+		return
+	}
+
+	from, to, err := parseTimeRange(req)
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	items, err := reader.CategoryTotals(from, to)
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, map[string]any{"categories": items})
 }
 
 func (s *statsAPI) latency(rw http.ResponseWriter, req *http.Request) {

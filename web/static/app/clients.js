@@ -155,6 +155,16 @@ function presenceHeatmap(presence) {
     return box;
 }
 
+// categoryChips: the opt-in activity categories (streaming/social/…) derived
+// read-time from this client's DNS names. Absent unless profiling is enabled.
+function categoryChips(cats) {
+    const box = document.createElement("div");
+    box.className = "fp-feats";
+    box.innerHTML = cats.map((c) =>
+        `<span class="chip" title="Activity category · opt-in, from DNS names, computed on the box, never exported">${escapeHTML(c)}</span>`).join(" ");
+    return box;
+}
+
 function section(heading) {
     const h = document.createElement("h2");
     h.className = "sub-h";
@@ -247,6 +257,11 @@ async function openDetail(name) {
     if (d.presence) {
         detail.append(section("Presence · when this device is active"));
         detail.append(presenceHeatmap(d.presence));
+    }
+
+    if (d.categories && d.categories.length) {
+        detail.append(section("Activity categories"));
+        detail.append(categoryChips(d.categories));
     }
 
     detail.append(section("Fingerprint · who this client is"));

@@ -304,6 +304,109 @@ func (r *Reader) enrichClient(name string, from, to time.Time) (clientEnrich, er
 	return row.toEnrich(), nil
 }
 
+// ── PHASE 4: activity categories (opt-in, blueprint §S-CAT) ──
+//
+// A category is which KIND of activity a domain represents (streaming / social
+// / …). Two DELIBERATELY separate rule sets, not one engine over both columns
+// (blueprint R5): catRulesHost matches the full question_name (per-client,
+// index-backed on idx_client_name_request_ts) and may carry app-CDN subdomains;
+// catRulesEtldp is the registrable-domain SUBSET matched against
+// agg_domains_hourly.etldp for the global timeline — subdomain-only rules
+// (mtalk.google.com, android.googleapis.com) never survive the eTLD+1 collapse,
+// so they are excluded there rather than silently under-matching.
+
+type categoryRule struct {
+	match, category string
+}
+
+//nolint:gochecknoglobals // static lookup tables
+var (
+	catRulesHost = []categoryRule{
+		{"nflxvideo.net", "streaming"},
+		{"googlevideo.com", "streaming"},
+		{"netflix.com", "streaming"},
+		{"youtube.com", "streaming"},
+		{"mtalk.google.com", "messaging"},
+		{"whatsapp.net", "messaging"},
+		{"discord.com", "social"},
+		{"steamcontent.com", "games"},
+		{"android.googleapis.com", "system"},
+	}
+	// catRulesEtldp: only rules whose match is itself a registrable domain, so it
+	// can appear in agg_domains_hourly.etldp (blueprint R5).
+	catRulesEtldp = []categoryRule{
+		{"netflix.com", "streaming"},
+		{"youtube.com", "streaming"},
+		{"nflxvideo.net", "streaming"},
+		{"discord.com", "social"},
+		{"whatsapp.net", "messaging"},
+		{"steamcontent.com", "games"},
+	}
+)
+
+// categoryCaseSQL builds a "CASE WHEN col LIKE '%match%' THEN 'category' … END"
+// over rules, reusing the whenClause shape. col is a compile-time column name
+// ("question_name" or "etldp"), never user input.
+func categoryCaseSQL(col string, rules []categoryRule) string {
+	var b strings.Builder
+
+	b.WriteString("CASE")
+
+	for _, r := range rules {
+		b.WriteString(" WHEN " + col + " LIKE '%" + strings.ReplaceAll(r.match, "'", "''") +
+			"%' THEN '" + strings.ReplaceAll(r.category, "'", "''") + "'")
+	}
+
+	b.WriteString(" END")
+
+	return b.String()
+}
+
+// ClientCategories returns the DISTINCT activity categories seen for one client
+// over the window, matched read-time against the full question_name. Client-
+// scoped → index-backed on idx_client_name_request_ts, same cost class as
+// TopDomains. Opt-in: callers invoke it only when profiling is enabled.
+func (r *Reader) ClientCategories(name string, from, to time.Time) ([]string, error) {
+	var row struct {
+		Cats string `gorm:"column:cats"`
+	}
+
+	err := r.db.Raw(`SELECT GROUP_CONCAT(DISTINCT `+categoryCaseSQL("question_name", catRulesHost)+`) AS cats
+		FROM log_entries WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
+		name, from, to).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return splitCSV(row.Cats), nil
+}
+
+// CategoryTotals returns per-category query totals over the window from the
+// hourly domain aggregate, using ONLY the registrable-domain rule subset
+// (blueprint R5). Read-time, index-backed (hour range on the agg_domains_hourly
+// PK), same shape as Top("domain"). The uncategorized rows collapse to a NULL
+// group, dropped in Go.
+func (r *Reader) CategoryTotals(from, to time.Time) ([]TopItem, error) {
+	var rows []TopItem
+
+	err := r.db.Raw(`SELECT `+categoryCaseSQL("etldp", catRulesEtldp)+` AS name, SUM(cnt) AS c
+		FROM agg_domains_hourly WHERE hour >= ? AND hour < ?
+		GROUP BY name ORDER BY c DESC`, from.UTC(), to.UTC()).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	out := []TopItem{}
+
+	for _, it := range rows {
+		if it.Name != "" {
+			out = append(out, it)
+		}
+	}
+
+	return out, nil
+}
+
 // ClientIsShared reports whether name is a NAT/shared aggregate over the window
 // (too many distinct fingerprints to be one device). Callers reject per-device
 // actions — naming, profiling, person-mapping — on such a client (blueprint R3).

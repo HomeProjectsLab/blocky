@@ -262,18 +262,43 @@ func (s *statsAPI) clientDetail(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Opt-in presence profiling: layer the precomputed histogram, localized to the
-	// configured TZ. Best-effort — a missing profile or store error just omits it.
-	if p := s.presenceFor(detail.Name, detail.Shared); p != nil {
-		writeJSON(rw, http.StatusOK, struct {
-			*querylog.ClientDetail
-			Presence *presenceJSON `json:"presence,omitempty"`
-		}{detail, p})
+	// Opt-in profiling: presence histogram (localized to the configured TZ) and
+	// activity categories are both layered best-effort — disabled/missing => omitted.
+	writeJSON(rw, http.StatusOK, clientDetailJSON{
+		ClientDetail: detail,
+		Presence:     s.presenceFor(detail.Name, detail.Shared),
+		Categories:   s.categoriesFor(reader, detail.Name, from, to, detail.Shared),
+	})
+}
 
-		return
+// clientDetailJSON wraps ClientDetail with the opt-in profiling extras. Both
+// extras are omitted when off, so a non-profiling box sees the bare detail.
+type clientDetailJSON struct {
+	*querylog.ClientDetail
+	Presence   *presenceJSON `json:"presence,omitempty"`
+	Categories []string      `json:"categories,omitempty"`
+}
+
+// categoriesFor returns the client's activity categories, or nil when profiling
+// is disabled (privacy default OFF), config is unavailable, or the client is a
+// NAT/shared aggregate (R3 — categories of "many devices" are meaningless). No
+// classifier needed: categories read log_entries directly through the reader.
+func (s *statsAPI) categoriesFor(reader *querylog.Reader, name string, from, to time.Time, shared bool) []string {
+	if s.store == nil || shared {
+		return nil
 	}
 
-	writeJSON(rw, http.StatusOK, detail)
+	cfg, err := s.store.GetPrivacy()
+	if err != nil || !cfg.Profiling.Enable {
+		return nil
+	}
+
+	cats, err := reader.ClientCategories(name, from, to)
+	if err != nil {
+		return nil
+	}
+
+	return cats
 }
 
 // presenceJSON is the localized presence histogram surfaced in the drill-down:

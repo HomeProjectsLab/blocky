@@ -179,6 +179,30 @@ async function loadTop(token) {
     for (const col of cols) renderTop(TOP_PANELS[col], columns[col], col === "client" ? device : null);
 }
 
+// Global activity categories (opt-in). The endpoint returns an empty set when
+// profiling is off, so the panel is injected once and simply hidden until there
+// is data — no shell.html markup, mirrors ensureNoiseTile.
+function ensureCategoryPanel() {
+    let panel = document.getElementById("category-panel");
+    if (panel) return panel;
+    panel = document.createElement("div");
+    panel.className = "panel";
+    panel.id = "category-panel";
+    panel.hidden = true;
+    panel.innerHTML = `<h2>Activity categories</h2><ol class="bar-list" id="top-category"></ol>`;
+    document.querySelector(".top-grid").append(panel);
+    return panel;
+}
+
+async function loadCategories(token) {
+    const res = await getJSON("/api/ui/stats/categories", window_()).catch(() => null);
+    if (token !== reqSeq) return;
+    const items = (res && res.categories) || [];
+    const panel = ensureCategoryPanel();
+    panel.hidden = items.length === 0;
+    if (items.length) renderTop("top-category", items, null);
+}
+
 function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -191,7 +215,7 @@ function loadAll() {
     const token = ++reqSeq;
     const jobs = [
         loadOverview(token), loadLatency(token), loadBuckets(token), loadTop(token),
-        loadUpstreamBadge(token),
+        loadUpstreamBadge(token), loadCategories(token),
     ];
     for (const j of jobs) j.catch((err) => {
         console.error(err);

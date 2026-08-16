@@ -115,6 +115,17 @@ func TestUIQueriesAreIndexBacked(t *testing.T) {
 		mustRun("ClientDetail", err)
 	}
 
+	// Phase-4 categories: per-client (question_name on idx_client_name_request_ts)
+	// and the global timeline (etldp subset on agg_domains_hourly) must both stay
+	// index-backed — same scan shapes as TopDomains / Top("domain").
+	if _, err := r.ClientCategories("host-1", from, to); err != nil {
+		mustRun("ClientCategories", err)
+	}
+
+	if _, err := r.CategoryTotals(from, to); err != nil {
+		mustRun("CategoryTotals", err)
+	}
+
 	if _, err := r.DecoyOverview(from, to); err != nil {
 		mustRun("DecoyOverview", err)
 	}
