@@ -109,11 +109,87 @@ func (s *DecoySource) BlocklistCategories() ([]BlocklistStat, error) {
 }
 
 // invalidateBlCats drops the cached BlocklistCategories result after a write that
-// changes blocklist_domains, so the next read recomputes it.
+// changes blocklist_domains, then signals the background warmer to recompute it —
+// so the ~9s scan runs off the request path, not on the next visitor.
 func (s *DecoySource) invalidateBlCats() {
 	s.mu.Lock()
 	s.blCats = nil
 	s.blCatsValid = false
+	s.mu.Unlock()
+
+	s.signalBlWarm()
+}
+
+// signalBlWarm nudges the warmer to recompute blCats. Non-blocking: the depth-1
+// buffer coalesces a burst (a full list refresh fires ~12 ReplaceBlocklist
+// invalidations) into a single pending recompute.
+func (s *DecoySource) signalBlWarm() {
+	select {
+	case s.blWarm <- struct{}{}:
+	default:
+	}
+}
+
+// blCatsWarmDebounce is the quiet period the warmer waits after the last signal
+// before recomputing, so a refresh burst (~12 ReplaceBlocklist calls) settles into
+// ONE scan of the finished table instead of a scan per invalidation mid-reload.
+const blCatsWarmDebounce = 3 * time.Second
+
+// blCatsWarmLoop is the long-lived background warmer started by NewDecoySource and
+// stopped by Close. On each signal it (re)arms a debounce timer; when the timer
+// fires after blCatsWarmDebounce of quiet it recomputes BlocklistCategories once on
+// the ro pool. A signal arriving during a recompute stays buffered and re-arms the
+// timer on the next loop, so a refresh landing mid-scan is picked up.
+func (s *DecoySource) blCatsWarmLoop() {
+	defer close(s.blWarmDone)
+
+	timer := time.NewTimer(blCatsWarmDebounce)
+	if !timer.Stop() {
+		<-timer.C
+	}
+
+	var armed <-chan time.Time
+
+	for {
+		select {
+		case <-s.blWarmStop:
+			timer.Stop()
+
+			return
+		case <-s.blWarm:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(blCatsWarmDebounce)
+			armed = timer.C
+		case <-armed:
+			armed = nil
+			s.recomputeBlCats()
+		}
+	}
+}
+
+// recomputeBlCats runs the GROUP BY COUNT on the ro pool (never contends the
+// writer) and publishes the result into the cache under mu. A scan error just
+// leaves the cache invalid (a request then falls back to the lazy compute).
+func (s *DecoySource) recomputeBlCats() {
+	var out []BlocklistStat
+
+	err := s.ro.Raw(
+		"SELECT category, COUNT(*) AS n FROM blocklist_domains GROUP BY category ORDER BY category").
+		Scan(&out).Error
+	if err != nil {
+		s.warnSampleErr("warmBlCats", err)
+
+		return
+	}
+
+	s.mu.Lock()
+	s.blCats = out
+	s.blCatsValid = true
 	s.mu.Unlock()
 }
 

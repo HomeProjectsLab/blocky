@@ -22,6 +22,12 @@ func (s *statsAPI) noiseOverview(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if ov, ok := s.snap.getNoise(from, to); ok {
+		writeJSON(rw, http.StatusOK, ov)
+
+		return
+	}
+
 	overview, err := reader.DecoyOverview(from, to)
 	if err != nil {
 		internalError(rw, err)

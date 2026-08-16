@@ -31,6 +31,9 @@ func registerStatsUIEndpoints(
 	// persistent system-usage sampler on the server-lifetime ctx (survives applies)
 	s.startSampler(ctx)
 
+	// background preheat of the default-window dashboard reads; stopped in Close()
+	s.snap = newStatsSnapshot(s)
+
 	router.Route("/api/ui/stats", func(r chi.Router) {
 		r.Get("/overview", s.overview)
 		r.Get("/buckets", s.buckets)
@@ -69,6 +72,17 @@ func registerStatsUIEndpoints(
 // Close releases the lazily-opened read-only sqlite reader. Idempotent; safe on
 // a statsAPI that never opened one.
 func (s *statsAPI) Close() error {
+	if s.snap != nil {
+		s.snap.close()
+	}
+
+	return s.closeReader()
+}
+
+// closeReader releases the lazily-opened read-only reader WITHOUT stopping the
+// snapshot goroutine, so purgeQueries can drop the handle and have the next
+// refresh reopen against the emptied log. Idempotent.
+func (s *statsAPI) closeReader() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -91,6 +105,10 @@ type statsAPI struct {
 
 	mu     sync.Mutex
 	reader *querylog.Reader // constructed lazily: the writer must create the DB file first
+
+	// snap preheats the default-window dashboard reads in the background so tab
+	// loads serve a warm in-memory snapshot with no reader work. See snapshot.go.
+	snap *statsSnapshot
 
 	// client-class refresh throttle. RefreshClientClasses is a 7-day query-log
 	// WINDOW scan — far too slow for the request path (seconds to tens of seconds
@@ -194,7 +212,9 @@ func (s *statsAPI) purgeQueries(rw http.ResponseWriter, _ *http.Request) {
 
 	// Drop the cached read-only reader so subsequent reads reopen against the
 	// emptied log instead of a handle whose page cache still holds deleted rows.
-	_ = s.Close()
+	// closeReader (not Close) keeps the snapshot goroutine alive so it repreheats
+	// the now-empty window.
+	_ = s.closeReader()
 
 	if err := querylog.PurgeQueryLog(s.qlCfg.Target.Reveal()); err != nil {
 		internalError(rw, err)
@@ -214,6 +234,12 @@ func (s *statsAPI) overview(rw http.ResponseWriter, req *http.Request) {
 	from, to, err := parseTimeRange(req)
 	if err != nil {
 		badRequest(rw, err)
+
+		return
+	}
+
+	if ov, ok := s.snap.getOverview(from, to); ok {
+		writeJSON(rw, http.StatusOK, ov)
 
 		return
 	}
@@ -248,6 +274,12 @@ func (s *statsAPI) buckets(rw http.ResponseWriter, req *http.Request) {
 
 			return
 		}
+	}
+
+	if b, ok := s.snap.getBuckets(from, to, step); ok {
+		writeJSON(rw, http.StatusOK, map[string]any{"buckets": b})
+
+		return
 	}
 
 	buckets, err := reader.Buckets(from, to, step)
@@ -299,6 +331,12 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	n := topN(req)
+
+	if cols, ok := s.snap.getTop(from, to, req.URL.Query().Get("col"), n); ok {
+		writeJSON(rw, http.StatusOK, map[string]any{"columns": cols})
+
+		return
+	}
 
 	// col may be a single column ({"items": [...]}) or a comma-separated list
 	// ({"columns": {col: [...]}}). The dashboard batches its four top-N panels
@@ -364,6 +402,12 @@ func (s *statsAPI) categories(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if cats, ok := s.snap.getCategories(from, to); ok {
+		writeJSON(rw, http.StatusOK, map[string]any{"categories": cats})
+
+		return
+	}
+
 	items, err := reader.CategoryTotals(from, to)
 	if err != nil {
 		internalError(rw, err)
@@ -383,6 +427,12 @@ func (s *statsAPI) latency(rw http.ResponseWriter, req *http.Request) {
 	from, to, err := parseTimeRange(req)
 	if err != nil {
 		badRequest(rw, err)
+
+		return
+	}
+
+	if p, ok := s.snap.getLatency(from, to); ok {
+		writeJSON(rw, http.StatusOK, p)
 
 		return
 	}

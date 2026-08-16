@@ -110,6 +110,15 @@ type DecoySource struct {
 	blCats      []BlocklistStat
 	blCatsValid bool
 
+	// blWarm signals the long-lived background warmer to recompute blCats after an
+	// invalidation, so the ~9s GROUP BY COUNT runs off the request path instead of
+	// on the next visitor. Buffered depth 1 => a burst of ~12 ReplaceBlocklist
+	// invalidations coalesces into a single pending signal. blWarmStop/blWarmDone
+	// tie the goroutine to Close (started in NewDecoySource, mirrors the emit workers).
+	blWarm     chan struct{}
+	blWarmStop chan struct{}
+	blWarmDone chan struct{}
+
 	// cached MIN/MAX rowid of log_entries for indexed random-rowid sampling of the
 	// real-query replay pool, refreshed on leRowidTTL (all guarded by mu).
 	leMinRowid int64
@@ -210,7 +219,10 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 		return nil, err
 	}
 
-	s := &DecoySource{db: db, ro: ro, rnd: rand.New(rand.NewSource(time.Now().UnixNano()))} //nolint:gosec // noise timing, not crypto
+	s := &DecoySource{
+		db: db, ro: ro, rnd: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // noise timing, not crypto
+		blWarm: make(chan struct{}, 1), blWarmStop: make(chan struct{}), blWarmDone: make(chan struct{}),
+	}
 
 	if err := s.loadMaxRowid(); err != nil {
 		return nil, err
@@ -220,10 +232,20 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 		return nil, err
 	}
 
+	// Warm BlocklistCategories in the background so the first Blocking-tab visit after
+	// a reboot is already hot, and re-warm on every invalidation (see blCatsWarmLoop).
+	go s.blCatsWarmLoop()
+	s.signalBlWarm()
+
 	return s, nil
 }
 
 func (s *DecoySource) Close() error {
+	// Stop the warmer and wait for it to exit BEFORE closing the ro pool it queries,
+	// so a mid-flight recompute can never race the pool close.
+	close(s.blWarmStop)
+	<-s.blWarmDone
+
 	if s.ro != nil {
 		if roDB, err := s.ro.DB(); err == nil {
 			_ = roDB.Close()

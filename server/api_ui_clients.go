@@ -322,11 +322,17 @@ func (s *statsAPI) people(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	list, err := reader.ClientList(from, to)
-	if err != nil {
-		internalError(rw, err)
+	// People rolls up over the same ClientList as /clients — served from the same
+	// preheated snapshot when the window is default. The rollup below reads rows
+	// read-only, so no copy is needed. The person/name overlays stay live (fresh).
+	list, ok := s.snap.getClientList(from, to)
+	if !ok {
+		list, err = reader.ClientList(from, to)
+		if err != nil {
+			internalError(rw, err)
 
-		return
+			return
+		}
 	}
 
 	persons, err := s.classifier.ClientPersons() // client_name -> person
@@ -434,11 +440,17 @@ func (s *statsAPI) clients(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	list, err := reader.ClientList(from, to)
-	if err != nil {
-		internalError(rw, err)
+	list, ok := s.snap.getClientList(from, to)
+	if ok {
+		// Snapshot slice is shared read-only; copy before overlaying DisplayName.
+		list = append([]querylog.ClientRow(nil), list...)
+	} else {
+		list, err = reader.ClientList(from, to)
+		if err != nil {
+			internalError(rw, err)
 
-		return
+			return
+		}
 	}
 
 	// Layer stored display-name overrides over auto-recognition (one query for
