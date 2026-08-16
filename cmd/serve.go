@@ -105,16 +105,20 @@ func seedDefaultPassword(store *configstore.Store) {
 	}
 
 	pw := os.Getenv("JUNGLEBLOCK_DEFAULT_PASSWORD")
+	source := "env"
 	if pw == "" {
 		pw = "jungle"
+		source = "built-in default"
 	}
 
 	if err := store.SetPassword(pw); err != nil {
-		log.Log().Warnf("could not seed the default web-UI password: %v", err)
+		log.PrefixedLog("supervisor").Warnf("could not seed the default web-UI password: %v", err)
 		return
 	}
 
-	log.Log().Warnf("seeded the DEFAULT web-UI password %q — change it in the Settings page", pw)
+	// never log the password value — the console mirrors this line to the web UI.
+	log.PrefixedLog("supervisor").WithField("source", source).
+		Warn("seeded a DEFAULT web-UI password — change it in the Settings page")
 }
 
 // runSupervisor builds and starts the server, then serves until a termination
@@ -137,11 +141,16 @@ func runSupervisor(store *configstore.Store) error {
 
 	lastGood := cfg
 
+	slog := log.PrefixedLog("supervisor")
+	slog.WithField("version", util.Version).Info("supervisor starting")
+
 	// (re)build loop — each iteration binds fresh listeners for cfg; a normal
 	// config apply never reaches here, it hot-swaps inside the inner serve loop.
 	for {
 		log.Configure(&cfg.Log)
 		warnMissingPrivilegedPortCapability(cfg.Ports)
+
+		slog.Info("building server (full rebuild, binding listeners)")
 
 		serverCtx, shutdown := context.WithCancel(context.Background())
 
@@ -153,7 +162,7 @@ func runSupervisor(store *configstore.Store) error {
 				return fmt.Errorf("can't start server: %w", err)
 			}
 
-			log.Log().Errorf("can't apply new config, rolling back to last applied config: %v", err)
+			slog.WithField("error", err.Error()).Warn("can't apply new config, rolling back to last applied config")
 			cfg = lastGood
 
 			continue
@@ -165,6 +174,7 @@ func runSupervisor(store *configstore.Store) error {
 		srv.Start(serverCtx, errChan)
 		store.MarkApplied()
 		evt.Bus().Publish(evt.ApplicationStarted, util.Version, util.BuildTime)
+		slog.Info("server started, listeners bound")
 
 		restartCfg, err := serve(store, srv, serverCtx, &lastGood, errChan)
 
@@ -192,28 +202,32 @@ func serve(
 	store *configstore.Store, srv *server.Server, serverCtx context.Context,
 	lastGood **config.Config, errChan <-chan error,
 ) (*config.Config, error) {
+	slog := log.PrefixedLog("supervisor")
+
 	for {
 		select {
 		case <-signals:
-			log.Log().Infof("Terminating...")
+			slog.Info("shutdown signal received, terminating")
 
 			return nil, nil
 
 		case err := <-errChan:
-			log.Log().Error("server start failed: ", err)
+			slog.WithField("error", err.Error()).Error("server start failed")
 
 			return nil, err
 
 		case <-store.ApplyRequested():
+			slog.Info("applying config change")
+
 			newCfg, err := store.LoadConfig()
 			if err != nil {
-				log.Log().Errorf("stored config is invalid, keeping the running config: %v", err)
+				slog.WithField("error", err.Error()).Warn("stored config is invalid, keeping the running config")
 
 				continue
 			}
 
 			if !server.ListenersCompatible(*lastGood, newCfg) {
-				log.Log().Info("listener-affecting config changed; full restart")
+				slog.Info("listener-affecting config changed; full rebuild (brief downtime)")
 
 				return newCfg, nil
 			}
@@ -224,14 +238,14 @@ func serve(
 			log.Configure(&newCfg.Log)
 
 			if err := srv.ApplyConfig(serverCtx, newCfg); err != nil {
-				log.Log().Errorf("can't apply new config, keeping the running config: %v", err)
+				slog.WithField("error", err.Error()).Warn("can't apply new config, keeping the running config")
 
 				continue
 			}
 
 			*lastGood = newCfg
 			store.MarkApplied()
-			log.Log().Info("configuration applied without dropping listeners")
+			slog.Info("config applied via zero-downtime hot-swap")
 		}
 	}
 }

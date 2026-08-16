@@ -103,6 +103,8 @@ func Open(dir string) (*Store, error) {
 	}
 	s.db.Store(db)
 
+	log.PrefixedLog("configstore").WithField("path", s.DBPath()).Info("config store opened (schema migrated, seed ensured)")
+
 	return s, nil
 }
 
@@ -225,6 +227,7 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 	}
 
 	overlaid := false
+	blockingOverlaid := false
 
 	if len(groups) > 0 {
 		if err := overlayUpstreams(cfg, groups, entries); err != nil {
@@ -246,8 +249,33 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 			overlayBlocking(cfg, bl)
 
 			overlaid = true
+			blockingOverlaid = true
+
+			enabledCats, enabledAdlists := 0, 0
+			for _, c := range bl.cats {
+				if c.Enabled {
+					enabledCats++
+				}
+			}
+			for _, a := range bl.adlists {
+				if a.Enabled {
+					enabledAdlists++
+				}
+			}
+
+			log.PrefixedLog("configstore").
+				WithField("categories_enabled", enabledCats).
+				WithField("categories_total", len(bl.cats)).
+				WithField("adlists_enabled", enabledAdlists).
+				WithField("client_segments", len(bl.segs)).
+				Info("blocking lists reloaded from store")
 		}
 	}
+
+	log.PrefixedLog("configstore").
+		WithField("upstreams_overlaid", len(groups) > 0).
+		WithField("blocking_overlaid", blockingOverlaid).
+		Info("config loaded")
 
 	if !overlaid {
 		return cfg, nil
@@ -300,6 +328,8 @@ func (s *Store) setRawYAML(data string) error {
 		return errors.New("config blob row missing")
 	}
 
+	log.PrefixedLog("configstore").WithField("bytes", len(data)).Info("raw config validated and persisted")
+
 	return nil
 }
 
@@ -315,6 +345,7 @@ func (s *Store) ValidateRaw(data string) error {
 func (s *Store) RequestApply() {
 	select {
 	case s.applyCh <- struct{}{}:
+		log.PrefixedLog("configstore").Info("config apply requested")
 	default:
 	}
 }
@@ -377,6 +408,9 @@ func (s *Store) RestoreDB(newPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	rlog := log.PrefixedLog("configstore")
+	rlog.WithField("from", newPath).Info("restoring config database")
+
 	dbPath := s.DBPath()
 	bakPath := dbPath + ".bak"
 
@@ -395,6 +429,7 @@ func (s *Store) RestoreDB(newPath string) error {
 	_ = os.Remove(dbPath + "-shm")
 
 	restore := func(cause error) error {
+		rlog.WithField("error", cause.Error()).Warn("config database restore failed, rolling back to previous database")
 		_ = os.Rename(bakPath, dbPath)
 		if reErr := s.reopen(); reErr != nil {
 			return fmt.Errorf("%w; and can't reopen original: %v", cause, reErr)
@@ -404,6 +439,7 @@ func (s *Store) RestoreDB(newPath string) error {
 	}
 
 	if err := os.Rename(dbPath, bakPath); err != nil {
+		rlog.WithField("error", err.Error()).Warn("config database restore failed to back up current database, rolling back")
 		_ = s.reopen()
 
 		return fmt.Errorf("can't back up config database: %w", err)
@@ -420,6 +456,8 @@ func (s *Store) RestoreDB(newPath string) error {
 	}
 
 	_ = os.Remove(bakPath)
+
+	rlog.Info("config database restored")
 
 	return nil
 }

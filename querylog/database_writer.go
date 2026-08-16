@@ -200,6 +200,8 @@ func (d *DatabaseWriter) buildDeferredIndexes(ctx context.Context) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
+	logger.Info("deferred query-log maintenance starting")
+
 	// SIZE GUARD: only the one-time VACUUM (a whole-file rewrite) is the OOM risk on a
 	// low-RAM box — it can never commit before the container is OOM-killed, rolling
 	// the work back and re-running it every boot (a crash loop that pins the disk at
@@ -232,8 +234,13 @@ func (d *DatabaseWriter) buildDeferredIndexes(ctx context.Context) {
 		if mode != 2 {
 			d.db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
 
+			logger.WithField("op", "vacuum").WithField("db_mib", dbBytes>>20).
+				Info("running one-time VACUUM (auto_vacuum=INCREMENTAL migration)")
+
 			if err := d.db.Exec("VACUUM").Error; err != nil {
 				logger.Errorf("deferred VACUUM failed: %v", err)
+			} else {
+				logger.WithField("op", "vacuum").Info("one-time VACUUM done")
 			}
 		}
 	}
@@ -252,6 +259,9 @@ func (d *DatabaseWriter) buildDeferredIndexes(ctx context.Context) {
 	// Fold the build's WAL frames into the main DB so readers don't inherit a giant
 	// -wal from the index write.
 	d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+
+	logger.WithField("op", "index").WithField("index", "idx_log_entries_etldp_ts").
+		Info("deferred query-log maintenance done")
 }
 
 func databaseMigration(db *gorm.DB, dbType config.QueryLogType, logRetentionDays uint64) error {
@@ -435,6 +445,8 @@ func (d *DatabaseWriter) CleanUp() {
 	// single txn holds the sole sqlite writer for seconds and spikes the WAL, which
 	// is the lock-contention that starves the flush. diskGuardMaxSteps bounds the
 	// work per call; the periodic cleanup resumes any remainder next tick.
+	var total int64
+
 	for step := 0; step < diskGuardMaxSteps; step++ {
 		deleted, err := d.pruneOldest(deletionDate, diskGuardBatch)
 		if err != nil {
@@ -444,10 +456,17 @@ func (d *DatabaseWriter) CleanUp() {
 		}
 
 		if deleted == 0 {
-			return
+			break
 		}
 
+		total += deleted
+
 		time.Sleep(diskGuardStepPause)
+	}
+
+	if total > 0 {
+		logger.WithField("deleted", total).WithField("retention_days", d.logRetentionDays).
+			Info("query-log retention cleanup pruned expired rows")
 	}
 }
 
@@ -459,6 +478,8 @@ func (d *DatabaseWriter) doDBWrite() error {
 
 	if len(d.pendingEntries) > 0 {
 		log.Log().Tracef("%d entries to write", len(d.pendingEntries))
+
+		pending := len(d.pendingEntries)
 
 		const bulkSize = 100
 
@@ -511,8 +532,21 @@ func (d *DatabaseWriter) doDBWrite() error {
 		d.pendingEntries = failed
 
 		if multiErr := err.ErrorOrNil(); multiErr != nil {
+			// WARN: some batches rolled back and are retained for retry. The audit
+			// fixed the silent drop here — surface the loss-risk so it's visible.
+			log.PrefixedLog("database_writer").
+				WithField("written", pending-len(failed)).
+				WithField("retained_for_retry", len(failed)).
+				WithError(multiErr).
+				Warn("query-log flush partially failed")
+
 			return fmt.Errorf("failed to write querylog entries to database: %w", multiErr)
 		}
+
+		// Debug (hot path): flush outcome on success.
+		log.PrefixedLog("database_writer").
+			WithField("written", pending).
+			Debug("query-log flush complete")
 	}
 
 	// Bound the -wal under sustained decoy writes. SQLite's passive auto-checkpoint

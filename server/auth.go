@@ -14,8 +14,15 @@ import (
 	"time"
 
 	"github.com/0xERR0R/blocky/configstore"
+	"github.com/0xERR0R/blocky/log"
+	"github.com/0xERR0R/blocky/util"
 	"github.com/go-chi/chi/v5"
+	"github.com/sirupsen/logrus"
 )
+
+// authLog is the component-prefixed logger for auth events. Auth logs record the
+// EVENT + client IP + outcome — never the password, hash, or session secret.
+func authLog() *logrus.Entry { return log.PrefixedLog("auth") }
 
 const (
 	sessionCookie = "blocky_session"
@@ -234,6 +241,12 @@ func (l *loginLimiter) recordFail(ip string) {
 	e.count++
 	e.until = time.Now().Add(lockoutWindow)
 	l.fails[ip] = e
+
+	if e.count == maxLoginFails {
+		authLog().WithField("client_ip", util.Obfuscate(ip)).
+			WithField("window", lockoutWindow.String()).
+			Warn("login lockout triggered for IP")
+	}
 }
 
 func (l *loginLimiter) reset(ip string) {
@@ -314,6 +327,8 @@ func (a *authAPI) setup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setSessionCookie(w, r, a.store.SessionSecret())
+	authLog().WithField("client_ip", util.Obfuscate(requestIP(r))).
+		Info("first-run setup completed: admin password set")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -325,7 +340,10 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := requestIP(r)
+	obfIP := util.Obfuscate(ip)
+
 	if a.limiter.locked(ip) {
+		authLog().WithField("client_ip", obfIP).Warn("login rejected: IP is locked out")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
 
 		return
@@ -334,6 +352,7 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 	pw, ok := decodePassword(r)
 	if !ok || !a.store.VerifyPassword(pw) {
 		a.limiter.recordFail(ip)
+		authLog().WithField("client_ip", obfIP).Warn("login failed: invalid password")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 
 		return
@@ -341,11 +360,13 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 
 	a.limiter.reset(ip)
 	setSessionCookie(w, r, a.store.SessionSecret())
+	authLog().WithField("client_ip", obfIP).Info("login succeeded")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (a *authAPI) logout(w http.ResponseWriter, r *http.Request) {
 	clearSessionCookie(w, r)
+	authLog().WithField("client_ip", util.Obfuscate(requestIP(r))).Info("logout")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

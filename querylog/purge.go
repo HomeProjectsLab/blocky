@@ -53,6 +53,8 @@ func PurgeQueryLog(target string) error {
 		}
 	}
 
+	log.PrefixedLog("querylog").Info("query log purged (all logged queries and derived stats cleared)")
+
 	// Fold the deletes' WAL frames back so a stale -wal doesn't linger for readers.
 	// Best effort: a concurrent writer may keep it from fully truncating.
 	db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")

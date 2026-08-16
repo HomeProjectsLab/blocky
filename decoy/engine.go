@@ -400,11 +400,44 @@ func (e *Engine) Run(ctx context.Context) {
 	// scans onto the DB.
 	sem := make(chan struct{}, maxConcurrentEmits)
 
+	// Log-state tracking (single goroutine; no locking needed). active-hours flips
+	// and an hourly effective-rate snapshot are the human-wanted incident signals;
+	// dropped emissions are rate-limited so a slow box can't turn them into a flood.
+	active := e.withinActiveHours(e.now())
+	rateHour := -1
+
+	var dropped int
+
+	var lastDropLog time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			now := e.now()
+
+			if a := e.withinActiveHours(now); a != active {
+				active = a
+				if a {
+					e.logger.WithField("effective_qpm", e.effectiveQPM()).Info("decoy entered active hours")
+				} else {
+					e.logger.WithField("floor_qpm", e.cfg.OffHoursFloorQPM).
+						Info("decoy left active hours; dropped to off-hours floor")
+				}
+			}
+
+			// Hourly snapshot of the effective rate vs the persona target and the
+			// live real rate — shows rate/target drift without per-interval spam.
+			if h := now.Hour(); h != rateHour {
+				rateHour = h
+				e.logger.WithField("effective_qpm", e.effectiveQPM()).
+					WithField("target_qpm", e.targetCurve(now)).
+					WithField("real_qpm", e.recentRealQPM()).
+					WithField("backoff", e.backoffFactor()).
+					Info("decoy effective rate")
+			}
+
 			// T10: never gate fully to zero — emit every tick. Outside active
 			// hours effectiveQPM (via nextInterval) collapses to the low
 			// always-on floor rather than stopping, so an observer can't read the
@@ -416,7 +449,16 @@ func (e *Engine) Run(ctx context.Context) {
 					e.emit(ctx)
 				}()
 			default:
-				// pool saturated (box can't keep up) — drop this emission
+				// pool saturated (box can't keep up) — drop this emission.
+				// WARN rate-limited to one line per 30s with the drop count.
+				dropped++
+				if time.Since(lastDropLog) >= 30*time.Second {
+					e.logger.WithField("dropped", dropped).
+						Warn("decoy emission pool saturated; dropping emissions (box can't keep up)")
+
+					dropped = 0
+					lastDropLog = time.Now()
+				}
 			}
 
 			timer.Reset(e.nextInterval())
@@ -1174,7 +1216,21 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 	e.noteTTL(key, resp)
 
 	decoyQueriesTotal.Inc()
+
+	// Sampled hot-path trace (Debug, off by default; 1-in-emitDebugSample). Never
+	// the domain — replay/corpus sources derive from real visited domains, so the
+	// name stays out of the log; source label + qtype + outcome are enough.
+	if e.rnd.Intn(emitDebugSample) == 0 {
+		e.logger.WithField("source", q.source).
+			WithField("qtype", dns.Type(q.qtype).String()).
+			WithField("failed", err != nil).
+			Debug("decoy emitted")
+	}
 }
+
+// emitDebugSample is the 1-in-N sampling rate for the per-emit Debug trace: even
+// at Debug the decoy path is hot, so it is sampled to stay a trickle, not a flood.
+const emitDebugSample = 64
 
 // isBlockedDecoy reports whether name is on the active denylist (exact match).
 // Nil source (unit tests without a db) → never blocked.
@@ -1565,6 +1621,8 @@ func (e *Engine) noteOutcome(failed bool) {
 		}
 	}
 
+	prev := e.backoff
+
 	if float64(errs)/float64(len(e.outcomes)) > backoffErrThreshold {
 		e.backoff *= backoffDecay
 		if e.backoff < backoffMin {
@@ -1575,6 +1633,17 @@ func (e *Engine) noteOutcome(failed bool) {
 		if e.backoff > 1 {
 			e.backoff = 1
 		}
+	}
+
+	// Log only the engage/recover transitions (crossing full rate), never per
+	// outcome — the window is the incident signal, not each failed decoy.
+	switch {
+	case prev >= 1 && e.backoff < 1:
+		e.logger.WithField("backoff", e.backoff).
+			WithField("err_rate", float64(errs)/float64(len(e.outcomes))).
+			Warn("decoy adaptive backoff engaged (upstream resolve errors); throttling decoy rate")
+	case prev < 1 && e.backoff >= 1:
+		e.logger.Info("decoy adaptive backoff recovered; decoy rate restored")
 	}
 }
 

@@ -81,6 +81,8 @@ func (s *Server) createOpenAPIInterfaceImpl() api.StrictServerInterface {
 func (s *Server) registerDoHEndpoints(router *chi.Mux, cfg *config.Config) {
 	pathDohQuery := cfg.Ports.DOHPath
 
+	logger().WithField("path", pathDohQuery).Info("DoH resolver endpoints registered")
+
 	router.Get(pathDohQuery, s.dohGetRequestHandler)
 	router.Get(pathDohQuery+"/", s.dohGetRequestHandler)
 	router.Get(pathDohQuery+"/{clientID}", s.dohGetRequestHandler)

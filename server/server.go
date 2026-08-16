@@ -110,6 +110,8 @@ type Server struct {
 // Called from the delayed AfterFunc on a normal retire and synchronously from
 // Stop for any retiree still pending at shutdown.
 func (s *Server) retireBundle(b *resolverBundle) {
+	logger().Info("retiring previous resolver bundle: flushing query log and closing its resources")
+
 	for _, fl := range b.logFlushers {
 		_ = fl.Flush()
 	}
@@ -204,6 +206,11 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		if err != nil {
 			return nil, fmt.Errorf("failed to create TLS configuration: %w", err)
 		}
+
+		logger().WithFields(logrus.Fields{
+			"https": cfg.Ports.HTTPS, // DoH
+			"dot":   cfg.Ports.TLS,   // DoT
+		}).Info("TLS enabled for DoH/DoT listeners")
 	}
 
 	if cfg.Ports.FreeBind && !freebind.Supported {
@@ -435,11 +442,15 @@ func (s *Server) buildResolverBundle(
 // finish) and leaks (old.cancel + delayed closeAll reap every old goroutine and
 // conn). On any build error the old bundle stays live and the error is returned.
 func (s *Server) ApplyConfig(serverCtx context.Context, cfg *config.Config) error {
+	start := time.Now()
+	logger().Info("config apply: rebuilding resolver bundle for hot-swap")
+
 	resolverCtx, cancel := context.WithCancel(serverCtx)
 
 	newBundle, err := s.buildResolverBundle(resolverCtx, cancel, cfg)
 	if err != nil {
 		cancel()
+		logger().WithError(err).Warn("config apply failed: resolver bundle build error, keeping live bundle")
 
 		return err
 	}
@@ -478,12 +489,21 @@ func (s *Server) ApplyConfig(serverCtx context.Context, cfg *config.Config) erro
 		})
 	}
 
+	logger().WithField("durationMs", time.Since(start).Milliseconds()).
+		Info("config apply committed: resolver bundle swapped live")
+
 	return nil
 }
 
 // startBundleBackground starts a bundle's background goroutines on its own
 // context, so a later swap can stop exactly these via the bundle's cancel.
 func (s *Server) startBundleBackground(b *resolverBundle) {
+	logger().WithFields(logrus.Fields{
+		"decoy":       b.decoyEngine != nil,
+		"listUpdater": b.listUpdater != nil,
+		"prewarm":     b.prewarm != nil,
+	}).Debug("starting resolver bundle background loops")
+
 	if b.decoyEngine != nil {
 		go b.decoyEngine.Run(b.ctx)
 	}

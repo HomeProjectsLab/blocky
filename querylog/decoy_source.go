@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -107,6 +108,35 @@ type DecoySource struct {
 	leMinRowid int64
 	leMaxRowid int64
 	leRowidAt  time.Time
+
+	// lastSampleWarn is the unix-nano of the last emitted sampler-error WARN,
+	// used by warnSampleErr to rate-limit (atomic; no lock-order coupling with mu).
+	lastSampleWarn int64
+}
+
+// sampleWarnEvery rate-limits the sampler-error WARN: a persistent DB fault
+// (locked/corrupt/IO) surfaces on every emit, so an unthrottled WARN here would
+// be the firehose this logging pass exists to avoid.
+const sampleWarnEvery = 30 * time.Second
+
+// warnSampleErr logs a decoy-source sampler DB error at WARN, rate-limited to one
+// line per sampleWarnEvery across all samplers. err==nil and empty/no-row results
+// are never errors and never reach here. Returns err unchanged so callers keep
+// their existing control flow (additive: log only).
+func (s *DecoySource) warnSampleErr(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	now := time.Now().UnixNano()
+
+	last := atomic.LoadInt64(&s.lastSampleWarn)
+	if now-last >= int64(sampleWarnEvery) && atomic.CompareAndSwapInt64(&s.lastSampleWarn, last, now) {
+		log.PrefixedLog("decoy_source").WithField("op", op).WithError(err).
+			Warn("decoy sampler DB error (rate-limited)")
+	}
+
+	return err
 }
 
 // decoyDomain is the gorm model for the seeded Tranco list. rowid is SQLite's
@@ -263,7 +293,7 @@ func (s *DecoySource) seekRandomReal(seek string, args []any, dest any) (found b
 
 		res := s.ro.Raw(seek, append([]any{k}, args...)...).Scan(dest)
 		if res.Error != nil {
-			return false, res.Error
+			return false, s.warnSampleErr("seekRandomReal", res.Error)
 		}
 
 		if res.RowsAffected > 0 {
@@ -274,7 +304,7 @@ func (s *DecoySource) seekRandomReal(seek string, args []any, dest any) (found b
 	// All draws landed in filtered tails; scan forward from the floor once.
 	res := s.ro.Raw(seek, append([]any{minRowid}, args...)...).Scan(dest)
 	if res.Error != nil {
-		return false, res.Error
+		return false, s.warnSampleErr("seekRandomReal", res.Error)
 	}
 
 	return res.RowsAffected > 0, nil
@@ -387,7 +417,7 @@ func (s *DecoySource) sampleListOnce() (string, error) {
 	var domain string
 	err := s.ro.Raw("SELECT domain FROM decoy_domains WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&domain).Error
 
-	return domain, err
+	return domain, s.warnSampleErr("sampleList", err)
 }
 
 // zipfRowid maps a uniform draw u in [0,1) to a rowid in [1,max] with density
@@ -424,7 +454,7 @@ func (s *DecoySource) IsBlockedDomain(domain string) (bool, error) {
 
 	err := s.ro.Raw("SELECT 1 FROM blocklist_domains WHERE domain = ? LIMIT 1", domain).Scan(&one).Error
 	if err != nil {
-		return false, err
+		return false, s.warnSampleErr("isBlockedDomain", err)
 	}
 
 	return one == 1, nil
@@ -551,7 +581,7 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 		WHERE decoy = 0 AND effective_tldp = ?
 		ORDER BY request_ts DESC LIMIT 1`, etldp).Scan(&row).Error
 	if err != nil {
-		return FpSample{}, err
+		return FpSample{}, s.warnSampleErr("sampleFingerprintForName", err)
 	}
 
 	if row.QuestionType == "" { // no real history for this eTLD+1
@@ -815,7 +845,7 @@ func (s *DecoySource) corpusRowAt(max int64) (string, int64, error) {
 
 	err := s.ro.Raw("SELECT domain, hits FROM noise_corpus WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&row).Error
 
-	return row.Domain, row.Hits, err
+	return row.Domain, row.Hits, s.warnSampleErr("sampleCorpus", err)
 }
 
 // AddToCorpus inserts or refreshes domain in the persistent visited-domains
@@ -907,7 +937,7 @@ func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
 		ORDER BY request_ts ASC`,
 		seed.ClientName, seed.RequestTS.Add(-cohortWindow), seed.RequestTS.Add(cohortWindow)).Scan(&rows).Error
 	if err != nil {
-		return nil, err
+		return nil, s.warnSampleErr("sampleCohort", err)
 	}
 
 	if len(rows) == 0 {

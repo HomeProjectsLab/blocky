@@ -471,7 +471,10 @@ func (r *BlockingResolver) handleBlocked(logger *logrus.Entry,
 	modelResp.ReasonLabel = reasonLabel
 	r.blockHandler.handleBlock(question, modelResp.Res)
 
-	logger.Debugf("blocking request '%s'", reason)
+	logger.WithFields(logrus.Fields{
+		logFieldReason: reason,
+		logFieldQType:  dns.Type(question.Qtype).String(),
+	}).Debug("blocked")
 
 	return modelResp, nil
 }
