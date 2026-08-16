@@ -137,22 +137,31 @@ func (deviceClass) TableName() string { return "device_class" }
 // everything else is a commutative counter. domains is synced with
 // device_class_domainset (capped ≤ classIoTMaxDomains+1).
 type deviceClassSignal struct {
-	FpHash      string     `gorm:"column:fp_hash;primaryKey"`
-	N           int64      `gorm:"column:n;not null;default:0"`
-	ServerHits  int64      `gorm:"column:server_hits;not null;default:0"`
-	GameHits    int64      `gorm:"column:game_hits;not null;default:0"`
-	CameraHits  int64      `gorm:"column:camera_hits;not null;default:0"`
-	SpeakerHits int64      `gorm:"column:speaker_hits;not null;default:0"`
-	PrinterHits int64      `gorm:"column:printer_hits;not null;default:0"`
-	StreamHits  int64      `gorm:"column:stream_hits;not null;default:0"`
-	PushHits    int64      `gorm:"column:push_hits;not null;default:0"`
-	QtypeMask   int64      `gorm:"column:qtype_mask;not null;default:0"`
-	Domains     int64      `gorm:"column:domains;not null;default:0"`
-	LastTs      *time.Time `gorm:"column:last_ts"`
-	LastDomain  string     `gorm:"column:last_domain;not null;default:''"`
-	GapSum      float64    `gorm:"column:gap_sum;not null;default:0"`
-	GapSqSum    float64    `gorm:"column:gap_sq_sum;not null;default:0"`
-	GapN        int64      `gorm:"column:gap_n;not null;default:0"`
+	FpHash      string `gorm:"column:fp_hash;primaryKey"`
+	N           int64  `gorm:"column:n;not null;default:0"`
+	ServerHits  int64  `gorm:"column:server_hits;not null;default:0"`
+	GameHits    int64  `gorm:"column:game_hits;not null;default:0"`
+	CameraHits  int64  `gorm:"column:camera_hits;not null;default:0"`
+	SpeakerHits int64  `gorm:"column:speaker_hits;not null;default:0"`
+	PrinterHits int64  `gorm:"column:printer_hits;not null;default:0"`
+	StreamHits  int64  `gorm:"column:stream_hits;not null;default:0"`
+	PushHits    int64  `gorm:"column:push_hits;not null;default:0"`
+	// +8 vendor-tell classes (AutoMigrate adds these columns to existing DBs).
+	NASHits        int64      `gorm:"column:nas_hits;not null;default:0"`
+	RouterHits     int64      `gorm:"column:router_hits;not null;default:0"`
+	MediaHits      int64      `gorm:"column:media_hits;not null;default:0"`
+	SmartTVHits    int64      `gorm:"column:smart_tv_hits;not null;default:0"`
+	HubHits        int64      `gorm:"column:hub_hits;not null;default:0"`
+	ThermostatHits int64      `gorm:"column:thermostat_hits;not null;default:0"`
+	LightingHits   int64      `gorm:"column:lighting_hits;not null;default:0"`
+	WearableHits   int64      `gorm:"column:wearable_hits;not null;default:0"`
+	QtypeMask      int64      `gorm:"column:qtype_mask;not null;default:0"`
+	Domains        int64      `gorm:"column:domains;not null;default:0"`
+	LastTs         *time.Time `gorm:"column:last_ts"`
+	LastDomain     string     `gorm:"column:last_domain;not null;default:''"`
+	GapSum         float64    `gorm:"column:gap_sum;not null;default:0"`
+	GapSqSum       float64    `gorm:"column:gap_sq_sum;not null;default:0"`
+	GapN           int64      `gorm:"column:gap_n;not null;default:0"`
 }
 
 func (deviceClassSignal) TableName() string { return "device_class_signal" }
@@ -167,19 +176,27 @@ func (a deviceClassSignal) toFeatures() classFeatures {
 	}
 
 	return classFeatures{
-		Client:      a.FpHash,
-		N:           a.N,
-		Domains:     a.Domains,
-		Qtypes:      int64(bits.OnesCount64(uint64(a.QtypeMask))),
-		ServerHits:  a.ServerHits,
-		GameHits:    a.GameHits,
-		CameraHits:  a.CameraHits,
-		SpeakerHits: a.SpeakerHits,
-		PrinterHits: a.PrinterHits,
-		StreamHits:  a.StreamHits,
-		PushHits:    a.PushHits,
-		MeanGap:     mean,
-		MeanGap2:    mean2,
+		Client:         a.FpHash,
+		N:              a.N,
+		Domains:        a.Domains,
+		Qtypes:         int64(bits.OnesCount64(uint64(a.QtypeMask))),
+		ServerHits:     a.ServerHits,
+		GameHits:       a.GameHits,
+		CameraHits:     a.CameraHits,
+		SpeakerHits:    a.SpeakerHits,
+		PrinterHits:    a.PrinterHits,
+		StreamHits:     a.StreamHits,
+		PushHits:       a.PushHits,
+		NASHits:        a.NASHits,
+		RouterHits:     a.RouterHits,
+		MediaHits:      a.MediaHits,
+		SmartTVHits:    a.SmartTVHits,
+		HubHits:        a.HubHits,
+		ThermostatHits: a.ThermostatHits,
+		LightingHits:   a.LightingHits,
+		WearableHits:   a.WearableHits,
+		MeanGap:        mean,
+		MeanGap2:       mean2,
 	}
 }
 
@@ -277,6 +294,8 @@ func heuristicsKey(e *logEntry) string {
 type clsAccum struct {
 	n                                                    int64
 	server, game, camera, speaker, printer, stream, push int64
+	nas, router, media, smartTV, hub                     int64
+	thermostat, lighting, wearable                       int64
 	qtypeMask                                            int64
 	tss                                                  []time.Time // for gap stats (sorted before use)
 	etldps                                               []string    // first-seen order, for the capped domainset
@@ -436,6 +455,38 @@ func foldClassSignal(cls map[string]*clsAccum, key string, e *logEntry, ts time.
 
 	if containsAny(qn, pushSignals) {
 		a.push++
+	}
+
+	if containsAny(qn, nasSignals) {
+		a.nas++
+	}
+
+	if containsAny(qn, routerSignals) {
+		a.router++
+	}
+
+	if containsAny(qn, mediaSignals) {
+		a.media++
+	}
+
+	if containsAny(qn, smartTVSignals) {
+		a.smartTV++
+	}
+
+	if containsAny(qn, hubSignals) {
+		a.hub++
+	}
+
+	if containsAny(qn, thermostatSignals) {
+		a.thermostat++
+	}
+
+	if containsAny(qn, lightingSignals) {
+		a.lighting++
+	}
+
+	if containsAny(qn, wearableSignals) {
+		a.wearable++
 	}
 
 	a.tss = append(a.tss, ts)
@@ -635,6 +686,8 @@ func applyClassSignal(tx *gorm.DB, cls map[string]*clsAccum) error {
 			FpHash: key, N: a.n,
 			ServerHits: a.server, GameHits: a.game, CameraHits: a.camera,
 			SpeakerHits: a.speaker, PrinterHits: a.printer, StreamHits: a.stream, PushHits: a.push,
+			NASHits: a.nas, RouterHits: a.router, MediaHits: a.media, SmartTVHits: a.smartTV,
+			HubHits: a.hub, ThermostatHits: a.thermostat, LightingHits: a.lighting, WearableHits: a.wearable,
 			QtypeMask: a.qtypeMask,
 			LastTs:    &lastTs, LastDomain: a.lastDomain,
 			GapSum: gapSum, GapSqSum: gapSqSum, GapN: gapN,
@@ -674,20 +727,28 @@ func applyClassSignal(tx *gorm.DB, cls map[string]*clsAccum) error {
 	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "fp_hash"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"n":            gorm.Expr("n + excluded.n"),
-			"server_hits":  gorm.Expr("server_hits + excluded.server_hits"),
-			"game_hits":    gorm.Expr("game_hits + excluded.game_hits"),
-			"camera_hits":  gorm.Expr("camera_hits + excluded.camera_hits"),
-			"speaker_hits": gorm.Expr("speaker_hits + excluded.speaker_hits"),
-			"printer_hits": gorm.Expr("printer_hits + excluded.printer_hits"),
-			"stream_hits":  gorm.Expr("stream_hits + excluded.stream_hits"),
-			"push_hits":    gorm.Expr("push_hits + excluded.push_hits"),
-			"qtype_mask":   gorm.Expr("qtype_mask | excluded.qtype_mask"),
-			"gap_sum":      gorm.Expr("gap_sum + excluded.gap_sum"),
-			"gap_sq_sum":   gorm.Expr("gap_sq_sum + excluded.gap_sq_sum"),
-			"gap_n":        gorm.Expr("gap_n + excluded.gap_n"),
-			"domains":      gorm.Expr("excluded.domains"),
-			"last_ts":      gorm.Expr("MAX(last_ts, excluded.last_ts)"),
+			"n":               gorm.Expr("n + excluded.n"),
+			"server_hits":     gorm.Expr("server_hits + excluded.server_hits"),
+			"game_hits":       gorm.Expr("game_hits + excluded.game_hits"),
+			"camera_hits":     gorm.Expr("camera_hits + excluded.camera_hits"),
+			"speaker_hits":    gorm.Expr("speaker_hits + excluded.speaker_hits"),
+			"printer_hits":    gorm.Expr("printer_hits + excluded.printer_hits"),
+			"stream_hits":     gorm.Expr("stream_hits + excluded.stream_hits"),
+			"push_hits":       gorm.Expr("push_hits + excluded.push_hits"),
+			"nas_hits":        gorm.Expr("nas_hits + excluded.nas_hits"),
+			"router_hits":     gorm.Expr("router_hits + excluded.router_hits"),
+			"media_hits":      gorm.Expr("media_hits + excluded.media_hits"),
+			"smart_tv_hits":   gorm.Expr("smart_tv_hits + excluded.smart_tv_hits"),
+			"hub_hits":        gorm.Expr("hub_hits + excluded.hub_hits"),
+			"thermostat_hits": gorm.Expr("thermostat_hits + excluded.thermostat_hits"),
+			"lighting_hits":   gorm.Expr("lighting_hits + excluded.lighting_hits"),
+			"wearable_hits":   gorm.Expr("wearable_hits + excluded.wearable_hits"),
+			"qtype_mask":      gorm.Expr("qtype_mask | excluded.qtype_mask"),
+			"gap_sum":         gorm.Expr("gap_sum + excluded.gap_sum"),
+			"gap_sq_sum":      gorm.Expr("gap_sq_sum + excluded.gap_sq_sum"),
+			"gap_n":           gorm.Expr("gap_n + excluded.gap_n"),
+			"domains":         gorm.Expr("excluded.domains"),
+			"last_ts":         gorm.Expr("MAX(last_ts, excluded.last_ts)"),
 			// last_ts is now the true batch max (decoupled from domains), so a newer
 			// empty-eTLD batch must not wipe a stored domain — require a non-empty one.
 			"last_domain": gorm.Expr("CASE WHEN excluded.last_ts > last_ts AND excluded.last_domain != '' THEN excluded.last_domain ELSE last_domain END"),

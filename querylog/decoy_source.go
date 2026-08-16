@@ -1219,7 +1219,19 @@ const (
 	ClassSmartSpeaker = "smart-speaker" // sonos / alexa voice service
 	ClassCamera       = "camera"        // hik/axis/reolink/wyze/ring
 	ClassPrinter      = "printer"       // hp/epson/canon/brother cloud print
-	ClassUnknown      = "unknown"
+
+	// Vendor-tell classes (all reliably DNS-separable by a dedicated single-vendor
+	// cloud no generic PC/phone hits). Behaviour only GATES these, never identifies.
+	ClassNAS          = "nas"                 // synology / qnap appliance clouds
+	ClassRouterInfra  = "router-infra"        // ubiquiti / netgear / asus gateway+AP
+	ClassMediaServer  = "media-server"        // plex / emby HTPC
+	ClassSmartTV      = "smart-tv"            // LG webOS / Samsung Tizen platform telemetry
+	ClassSmartHomeHub = "smart-home-hub"      // smartthings / hubitat / homey bridge
+	ClassThermostat   = "thermostat-climate"  // nest / ecobee / honeywell
+	ClassLighting     = "smart-lighting-plug" // hue / kasa / tp-link
+	ClassWearable     = "wearable"            // fitbit / garmin (NOT apple watch)
+
+	ClassUnknown = "unknown"
 )
 
 // validClass reports whether c is an assignable device class (empty = clear override).
@@ -1227,6 +1239,8 @@ func validClass(c string) bool {
 	switch c {
 	case ClassIoT, ClassWorkstation, ClassServer,
 		ClassMobile, ClassTVStreaming, ClassGameConsole, ClassSmartSpeaker, ClassCamera, ClassPrinter,
+		ClassNAS, ClassRouterInfra, ClassMediaServer, ClassSmartTV, ClassSmartHomeHub,
+		ClassThermostat, ClassLighting, ClassWearable,
 		ClassUnknown:
 		return true
 	default:
@@ -1258,6 +1272,19 @@ const (
 	classSpeakerShare = 0.15
 	classPrinterShare = 0.10
 	classStreamShare  = 0.30
+
+	// New vendor-tell shares. Domains are unique to one vendor cloud, so the bars
+	// are low and false-positive-safe (a workstation won't hit tplinkcloud.com at
+	// 12%). Low-volume named-IoT subtypes get higher bars (their few queries mostly
+	// go to their own cloud). ponytail: fixed shares; tune per fleet.
+	classNASShare        = 0.05 // quickconnect/myqnapcloud relay + update polling: small but persistent
+	classRouterShare     = 0.05 // vendor firmware/DDNS: small slice of a forwarder
+	classMediaShare      = 0.08 // plex clients poll plex.tv steadily
+	classSmartTVShare    = 0.08 // OEM platform telemetry as a fraction of a mostly-streaming set
+	classHubShare        = 0.10 // hub-cloud keepalive
+	classThermostatShare = 0.10 // periodic small set
+	classLightingShare   = 0.12 // tiny device, most queries to its own cloud
+	classWearableShare   = 0.10 // low-volume periodic health sync
 )
 
 // Vendor-telemetry signal sets for the extra classes. Matched as question_name
@@ -1273,6 +1300,24 @@ var (
 	printerSignals = []string{"hpeprint", "hpconnected", "epsonconnect", "brother.com", "canon.com", "bjnp"}
 	streamSignals  = []string{"nflxvideo.net", "googlevideo.com", "roku.com", "amazonvideo.com", "ttvnw.net", "hulustream.com"}
 	pushSignals    = []string{"push.apple.com", "mtalk.google.com"} // OS push = interactive personal device
+
+	// New vendor-tell families (see the +8 taxonomy). Each is a dedicated single-
+	// vendor cloud no other class or a generic PC/phone hits — the only reliably
+	// DNS-separable axis. Deliberately NOT NTP (ambiguous, stays in serverEtldps)
+	// and NOT streaming CDNs (a smart-TV's OEM telemetry, not its stream, is the tell).
+	nasSignals = []string{"quickconnect.to", "synology.com", "synologydns.com", "myqnapcloud.com", "qnapcloud.com", "qnap.com"}
+	// ".ui.com" (leading dot) not "ui.com": the bare token stole ennui.com/sui.com/
+	// gui.company.com. Dropped bare "unifi" (matched unifiedlayer.com — Bluehost/EIG
+	// hosting) — Ubiquiti's real domains are under .ui.com/ubnt.com. Dropped "dyndns":
+	// DDNS is used by cameras/NAS/DVRs for remote access, not router-specific, so it
+	// stole those into router-infra.
+	routerSignals     = []string{".ui.com", "ubnt.com", "asuscomm.com", "routerlogin.net", "netgear.com"}
+	mediaSignals      = []string{"plex.tv", "plex.direct", "plexapp.com", "emby.media", "mb3admin.com"}
+	smartTVSignals    = []string{"lgtvsdp.com", "lgtvcommon.com", "lgsmartplatform", "ngfts.lge.com", "samsungcloudsolution.com", "samsungotn.net", "samsungtvns.net", "samsungacr.com"}
+	hubSignals        = []string{"smartthings.com", "hubitat.com", "athom.com", "homey.app"}
+	thermostatSignals = []string{"nest.com", "ecobee.com", "honeywellhome.com", "mytotalconnectcomfort.com"}
+	lightingSignals   = []string{"meethue.com", "philips-hue", "tplinkcloud.com", "tplinkra.com", "kasaapp"}
+	wearableSignals   = []string{"fitbit.com", "garmin.com", "gcs.garmin.com", "services.garmin.com", "whoop.com", "polar.com"}
 )
 
 // deviceKeyExpr is the SQL for a row's STABLE device identity: its fp_hash (wire
@@ -1326,19 +1371,28 @@ type ClientClassInfo struct {
 // classFeatures is the per-device-key aggregate the classifier scores. Client
 // holds the STABLE device_key (fp_hash, else client_name — see deviceKeyExpr).
 type classFeatures struct {
-	Client      string  `gorm:"column:c"`
-	N           int64   `gorm:"column:n"`
-	Domains     int64   `gorm:"column:domains"`
-	Qtypes      int64   `gorm:"column:qtypes"`
-	ServerHits  int64   `gorm:"column:serverhits"`
-	GameHits    int64   `gorm:"column:gamehits"`
-	CameraHits  int64   `gorm:"column:camerahits"`
-	SpeakerHits int64   `gorm:"column:speakerhits"`
-	PrinterHits int64   `gorm:"column:printerhits"`
-	StreamHits  int64   `gorm:"column:streamhits"`
-	PushHits    int64   `gorm:"column:pushhits"`
-	MeanGap     float64 `gorm:"column:meangap"`
-	MeanGap2    float64 `gorm:"column:meangap2"`
+	Client      string `gorm:"column:c"`
+	N           int64  `gorm:"column:n"`
+	Domains     int64  `gorm:"column:domains"`
+	Qtypes      int64  `gorm:"column:qtypes"`
+	ServerHits  int64  `gorm:"column:serverhits"`
+	GameHits    int64  `gorm:"column:gamehits"`
+	CameraHits  int64  `gorm:"column:camerahits"`
+	SpeakerHits int64  `gorm:"column:speakerhits"`
+	PrinterHits int64  `gorm:"column:printerhits"`
+	StreamHits  int64  `gorm:"column:streamhits"`
+	PushHits    int64  `gorm:"column:pushhits"`
+	// +8 vendor-tell classes
+	NASHits        int64   `gorm:"column:nashits"`
+	RouterHits     int64   `gorm:"column:routerhits"`
+	MediaHits      int64   `gorm:"column:mediahits"`
+	SmartTVHits    int64   `gorm:"column:smarttvhits"`
+	HubHits        int64   `gorm:"column:hubhits"`
+	ThermostatHits int64   `gorm:"column:thermostathits"`
+	LightingHits   int64   `gorm:"column:lightinghits"`
+	WearableHits   int64   `gorm:"column:wearablehits"`
+	MeanGap        float64 `gorm:"column:meangap"`
+	MeanGap2       float64 `gorm:"column:meangap2"`
 }
 
 // classify scores one device-key's features into a device class. Vendor-tell
@@ -1353,18 +1407,47 @@ func (f classFeatures) classify() string {
 	share := func(hits int64) float64 { return float64(hits) / float64(f.N) }
 
 	switch {
+	// nas/router/media BEFORE server: synology/asus/netgear firmware + a plex host's
+	// OS updates all hit serverNameLikes ("update.", "-update"); the vendor tell is
+	// more specific and must win, else a Synology scores "server".
+	case share(f.NASHits) >= classNASShare:
+		return ClassNAS
+	case share(f.RouterHits) >= classRouterShare:
+		return ClassRouterInfra
+	// media-server ALSO requires low domain diversity (printer-style gate): plex.tv/
+	// plex.direct are hit by Plex CLIENTS too, so a broad browsing PC used for Plex
+	// viewing would otherwise be stolen from workstation. A real HTPC appliance is
+	// narrow (≤ classIoTMaxDomains); a workstation is broad (> it) — that diversity is
+	// the only axis separating them, since the domains themselves don't.
+	case share(f.MediaHits) >= classMediaShare && f.Domains <= classIoTMaxDomains:
+		return ClassMediaServer
 	case share(f.ServerHits) >= classServerShare:
 		return ClassServer
 	case share(f.GameHits) >= classGameShare:
 		return ClassGameConsole
 	case share(f.CameraHits) >= classCameraShare:
 		return ClassCamera
+	// smart-home-hub / speaker / low-volume named-IoT subtypes: dedicated vendor
+	// clouds, disjoint signals, relative order free among themselves.
+	case share(f.HubHits) >= classHubShare:
+		return ClassSmartHomeHub
 	case share(f.SpeakerHits) >= classSpeakerShare:
 		return ClassSmartSpeaker
+	case share(f.ThermostatHits) >= classThermostatShare:
+		return ClassThermostat
+	case share(f.LightingHits) >= classLightingShare:
+		return ClassLighting
+	case share(f.WearableHits) >= classWearableShare:
+		return ClassWearable
 	// printer: distinctive but low-volume, so also require low diversity — a
 	// workstation that pings a print-cloud once must not flip to printer.
 	case share(f.PrinterHits) >= classPrinterShare && f.Domains <= classIoTMaxDomains:
 		return ClassPrinter
+	// smart-tv BEFORE stream: a smart-TV also hits streamSignals; the OEM platform
+	// telemetry is the more specific tell (a pure Roku/FireTV stick has none →
+	// correctly stays tv-streaming).
+	case share(f.SmartTVHits) >= classSmartTVShare:
+		return ClassSmartTV
 	case share(f.StreamHits) >= classStreamShare:
 		return ClassTVStreaming
 	// mobile: an OS push endpoint (interactive personal device) plus broad

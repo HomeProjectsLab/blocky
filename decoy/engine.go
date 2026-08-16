@@ -798,10 +798,20 @@ func (e *Engine) emit(ctx context.Context) {
 				e.emitBeacon(ctx, persona)
 
 				return
-			case querylog.ClassServer:
+			case querylog.ClassServer, querylog.ClassNAS, querylog.ClassRouterInfra:
+				// nas/router shape like server: periodic firmware/update/registry
+				// polling, non-human infra lookups.
 				e.emitServer(ctx, persona)
 
 				return
+			case querylog.ClassSmartHomeHub, querylog.ClassThermostat,
+				querylog.ClassLighting, querylog.ClassWearable:
+				// low-volume vendor-cloud beacons — the canonical beacon shape.
+				e.emitBeacon(ctx, persona)
+
+				return
+				// smart-tv / media-server fall through: their real traffic is
+				// browsing/streaming the generic cohort path already models.
 			}
 		}
 	}
