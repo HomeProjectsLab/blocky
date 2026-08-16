@@ -84,6 +84,14 @@ type Store struct {
 	mu          sync.Mutex
 	lastApplied time.Time
 
+	// sessionSecret caches the HMAC key so the auth hot path (SessionSecret,
+	// called per authenticated request) is a lock-free atomic read and never
+	// holds s.mu across a config.db read. Without it, an IO stall on the
+	// 1-connection config.db pool pins s.mu and freezes every auth request.
+	// Written under s.mu (SessionSecret/RotateSessionSecret); cleared on
+	// RestoreDB, whose swapped-in file may carry a different secret.
+	sessionSecret atomic.Pointer[[]byte]
+
 	// lastMutated is the unix-nano time of the last successful write to an
 	// overlay table (see overlayTables). Atomic, not s.mu: the gorm hook fires
 	// inside writers that already hold s.mu.
@@ -540,6 +548,10 @@ func (s *Store) RestoreDB(newPath string) error {
 	// reports the restored config as not applied yet.
 	s.lastMutated.Store(time.Now().UnixNano())
 	s.lastApplied = time.Time{}
+
+	// the swapped-in file may carry a different session secret; drop the cache
+	// so the next SessionSecret re-reads it from the restored database.
+	s.sessionSecret.Store(nil)
 
 	rlog.Info("config database restored")
 

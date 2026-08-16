@@ -123,8 +123,19 @@ func (s *Store) VerifyPassword(pw string) bool {
 // generation error returns a non-nil error and NO key — a nil/short key must
 // never reach an HMAC (an empty-key MAC is offline-forgeable).
 func (s *Store) SessionSecret() ([]byte, error) {
+	// Lock-free fast path: once cached, the auth hot path never touches s.mu or
+	// config.db, so a stalled 1-connection pool can't pin s.mu and freeze auth.
+	if p := s.sessionSecret.Load(); p != nil {
+		return *p, nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Re-check under the lock: a racing caller may have populated it.
+	if p := s.sessionSecret.Load(); p != nil {
+		return *p, nil
+	}
 
 	a, err := s.authRow()
 	if err != nil {
@@ -132,7 +143,10 @@ func (s *Store) SessionSecret() ([]byte, error) {
 	}
 
 	if len(a.SessionSecret) == sessionSecretLen {
-		return a.SessionSecret, nil
+		secret := a.SessionSecret
+		s.sessionSecret.Store(&secret)
+
+		return secret, nil
 	}
 
 	secret := make([]byte, sessionSecretLen)
@@ -145,6 +159,8 @@ func (s *Store) SessionSecret() ([]byte, error) {
 		// return the generated secret anyway: cookies just won't survive a restart
 		log.Log().Error("auth: ", err)
 	}
+
+	s.sessionSecret.Store(&secret)
 
 	return secret, nil
 }
@@ -166,7 +182,13 @@ func (s *Store) RotateSessionSecret() error {
 
 	a.SessionSecret = secret
 
-	return s.saveAuthRow(a)
+	if err := s.saveAuthRow(a); err != nil {
+		return err
+	}
+
+	s.sessionSecret.Store(&secret)
+
+	return nil
 }
 
 // hashPassword returns a PHC-format argon2id string ($argon2id$v=..$m=..,t=..,p=..$salt$hash).
