@@ -229,6 +229,28 @@ var _ = Describe("Clients + privacy UI API", func() {
 			put := exec(http.MethodPut, "/api/ui/privacy", []byte(`{not json`))
 			Expect(put.Code).Should(Equal(http.StatusBadRequest))
 		})
+
+		It("preserves absent sections on a partial PUT body", func() {
+			full := exec(http.MethodPut, "/api/ui/privacy",
+				[]byte(`{"decoy":{"enable":true,"queriesPerMinute":6,"replayWeight":3,"listWeight":1,`+
+					`"activeHoursStart":8,"activeHoursEnd":22,"personaProfile":"enterprise",`+
+					`"targetQpmPeak":300,"targetQpmTrough":60,"cohortPct":77,"cohortJitterMs":90},`+
+					`"ttlJitter":{"enable":true,"percent":15}}`))
+			Expect(full.Code).Should(Equal(http.StatusNoContent))
+
+			// a body carrying ONLY the profiling section must not zero the rest
+			part := exec(http.MethodPut, "/api/ui/privacy", []byte(`{"profiling":{"enable":true,"tz":"UTC"}}`))
+			Expect(part.Code).Should(Equal(http.StatusNoContent))
+
+			after := jsonBody(exec(http.MethodGet, "/api/ui/privacy", nil))
+			decoy := after["decoy"].(map[string]any)
+			Expect(decoy).Should(HaveKeyWithValue("enable", true))
+			Expect(decoy).Should(HaveKeyWithValue("queriesPerMinute", BeNumerically("==", 6)))
+			Expect(decoy).Should(HaveKeyWithValue("cohortPct", BeNumerically("==", 77)))
+			Expect(decoy).Should(HaveKeyWithValue("cohortJitterMs", BeNumerically("==", 90)))
+			Expect(after["ttlJitter"]).Should(HaveKeyWithValue("percent", BeNumerically("==", 15)))
+			Expect(after["profiling"]).Should(HaveKeyWithValue("enable", true))
+		})
 	})
 
 	Describe("clients enrichment omitempty", func() {
@@ -335,5 +357,70 @@ var _ = Describe("privacy DTO merge (applyTo)", func() {
 		var j privacyJSON // PersonaProfile == ""
 		out := j.applyTo(config.PrivacyConfig{})
 		Expect(out.Decoy.PersonaProfile).Should(Equal("auto"))
+	})
+})
+
+var _ = Describe("perDeviceGateWindow (shared/NAT gate evidence window)", func() {
+	It("pins `to` to now on a valid-but-stale window instead of scanning zero rows", func() {
+		req := httptest.NewRequest(http.MethodPut,
+			"/api/ui/clients/names/x?from=2001-01-01T00:00:00Z&to=2001-01-02T00:00:00Z", nil)
+
+		from, to := perDeviceGateWindow(req)
+
+		Expect(to).Should(BeTemporally("~", time.Now(), 5*time.Second))
+		// the stale `from` only widens the window — current evidence stays covered
+		Expect(from.Year()).Should(Equal(2001))
+	})
+
+	It("never narrows the window below the default 24h", func() {
+		near := time.Now().Add(-time.Minute).Format(time.RFC3339)
+		req := httptest.NewRequest(http.MethodPut, "/api/ui/clients/names/x?from="+near, nil)
+
+		from, to := perDeviceGateWindow(req)
+
+		Expect(to.Sub(from)).Should(BeNumerically(">=", 24*time.Hour-5*time.Second))
+	})
+
+	It("falls back to the default window on a garbage range", func() {
+		req := httptest.NewRequest(http.MethodPut, "/api/ui/clients/names/x?from=garbage", nil)
+
+		from, to := perDeviceGateWindow(req)
+
+		Expect(to).Should(BeTemporally("~", time.Now(), 5*time.Second))
+		Expect(to.Sub(from)).Should(BeNumerically("~", 24*time.Hour, 5*time.Second))
+	})
+})
+
+var _ = Describe("decodeJSON body cap", func() {
+	It("rejects an oversized body instead of buffering it", func() {
+		big := append([]byte(`{"name":"`), bytes.Repeat([]byte("a"), maxJSONBodyBytes+1024)...)
+		big = append(big, []byte(`"}`)...)
+
+		req := httptest.NewRequest(http.MethodPut, "/x", bytes.NewReader(big))
+
+		var body struct {
+			Name string `json:"name"`
+		}
+		Expect(decodeJSON(httptest.NewRecorder(), req, &body)).ShouldNot(Succeed())
+	})
+
+	It("decodes a normal body", func() {
+		req := httptest.NewRequest(http.MethodPut, "/x", bytes.NewReader([]byte(`{"name":"tv"}`)))
+
+		var body struct {
+			Name string `json:"name"`
+		}
+		Expect(decodeJSON(httptest.NewRecorder(), req, &body)).Should(Succeed())
+		Expect(body.Name).Should(Equal("tv"))
+	})
+})
+
+var _ = Describe("looksLikeFpHash", func() {
+	It("matches the fp_hash shape and nothing hostname-like", func() {
+		Expect(looksLikeFpHash("0123456789abcdef0123")).Should(BeTrue())
+		Expect(looksLikeFpHash("laptop")).Should(BeFalse())
+		Expect(looksLikeFpHash("192.168.1.10")).Should(BeFalse())
+		Expect(looksLikeFpHash("0123456789ABCDEF0123")).Should(BeFalse()) // uppercase: not a hash
+		Expect(looksLikeFpHash("0123456789abcdef012")).Should(BeFalse())  // wrong length
 	})
 })

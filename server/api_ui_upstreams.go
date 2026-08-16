@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -85,7 +84,7 @@ func (u *uiAPI) putUpstreamGroup(rw http.ResponseWriter, req *http.Request) {
 		HopMax   config.Duration `json:"hopMax"`
 	}
 
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+	if err := decodeJSON(rw, req, &body); err != nil {
 		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
 
 		return
@@ -138,7 +137,7 @@ func (u *uiAPI) putUpstreamEntries(rw http.ResponseWriter, req *http.Request) {
 		} `json:"entries"`
 	}
 
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+	if err := decodeJSON(rw, req, &body); err != nil {
 		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
 
 		return
@@ -211,7 +210,7 @@ func (u *uiAPI) putConditional(rw http.ResponseWriter, req *http.Request) {
 		Upstreams []string `json:"upstreams"` // absent/empty = delete the mapping
 	}
 
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+	if err := decodeJSON(rw, req, &body); err != nil {
 		badRequest(rw, err)
 
 		return

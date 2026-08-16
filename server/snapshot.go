@@ -79,13 +79,30 @@ type statsSnapshot struct {
 	noise      *querylog.DecoyOverview
 
 	stop     chan struct{}
+	kick     chan struct{} // invalidate() → immediate refresh (buffered, 1)
 	stopOnce sync.Once
+}
+
+// invalidate drops the published snapshot (so stale data — e.g. a just-purged
+// query log — is never served) and kicks an immediate refresh instead of
+// waiting out the ticker. Handlers fall through to the live reader meanwhile.
+func (snap *statsSnapshot) invalidate() {
+	snap.mu.Lock()
+	snap.ready = false
+	snap.catReady = false
+	snap.personaReady = false
+	snap.mu.Unlock()
+
+	select {
+	case snap.kick <- struct{}{}:
+	default: // refresh already pending
+	}
 }
 
 // newStatsSnapshot starts the single preheat/refresh goroutine. Tie its
 // lifetime to the statsAPI: close() stops it (called from statsAPI.Close).
 func newStatsSnapshot(s *statsAPI) *statsSnapshot {
-	snap := &statsSnapshot{stop: make(chan struct{})}
+	snap := &statsSnapshot{stop: make(chan struct{}), kick: make(chan struct{}, 1)}
 	go snap.run(s)
 
 	return snap
@@ -106,6 +123,8 @@ func (snap *statsSnapshot) run(s *statsAPI) {
 		case <-snap.stop:
 			return
 		case <-t.C:
+			snap.refresh(s)
+		case <-snap.kick:
 			snap.refresh(s)
 		}
 	}

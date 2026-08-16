@@ -298,6 +298,43 @@ var _ = Describe("NSEC validation", func() {
 			result := sut.validateNSECNODATA([]*dns.NSEC{}, "test.example.com.", dns.TypeA)
 			Expect(result).Should(Equal(ValidationResultBogus))
 		})
+
+		Context("wildcard NODATA", func() {
+			// qname m.example.com doesn't exist (covering NSEC a -> z); answer was
+			// synthesized from *.example.com whose NSEC lacks the qtype.
+			coveringNSEC := &dns.NSEC{
+				Hdr:        dns.RR_Header{Name: "a.example.com.", Rrtype: dns.TypeNSEC},
+				NextDomain: "z.example.com.",
+				TypeBitMap: []uint16{dns.TypeA},
+			}
+
+			It("should return Secure when covering NSEC + wildcard NSEC lacks the qtype", func() {
+				wildcardNSEC := &dns.NSEC{
+					Hdr:        dns.RR_Header{Name: "*.example.com.", Rrtype: dns.TypeNSEC},
+					NextDomain: "a.example.com.",
+					TypeBitMap: []uint16{dns.TypeA},
+				}
+
+				result := sut.validateNSECNODATA([]*dns.NSEC{coveringNSEC, wildcardNSEC}, "m.example.com.", dns.TypeAAAA)
+				Expect(result).Should(Equal(ValidationResultSecure))
+			})
+
+			It("should return Bogus when the wildcard NSEC has the qtype in its bitmap", func() {
+				wildcardNSEC := &dns.NSEC{
+					Hdr:        dns.RR_Header{Name: "*.example.com.", Rrtype: dns.TypeNSEC},
+					NextDomain: "a.example.com.",
+					TypeBitMap: []uint16{dns.TypeA, dns.TypeAAAA},
+				}
+
+				result := sut.validateNSECNODATA([]*dns.NSEC{coveringNSEC, wildcardNSEC}, "m.example.com.", dns.TypeAAAA)
+				Expect(result).Should(Equal(ValidationResultBogus))
+			})
+
+			It("should return Bogus when only the covering NSEC is present (no wildcard proof)", func() {
+				result := sut.validateNSECNODATA([]*dns.NSEC{coveringNSEC}, "m.example.com.", dns.TypeAAAA)
+				Expect(result).Should(Equal(ValidationResultBogus))
+			})
+		})
 	})
 
 	Describe("nsecCoversName", func() {

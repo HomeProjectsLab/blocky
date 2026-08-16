@@ -155,6 +155,22 @@ var _ = Describe("Store customDNS zone", func() {
 				Should(Equal(config.UpstreamStrategyRecursive))
 		})
 
+		It("preserves comments and key order of the hand-edited blob (node round-trip)", func() {
+			raw, err := store.RawYAML()
+			Expect(err).Should(Succeed())
+
+			// hand-edited blob: a comment that a map round-trip would flatten away
+			Expect(store.SetRawYAML("# keep me: hand-written note\n" + raw)).Should(Succeed())
+
+			Expect(store.SetLocalDNSZone("a.lan. 3600 IN A 10.0.0.2\n")).Should(Succeed())
+
+			after, err := store.RawYAML()
+			Expect(err).Should(Succeed())
+			Expect(after).Should(ContainSubstring("# keep me: hand-written note"))
+			// key order untouched: ports stays the first key
+			Expect(after).Should(HavePrefix("# keep me: hand-written note\nports:"))
+		})
+
 		It("round-trips a multi-line zone verbatim and is stable across repeated writes", func() {
 			zoneText := "one.lan. 3600 IN A 10.0.0.1\ntwo.lan. 3600 IN A 10.0.0.2\n"
 

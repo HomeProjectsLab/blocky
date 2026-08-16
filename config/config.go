@@ -1067,6 +1067,10 @@ func (cfg *Config) validate(logger *logrus.Entry) error {
 		return err
 	}
 
+	if err := cfg.DNSSEC.validate(); err != nil {
+		return err
+	}
+
 	return cfg.Lists.validate(logger)
 }
 

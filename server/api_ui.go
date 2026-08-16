@@ -47,6 +47,19 @@ type uiAPI struct {
 // OOM the resolver on the 1GB Pi.
 const maxRawConfigBytes = 1 << 20 // 1 MiB
 
+// maxJSONBodyBytes caps every JSON mutation body decoded via decodeJSON. Real
+// bodies are tiny (a name, a toggle, a small list); loopback is auth-exempt, so
+// an uncapped decode would let a single oversized request OOM the 1GB Pi.
+const maxJSONBodyBytes = 1 << 20 // 1 MiB
+
+// decodeJSON decodes a JSON request body with the shared size cap applied.
+// Every mutation handler must use this instead of a bare json.NewDecoder.
+func decodeJSON(rw http.ResponseWriter, req *http.Request, v any) error {
+	req.Body = http.MaxBytesReader(rw, req.Body, maxJSONBodyBytes)
+
+	return json.NewDecoder(req.Body).Decode(v)
+}
+
 func writeJSON(rw http.ResponseWriter, status int, body any) {
 	rw.Header().Set(contentTypeHeader, jsonContentType)
 	rw.WriteHeader(status)

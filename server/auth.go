@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,12 +128,16 @@ func isLoopback(remoteAddr string) bool {
 
 // isPublic lists paths the gate never protects: the login page and its assets,
 // the auth endpoints themselves, the DoH resolver path and the metrics scrape.
-func isPublic(path, dohPath string) bool {
+// metricsPath is the CONFIGURED scrape path (empty when metrics are disabled):
+// a literal "/metrics" here would stay open after the handler moved to a custom
+// path while the real scrape path got gated, breaking off-box Prometheus.
+func isPublic(path, dohPath, metricsPath string) bool {
 	switch {
 	case path == "/login",
 		strings.HasPrefix(path, "/static/"),
-		strings.HasPrefix(path, "/api/ui/auth/"),
-		path == "/metrics":
+		strings.HasPrefix(path, "/api/ui/auth/"):
+		return true
+	case metricsPath != "" && path == metricsPath:
 		return true
 	case dohPath != "" && (path == dohPath || strings.HasPrefix(path, dohPath+"/")):
 		return true
@@ -154,12 +159,47 @@ func legacyMutatingAPI(path string) bool {
 	return false
 }
 
+// isMutatingRequest reports whether serving this request changes server state:
+// any non-safe method, plus the legacy control routes that mutate on GET.
+func isMutatingRequest(r *http.Request) bool {
+	if legacyMutatingAPI(r.URL.Path) {
+		return true
+	}
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+
+	return true
+}
+
+// sameOrigin reports whether the browser-declared request source (Origin, or
+// Referer as fallback) targets the host the request was sent to. No source
+// header fails closed: browsers send Origin on every non-GET and Referer on
+// top-level navigations, so a mutating request carrying a session cookie but
+// no source header is exactly the CSRF shape.
+func sameOrigin(r *http.Request) bool {
+	src := r.Header.Get("Origin")
+	if src == "" {
+		src = r.Header.Get("Referer")
+	}
+
+	if src == "" {
+		return false
+	}
+
+	u, err := url.Parse(src)
+
+	return err == nil && u.Host == r.Host
+}
+
 // newSessionGate protects the web UI (the SPA page routes and /api/ui/*) and
 // the legacy mutating /api control routes. The read-only legacy routes are left
 // ungated on purpose: Grafana and friends call them cross-origin and cookieless
 // (see newCORSMiddleware). store nil makes the gate a no-op (tests /
 // YAML-import mode).
-func newSessionGate(store *configstore.Store, dohPath string) httpMiddleware {
+func newSessionGate(store *configstore.Store, dohPath, metricsPath string) httpMiddleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// The tty dashboard client polls the API from localhost with no
@@ -175,7 +215,7 @@ func newSessionGate(store *configstore.Store, dohPath string) httpMiddleware {
 
 			path := r.URL.Path
 
-			if isPublic(path, dohPath) {
+			if isPublic(path, dohPath, metricsPath) {
 				next.ServeHTTP(w, r)
 
 				return
@@ -209,6 +249,22 @@ func newSessionGate(store *configstore.Store, dohPath string) httpMiddleware {
 
 			if c, err := r.Cookie(sessionCookie); err == nil {
 				if ok, exp := verifySession(secret, c.Value); ok {
+					// CSRF guard: a SameSite=Lax cookie still rides on
+					// top-level cross-site GET navigations, and the legacy
+					// control routes mutate on GET — so a link to
+					// /api/blocking/disable would disable blocking with the
+					// victim's cookie. Mutations must prove a same-origin
+					// source.
+					if isMutatingRequest(r) && !sameOrigin(r) {
+						authLog().WithField("client_ip", util.Obfuscate(requestIP(r))).
+							WithField("path", path).
+							Warn("cross-origin mutation rejected (CSRF guard)")
+						writeJSON(w, http.StatusForbidden,
+							map[string]string{"error": "cross-origin request rejected"})
+
+						return
+					}
+
 					if time.Until(time.Unix(exp, 0)) < sessionRefresh {
 						setSessionCookie(w, r, secret)
 					}

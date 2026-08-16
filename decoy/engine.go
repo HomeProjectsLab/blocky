@@ -1068,36 +1068,44 @@ func (e *Engine) reviseOrNext() decoyQuery {
 
 // dueDomain returns a tracked domain whose learned revisit interval has elapsed
 // (rescheduling it), or "" if none is due. Cheap linear scan of a bounded map.
+// The due entry is provisionally pushed forward UNDER the lock so concurrent
+// workers can't double-pick it, then rescheduled off-lock (scheduleRevisit does
+// a DB read that must not serialize the emit workers on dueMu).
 func (e *Engine) dueDomain() string {
+	now := e.now()
+
+	var due string
+
+	e.dueMu.Lock()
+	for d, t := range e.dueMap {
+		if !now.Before(t) {
+			due = d
+			e.dueMap[d] = now.Add(time.Minute) // placeholder until the real reschedule lands
+
+			break
+		}
+	}
+	e.dueMu.Unlock()
+
+	if due != "" {
+		e.scheduleRevisit(due)
+	}
+
+	return due
+}
+
+// scheduleRevisit sets domain's next-due time from its learned revisit interval
+// (± jitter). A domain with no learned cadence is not tracked (dropped), so it
+// just keeps flowing through random picks. Evicts an arbitrary entry when the
+// map is at cap. RevisitInterval is a windowed DB scan — computed BEFORE taking
+// dueMu, so a slow read can't stall every emit worker behind the map lock.
+func (e *Engine) scheduleRevisit(domain string) {
+	iv, ok := e.source.RevisitInterval(domain) // DB read: keep outside dueMu
 	now := e.now()
 
 	e.dueMu.Lock()
 	defer e.dueMu.Unlock()
 
-	for d, due := range e.dueMap {
-		if !now.Before(due) {
-			e.scheduleRevisitLocked(d, now)
-
-			return d
-		}
-	}
-
-	return ""
-}
-
-func (e *Engine) scheduleRevisit(domain string) {
-	e.dueMu.Lock()
-	defer e.dueMu.Unlock()
-
-	e.scheduleRevisitLocked(domain, e.now())
-}
-
-// scheduleRevisitLocked sets domain's next-due time from its learned revisit
-// interval (± jitter). A domain with no learned cadence is not tracked (dropped),
-// so it just keeps flowing through random picks. Evicts an arbitrary entry when
-// the map is at cap.
-func (e *Engine) scheduleRevisitLocked(domain string, now time.Time) {
-	iv, ok := e.source.RevisitInterval(domain)
 	if !ok {
 		delete(e.dueMap, domain)
 
@@ -1179,7 +1187,9 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 
 	// T5 shadow-TTL: don't re-egress the same (name,qtype) faster than its own
 	// cached TTL — otherwise "same name reappears before its TTL" is a decoy tell.
-	key := q.name + "/" + dns.Type(q.qtype).String()
+	// Lowercased: 0x20 replay mutation runs before resolveOne, so a case-mutated
+	// replay of the same name must hit the same suppression entry.
+	key := strings.ToLower(q.name) + "/" + dns.Type(q.qtype).String()
 	if e.ttlSuppressed(key) {
 		return
 	}

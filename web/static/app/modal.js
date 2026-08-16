@@ -127,7 +127,9 @@ export function confirmDialog(message, opts = {}) {
             okBtn.addEventListener("click", submit);
             actions.append(cancelBtn, okBtn);
             dialog.append(actions);
-            return { focusEl: okBtn, cancel, submit };
+            // danger: focus Cancel so a (possibly carried-over) Enter never
+            // fires the destructive path by default.
+            return { focusEl: danger ? cancelBtn : okBtn, cancel, submit };
         },
     });
 }

@@ -165,6 +165,7 @@ pauseBtn.addEventListener("click", () => setPaused(!paused));
 clearBtn.addEventListener("click", () => {
     pre.textContent = "";
     buffer.length = 0;
+    emptyMsg.textContent = "Waiting for log lines…"; // don't re-show a stale error
     emptyMsg.hidden = false;
 });
 

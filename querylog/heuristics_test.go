@@ -31,7 +31,9 @@ func openHeuristicsDB(t *testing.T) *gorm.DB {
 		t.Cleanup(func() { _ = sqlDB.Close() })
 	}
 
-	if err := db.AutoMigrate(heuristicsTables...); err != nil {
+	// clientClass rides along: the scorer projects into (and eviction bounds)
+	// client_class next to the fp-keyed tables.
+	if err := db.AutoMigrate(append(heuristicsTables, &clientClass{})...); err != nil {
 		t.Fatal(err)
 	}
 

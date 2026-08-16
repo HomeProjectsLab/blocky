@@ -66,4 +66,46 @@ var _ = Describe("Household groups", func() {
 		Expect(err).Should(Succeed())
 		Expect(cfg.Blocking.ClientGroupsBlock["kids-tablet"]).ShouldNot(ContainElement("kids"))
 	})
+
+	It("rejects reserved group names", func() {
+		Expect(store.SaveGroup("manual", nil)).Should(MatchError(ContainSubstring("reserved")))
+		Expect(store.SaveGroup("adlists", nil)).Should(MatchError(ContainSubstring("reserved")))
+		// category names are reserved too (a group "ads" would merge into the category)
+		Expect(store.SaveGroup("ads", nil)).Should(MatchError(ContainSubstring("reserved")))
+	})
+
+	It("deletes group-scoped manual entries with the group (no global orphan promotion)", func() {
+		Expect(store.SaveGroup("kids", []string{"porn"})).Should(Succeed())
+		_, err := store.AddAllowEntry("kids", "ok.example.com", "")
+		Expect(err).Should(Succeed())
+		_, err = store.AddDenyEntry("kids", "bad.example.com", "")
+		Expect(err).Should(Succeed())
+
+		Expect(store.DeleteGroup("kids")).Should(Succeed())
+
+		allows, err := store.ListAllowEntries()
+		Expect(err).Should(Succeed())
+		Expect(allows).Should(BeEmpty())
+
+		denies, err := store.ListDenyEntries()
+		Expect(err).Should(Succeed())
+		Expect(denies).Should(BeEmpty())
+
+		// the orphaned name must NOT survive as a global manual group
+		cfg, err := store.LoadConfig()
+		Expect(err).Should(Succeed())
+		Expect(cfg.Blocking.Allowlists).ShouldNot(HaveKey("kids"))
+		Expect(cfg.Blocking.ClientGroupsBlock["default"]).ShouldNot(ContainElement("kids"))
+	})
+
+	It("refuses to delete a name that is not a group, leaving manual entries intact", func() {
+		_, err := store.AddDenyEntry("manual", "bad.example.com", "")
+		Expect(err).Should(Succeed())
+
+		Expect(store.DeleteGroup("manual")).Should(MatchError(ContainSubstring("unknown group")))
+
+		denies, err := store.ListDenyEntries()
+		Expect(err).Should(Succeed())
+		Expect(denies).Should(HaveLen(1))
+	})
 })

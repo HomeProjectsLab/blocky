@@ -30,6 +30,14 @@ var (
 const (
 	shutdownTimeout = 10 * time.Second
 	errChanSize     = 10
+
+	// bindGracePeriod is how long a freshly-started server may report an async
+	// listener bind error (DNS ListenAndServe binds in a goroutine) before the
+	// config is promoted to lastGood and marked applied. Bind failures
+	// (EADDRINUSE, EACCES) surface immediately, well within this window.
+	// ponytail: a grace window, not a positive listeners-up signal; wire
+	// dns.Server.NotifyStartedFunc through server.Start if a slow bind ever slips past.
+	bindGracePeriod = 500 * time.Millisecond
 )
 
 func newServeCommand() *cobra.Command {
@@ -139,6 +147,8 @@ func runSupervisor(store *configstore.Store) error {
 		return fmt.Errorf("unable to load configuration: %w", err)
 	}
 
+	cfgLoadedAt := time.Now()
+
 	lastGood := cfg
 	rolledBack := false // cfg is lastGood, not the (broken) stored config
 
@@ -170,15 +180,37 @@ func runSupervisor(store *configstore.Store) error {
 			continue
 		}
 
-		lastGood = cfg
-
 		errChan := make(chan error, errChanSize)
 		srv.Start(serverCtx, errChan)
+
+		// DNS listeners bind asynchronously inside Start; don't promote cfg to
+		// lastGood (or mark it applied) until the bind grace period passes, or a
+		// config whose ports can't bind would be recorded clean with no rollback
+		// → systemd crash-loop on a broken config.
+		select {
+		case err := <-errChan:
+			shutdown()
+			stopServerGracefully(srv)
+
+			if cfg == lastGood {
+				return fmt.Errorf("can't start server: %w", err)
+			}
+
+			slog.WithField("error", err.Error()).
+				Warn("listener bind failed for new config, rolling back to last applied config")
+			cfg = lastGood
+			rolledBack = true
+
+			continue
+		case <-time.After(bindGracePeriod):
+		}
+
+		lastGood = cfg
 
 		// after a rollback the STORED config is still the broken one that never
 		// built — marking it applied would report it clean and brick the next boot
 		if !rolledBack {
-			store.MarkApplied()
+			markAppliedIfUnchanged(store, cfgLoadedAt)
 		}
 
 		rolledBack = false
@@ -186,6 +218,9 @@ func runSupervisor(store *configstore.Store) error {
 		slog.Info("server started, listeners bound")
 
 		restartCfg, err := serve(store, srv, serverCtx, &lastGood, errChan)
+		// restartCfg (if any) was loaded inside serve just before it returned;
+		// stamp it here, before the potentially slow graceful stop below.
+		cfgLoadedAt = time.Now()
 
 		shutdown()
 		stopServerGracefully(srv)
@@ -228,6 +263,8 @@ func serve(
 		case <-store.ApplyRequested():
 			slog.Info("applying config change")
 
+			loadedAt := time.Now()
+
 			newCfg, err := store.LoadConfig()
 			if err != nil {
 				slog.WithField("error", err.Error()).Warn("stored config is invalid, keeping the running config")
@@ -253,10 +290,27 @@ func serve(
 			}
 
 			*lastGood = newCfg
-			store.MarkApplied()
+			markAppliedIfUnchanged(store, loadedAt)
 			slog.Info("config applied via zero-downtime hot-swap without dropping listeners")
 		}
 	}
+}
+
+// markAppliedIfUnchanged marks the stored config applied unless it was edited
+// after loadedAt (the moment the now-running config was loaded). MarkApplied
+// stamps time.Now(), so marking unconditionally would absorb any edit that
+// landed during the bind grace period or a slow ApplyConfig, silently reporting
+// it clean. Skipping keeps the store dirty — the pending-apply banner shows and
+// the next apply picks the edit up. A Status error also skips (fail closed:
+// stays dirty). ponytail: tiny TOCTOU window between Status and MarkApplied
+// remains; a MarkAppliedAt(loadedAt) in configstore would close it.
+func markAppliedIfUnchanged(store *configstore.Store, loadedAt time.Time) {
+	_, _, updatedAt, err := store.Status()
+	if err != nil || updatedAt.After(loadedAt) {
+		return
+	}
+
+	store.MarkApplied()
 }
 
 // stopServerGracefully stops srv with the shutdown timeout, logging any error.
