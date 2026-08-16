@@ -46,7 +46,7 @@ var _ = Describe("Store customDNS zone", func() {
 
 		It("returns empty string when the stored blob is empty", func() {
 			// inject an empty blob directly (bypasses validation)
-			Expect(store.db.Model(&configBlob{}).Where("id = 1").
+			Expect(store.conn().Model(&configBlob{}).Where("id = 1").
 				Update("yaml", "").Error).Should(Succeed())
 
 			zone, err := store.GetLocalDNSZone()
@@ -86,7 +86,7 @@ var _ = Describe("Store customDNS zone", func() {
 		})
 
 		It("errors on a malformed stored blob", func() {
-			Expect(store.db.Model(&configBlob{}).Where("id = 1").
+			Expect(store.conn().Model(&configBlob{}).Where("id = 1").
 				Update("yaml", "customDNS: [unterminated").Error).Should(Succeed())
 
 			_, err := store.GetLocalDNSZone()
@@ -182,7 +182,7 @@ var _ = Describe("Store customDNS zone", func() {
 		})
 
 		It("errors on a malformed stored blob and writes nothing", func() {
-			Expect(store.db.Model(&configBlob{}).Where("id = 1").
+			Expect(store.conn().Model(&configBlob{}).Where("id = 1").
 				Update("yaml", "customDNS: [unterminated").Error).Should(Succeed())
 
 			err := store.SetLocalDNSZone("x.lan. 3600 IN A 10.0.0.8\n")

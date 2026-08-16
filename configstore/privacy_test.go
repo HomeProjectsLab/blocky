@@ -147,7 +147,7 @@ var _ = Describe("Store privacy", func() {
 	})
 
 	It("errors from GetPrivacy on a malformed stored blob", func() {
-		Expect(store.db.Model(&configBlob{}).Where("id = 1").
+		Expect(store.conn().Model(&configBlob{}).Where("id = 1").
 			Update("yaml", "privacy: [unterminated").Error).Should(Succeed())
 
 		_, err := store.GetPrivacy()
@@ -155,7 +155,7 @@ var _ = Describe("Store privacy", func() {
 	})
 
 	It("errors from SetPrivacy on a malformed stored blob without writing", func() {
-		Expect(store.db.Model(&configBlob{}).Where("id = 1").
+		Expect(store.conn().Model(&configBlob{}).Where("id = 1").
 			Update("yaml", "privacy: [unterminated").Error).Should(Succeed())
 
 		p := config.PrivacyConfig{}

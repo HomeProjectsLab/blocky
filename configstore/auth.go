@@ -43,7 +43,7 @@ const (
 func (s *Store) authRow() (*authSettings, error) {
 	var a authSettings
 
-	err := s.db.First(&a, 1).Error
+	err := s.conn().First(&a, 1).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return &authSettings{ID: 1}, nil
 	}
@@ -59,7 +59,7 @@ func (s *Store) authRow() (*authSettings, error) {
 // via authRow so untouched fields (e.g. SessionSecret) are preserved.
 func (s *Store) saveAuthRow(a *authSettings) error {
 	a.ID = 1
-	if err := s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(a).Error; err != nil {
+	if err := s.conn().Clauses(clause.OnConflict{UpdateAll: true}).Create(a).Error; err != nil {
 		return fmt.Errorf("can't persist auth settings: %w", err)
 	}
 

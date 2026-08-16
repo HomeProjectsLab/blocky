@@ -120,16 +120,21 @@ func whenClause(match, then string) string {
 // the highest-confidence guess; the caller strips the 'N|' prefix in Go.
 // Rules are emitted high-conf first so the first CASE hit within a row is also
 // the strongest for that row.
-func osCaseSQL() string {
+func osCaseSQL() string { return "MAX(" + osCaseExpr() + ")" }
+
+// osCaseExpr is the bare "CASE … END" without the MAX wrapper, so it can be
+// evaluated once per distinct (client_name, question_name) in a subquery and
+// MAX'd in the outer query (enrichClients) instead of MAX(CASE) per raw row.
+func osCaseExpr() string {
 	var b strings.Builder
 
-	b.WriteString("MAX(CASE")
+	b.WriteString("CASE")
 
 	for _, r := range sortedByConf(facetRules("os", confLow)) {
 		b.WriteString(whenClause(r.match, fmt.Sprintf("%d|%s", r.conf, r.label)))
 	}
 
-	b.WriteString(" END)")
+	b.WriteString(" END")
 
 	return b.String()
 }
@@ -140,15 +145,21 @@ func osCaseSQL() string {
 // and must never auto-surface as a chip (blueprint R4). Default ',' separator
 // (sqlite forbids a custom separator with DISTINCT); labels carry no commas.
 func facetConcatSQL(facet string) string {
+	return "GROUP_CONCAT(DISTINCT " + facetCaseExpr(facet) + ")"
+}
+
+// facetCaseExpr is the bare "CASE … END" for one multi-valued facet, without the
+// GROUP_CONCAT wrapper (see osCaseExpr).
+func facetCaseExpr(facet string) string {
 	var b strings.Builder
 
-	b.WriteString("GROUP_CONCAT(DISTINCT CASE")
+	b.WriteString("CASE")
 
 	for _, r := range facetRules(facet, confMed) {
 		b.WriteString(whenClause(r.match, r.label))
 	}
 
-	b.WriteString(" END)")
+	b.WriteString(" END")
 
 	return b.String()
 }
@@ -229,6 +240,11 @@ func stripConfPrefix(s string) string {
 	return s
 }
 
+// splitCSV splits a GROUP_CONCAT result into a trimmed, non-empty, sorted set.
+// Sorting makes the facet/IP lists deterministic: GROUP_CONCAT emits in scan
+// order, which the enrichClients per-distinct rewrite changes, and DeviceGuess
+// (first app when no OS) would otherwise flip on an incidental reorder. The
+// values are a set, so a stable sort loses nothing.
 func splitCSV(s string) []string {
 	var out []string
 
@@ -237,6 +253,8 @@ func splitCSV(s string) []string {
 			out = append(out, v)
 		}
 	}
+
+	sort.Strings(out)
 
 	return out
 }
@@ -275,9 +293,36 @@ func enrichSelectCols() string {
 func (r *Reader) enrichClients(from, to time.Time) (map[string]clientEnrich, error) {
 	var rows []clientEnrichRow
 
-	err := r.db.Raw(`SELECT client_name AS name, `+enrichSelectCols()+`
-		FROM log_entries WHERE request_ts >= ? AND request_ts <= ? AND decoy = 0
-		GROUP BY client_name`, from, to).Scan(&rows).Error
+	// The facet CASE (~40 LIKE patterns × 4 facets) depends ONLY on question_name,
+	// so evaluating it per raw row inside GROUP BY client_name is wasted work — on a
+	// bloated window that is tens of millions of LIKE ops (311ms on the 322k backup).
+	// Instead evaluate it once per distinct (client_name, question_name) in a
+	// subquery, then MAX / GROUP_CONCAT(DISTINCT) the results per client (173ms).
+	// ips / fp_count still aggregate over ALL rows (distinct IPs / fingerprints need
+	// every row), so they come from a separate per-client aggregate joined on
+	// client_name. Verified byte-identical output vs the per-row form.
+	err := r.db.Raw(`SELECT d.client_name AS name, a.ips AS ips, a.fp_count AS fp_count,
+			MAX(d.os_c) AS os_guess,
+			GROUP_CONCAT(DISTINCT d.vendor_c) AS vendor_guess,
+			GROUP_CONCAT(DISTINCT d.model_c) AS model_guess,
+			GROUP_CONCAT(DISTINCT d.app_c) AS app_guess
+		FROM (
+			SELECT client_name,
+				`+osCaseExpr()+` AS os_c,
+				`+facetCaseExpr("vendor")+` AS vendor_c,
+				`+facetCaseExpr("model")+` AS model_c,
+				`+facetCaseExpr("app")+` AS app_c
+			FROM log_entries WHERE request_ts >= ? AND request_ts <= ? AND decoy = 0
+			GROUP BY client_name, question_name
+		) d
+		JOIN (
+			SELECT client_name,
+				GROUP_CONCAT(DISTINCT client_ip) AS ips,
+				COUNT(DISTINCT NULLIF(fp_hash,'')) AS fp_count
+			FROM log_entries WHERE request_ts >= ? AND request_ts <= ? AND decoy = 0
+			GROUP BY client_name
+		) a ON a.client_name = d.client_name
+		GROUP BY d.client_name`, from, to, from, to).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -294,8 +339,12 @@ func (r *Reader) enrichClients(from, to time.Time) (map[string]clientEnrich, err
 func (r *Reader) enrichClient(name string, from, to time.Time) (clientEnrich, error) {
 	var row clientEnrichRow
 
+	// INDEXED BY: forces the client-prefix index; without it the planner rides
+	// idx_decoy_request_ts and scans the whole decoy=0 partition (see enrichClients
+	// / ClientDetail.topDomains). Verified identical results, ~30ms→~0ms per client.
 	err := r.db.Raw(`SELECT client_name AS name, `+enrichSelectCols()+`
-		FROM log_entries WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
+		FROM log_entries INDEXED BY idx_client_name_request_ts
+		WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
 		name, from, to).Scan(&row).Error
 	if err != nil {
 		return clientEnrich{}, err
@@ -371,8 +420,10 @@ func (r *Reader) ClientCategories(name string, from, to time.Time) ([]string, er
 		Cats string `gorm:"column:cats"`
 	}
 
+	// INDEXED BY: same wrong-index trap as enrichClient — pin the client-prefix index.
 	err := r.db.Raw(`SELECT GROUP_CONCAT(DISTINCT `+categoryCaseSQL("question_name", catRulesHost)+`) AS cats
-		FROM log_entries WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
+		FROM log_entries INDEXED BY idx_client_name_request_ts
+		WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
 		name, from, to).Scan(&row).Error
 	if err != nil {
 		return nil, err

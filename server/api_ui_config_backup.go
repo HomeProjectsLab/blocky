@@ -14,6 +14,10 @@ import (
 // sqliteMagic is the fixed 16-byte header of every SQLite database file.
 const sqliteMagic = "SQLite format 3\x00"
 
+// maxImportBytes caps an uploaded config.db restore. Real backups are KBs; the
+// ceiling only exists to stop a hostile/accidental huge upload from OOMing the Pi.
+const maxImportBytes = 64 << 20 // 64 MiB
+
 // exportConfig streams a fresh, consistent snapshot of the whole config.db.
 // The entire file is sent (not RawYAML) because LoadConfig overlays the
 // upstream and blocking tables onto the YAML blob — the YAML alone is partial.
@@ -69,7 +73,14 @@ func (u *uiAPI) importConfig(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	tmp, err := os.MkdirTemp("", "blocky-import")
+	// bound the upload: a config.db backup is KBs, but an unbounded io.Copy to
+	// tmpfs OOMs the 1GB Pi (same failure class as the VACUUM incident).
+	req.Body = http.MaxBytesReader(rw, req.Body, maxImportBytes)
+
+	// temp dir on the SAME filesystem as config.db: RestoreDB does an os.Rename
+	// of the upload onto the live DB path (USB-SSD), which is EXDEV — and fails —
+	// if the upload sits on tmpfs.
+	tmp, err := os.MkdirTemp(filepath.Dir(u.store.DBPath()), "blocky-import")
 	if err != nil {
 		writeJSON(rw, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 

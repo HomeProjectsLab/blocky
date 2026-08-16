@@ -132,35 +132,35 @@ func (b *blockingRows) active() bool { return len(b.cats) > 0 }
 func (s *Store) loadBlockingRows() (*blockingRows, error) {
 	var b blockingRows
 
-	if err := s.db.Order("name").Find(&b.cats).Error; err != nil {
+	if err := s.conn().Order("name").Find(&b.cats).Error; err != nil {
 		return nil, fmt.Errorf("can't read blocking categories: %w", err)
 	}
 
-	if err := s.db.Order("client, category").Find(&b.segs).Error; err != nil {
+	if err := s.conn().Order("client, category").Find(&b.segs).Error; err != nil {
 		return nil, fmt.Errorf("can't read blocking segments: %w", err)
 	}
 
-	if err := s.db.Order("id").Find(&b.allows).Error; err != nil {
+	if err := s.conn().Order("id").Find(&b.allows).Error; err != nil {
 		return nil, fmt.Errorf("can't read allowlist entries: %w", err)
 	}
 
-	if err := s.db.Order("id").Find(&b.denies).Error; err != nil {
+	if err := s.conn().Order("id").Find(&b.denies).Error; err != nil {
 		return nil, fmt.Errorf("can't read denylist entries: %w", err)
 	}
 
-	if err := s.db.Order("id").Find(&b.adlists).Error; err != nil {
+	if err := s.conn().Order("id").Find(&b.adlists).Error; err != nil {
 		return nil, fmt.Errorf("can't read adlist entries: %w", err)
 	}
 
-	if err := s.db.Order("name").Find(&b.groups).Error; err != nil {
+	if err := s.conn().Order("name").Find(&b.groups).Error; err != nil {
 		return nil, fmt.Errorf("can't read blocking groups: %w", err)
 	}
 
-	if err := s.db.Order("group_name, category").Find(&b.groupCats).Error; err != nil {
+	if err := s.conn().Order("group_name, category").Find(&b.groupCats).Error; err != nil {
 		return nil, fmt.Errorf("can't read group categories: %w", err)
 	}
 
-	if err := s.db.Order("group_name, client").Find(&b.groupMembers).Error; err != nil {
+	if err := s.conn().Order("group_name, client").Find(&b.groupMembers).Error; err != nil {
 		return nil, fmt.Errorf("can't read group members: %w", err)
 	}
 
@@ -356,7 +356,7 @@ func (s *Store) validateBlockingCandidate(b *blockingRows) error {
 // ListBlockingCategories returns all category rows, ordered by name.
 func (s *Store) ListBlockingCategories() ([]BlockingCategory, error) {
 	var cats []BlockingCategory
-	if err := s.db.Order("name").Find(&cats).Error; err != nil {
+	if err := s.conn().Order("name").Find(&cats).Error; err != nil {
 		return nil, fmt.Errorf("can't read blocking categories: %w", err)
 	}
 
@@ -365,6 +365,9 @@ func (s *Store) ListBlockingCategories() ([]BlockingCategory, error) {
 
 // SetCategoryEnabled toggles one seeded category. Unknown names are rejected.
 func (s *Store) SetCategoryEnabled(name string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	b, err := s.loadBlockingRows()
 	if err != nil {
 		return err
@@ -381,7 +384,7 @@ func (s *Store) SetCategoryEnabled(name string, enabled bool) error {
 		return err
 	}
 
-	res := s.db.Model(&BlockingCategory{}).Where("name = ?", name).Update("enabled", enabled)
+	res := s.conn().Model(&BlockingCategory{}).Where("name = ?", name).Update("enabled", enabled)
 	if res.Error != nil {
 		return fmt.Errorf("can't persist blocking category: %w", res.Error)
 	}
@@ -392,7 +395,7 @@ func (s *Store) SetCategoryEnabled(name string, enabled bool) error {
 // GetClientSegments returns the per-client category assignments.
 func (s *Store) GetClientSegments() (map[string][]string, error) {
 	var segs []BlockingClientSegment
-	if err := s.db.Order("client, category").Find(&segs).Error; err != nil {
+	if err := s.conn().Order("client, category").Find(&segs).Error; err != nil {
 		return nil, fmt.Errorf("can't read blocking segments: %w", err)
 	}
 
@@ -412,6 +415,9 @@ func (s *Store) SetClientSegment(client string, categories []string) error {
 	if client == "" {
 		return errors.New("client identifier is required")
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	b, err := s.loadBlockingRows()
 	if err != nil {
@@ -433,7 +439,7 @@ func (s *Store) SetClientSegment(client string, categories []string) error {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("client = ?", client).Delete(&BlockingClientSegment{}).Error; err != nil {
 			return fmt.Errorf("can't clear blocking segment: %w", err)
 		}
@@ -451,7 +457,7 @@ func (s *Store) SetClientSegment(client string, categories []string) error {
 // ListAllowEntries returns all manual allow entries, oldest first.
 func (s *Store) ListAllowEntries() ([]AllowlistEntry, error) {
 	var out []AllowlistEntry
-	if err := s.db.Order("id").Find(&out).Error; err != nil {
+	if err := s.conn().Order("id").Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("can't read allowlist entries: %w", err)
 	}
 
@@ -461,7 +467,7 @@ func (s *Store) ListAllowEntries() ([]AllowlistEntry, error) {
 // ListDenyEntries returns all manual deny entries, oldest first.
 func (s *Store) ListDenyEntries() ([]DenylistEntry, error) {
 	var out []DenylistEntry
-	if err := s.db.Order("id").Find(&out).Error; err != nil {
+	if err := s.conn().Order("id").Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("can't read denylist entries: %w", err)
 	}
 
@@ -491,7 +497,7 @@ func (s *Store) AddAllowEntry(group, domain, comment string) (uint, error) {
 	}
 
 	e := AllowlistEntry{GroupName: group, Domain: domain, Enabled: true, Comment: comment}
-	if err := s.db.Create(&e).Error; err != nil {
+	if err := s.conn().Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist allowlist entry: %w", err)
 	}
 
@@ -510,7 +516,7 @@ func (s *Store) AddDenyEntry(group, domain, comment string) (uint, error) {
 	}
 
 	e := DenylistEntry{GroupName: group, Domain: domain, Enabled: true, Comment: comment}
-	if err := s.db.Create(&e).Error; err != nil {
+	if err := s.conn().Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist denylist entry: %w", err)
 	}
 
@@ -519,7 +525,7 @@ func (s *Store) AddDenyEntry(group, domain, comment string) (uint, error) {
 
 // SetAllowEntry updates one manual allow entry's enabled flag and comment.
 func (s *Store) SetAllowEntry(id uint, enabled bool, comment string) error {
-	res := s.db.Model(&AllowlistEntry{}).Where("id = ?", id).
+	res := s.conn().Model(&AllowlistEntry{}).Where("id = ?", id).
 		Updates(map[string]any{"enabled": enabled, "comment": comment})
 	if res.Error != nil {
 		return fmt.Errorf("can't persist allowlist entry: %w", res.Error)
@@ -530,7 +536,7 @@ func (s *Store) SetAllowEntry(id uint, enabled bool, comment string) error {
 
 // SetDenyEntry updates one manual deny entry's enabled flag and comment.
 func (s *Store) SetDenyEntry(id uint, enabled bool, comment string) error {
-	res := s.db.Model(&DenylistEntry{}).Where("id = ?", id).
+	res := s.conn().Model(&DenylistEntry{}).Where("id = ?", id).
 		Updates(map[string]any{"enabled": enabled, "comment": comment})
 	if res.Error != nil {
 		return fmt.Errorf("can't persist denylist entry: %w", res.Error)
@@ -541,12 +547,12 @@ func (s *Store) SetDenyEntry(id uint, enabled bool, comment string) error {
 
 // DeleteAllowEntry removes one manual allow entry by id.
 func (s *Store) DeleteAllowEntry(id uint) error {
-	return s.db.Delete(&AllowlistEntry{}, id).Error
+	return s.conn().Delete(&AllowlistEntry{}, id).Error
 }
 
 // DeleteDenyEntry removes one manual deny entry by id.
 func (s *Store) DeleteDenyEntry(id uint) error {
-	return s.db.Delete(&DenylistEntry{}, id).Error
+	return s.conn().Delete(&DenylistEntry{}, id).Error
 }
 
 // --- adlist accessors --------------------------------------------------------
@@ -554,7 +560,7 @@ func (s *Store) DeleteDenyEntry(id uint) error {
 // ListAdlistEntries returns all blocklist URLs, oldest first.
 func (s *Store) ListAdlistEntries() ([]AdlistEntry, error) {
 	var out []AdlistEntry
-	if err := s.db.Order("id").Find(&out).Error; err != nil {
+	if err := s.conn().Order("id").Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("can't read adlist entries: %w", err)
 	}
 
@@ -569,6 +575,9 @@ func (s *Store) AddAdlistEntry(url, comment string) (uint, error) {
 		return 0, fmt.Errorf("invalid adlist URL %q", url)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	b, err := s.loadBlockingRows()
 	if err != nil {
 		return 0, err
@@ -581,7 +590,7 @@ func (s *Store) AddAdlistEntry(url, comment string) (uint, error) {
 		return 0, err
 	}
 
-	if err := s.db.Create(&e).Error; err != nil {
+	if err := s.conn().Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist adlist entry: %w", err)
 	}
 
@@ -609,6 +618,9 @@ func (s *Store) UpdateAdlistEntry(id uint, url, comment string) error {
 // updateAdlist applies mutate to the in-memory row, validates the resulting
 // config, then persists cols for the given id.
 func (s *Store) updateAdlist(id uint, cols map[string]any, mutate func(*AdlistEntry)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	b, err := s.loadBlockingRows()
 	if err != nil {
 		return err
@@ -625,7 +637,7 @@ func (s *Store) updateAdlist(id uint, cols map[string]any, mutate func(*AdlistEn
 		return err
 	}
 
-	if err := s.db.Model(&AdlistEntry{}).Where("id = ?", id).Updates(cols).Error; err != nil {
+	if err := s.conn().Model(&AdlistEntry{}).Where("id = ?", id).Updates(cols).Error; err != nil {
 		return fmt.Errorf("can't persist adlist entry: %w", err)
 	}
 
@@ -634,5 +646,5 @@ func (s *Store) updateAdlist(id uint, cols map[string]any, mutate func(*AdlistEn
 
 // DeleteAdlistEntry removes one blocklist URL by id.
 func (s *Store) DeleteAdlistEntry(id uint) error {
-	return s.db.Delete(&AdlistEntry{}, id).Error
+	return s.conn().Delete(&AdlistEntry{}, id).Error
 }

@@ -1437,10 +1437,12 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 
 	// A random real row FOR THIS ONE CLIENT: a rowid seek would jump across
 	// clients, so instead count this client's matching rows and take a random
-	// offset — both ride idx_client_name_request_ts (client_name prefix), no scan.
+	// offset. INDEXED BY pins idx_client_name_request_ts: without it the planner
+	// rides idx_decoy_request_ts (decoy=0 prefix) and scans the whole decoy=0
+	// partition per emit (~30ms Pi3), instead of seeking the client's rows (~0ms).
 	var cnt int64
 
-	err = s.ro.Raw(`SELECT COUNT(*) FROM log_entries
+	err = s.ro.Raw(`SELECT COUNT(*) FROM log_entries INDEXED BY idx_client_name_request_ts
 		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?`,
 		name, since).Scan(&cnt).Error
 	if err != nil {
@@ -1461,7 +1463,8 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 		ClientIP string `gorm:"column:client_ip"`
 	}
 
-	err = s.ro.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+	err = s.ro.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail
+		FROM log_entries INDEXED BY idx_client_name_request_ts
 		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?
 		ORDER BY request_ts LIMIT 1 OFFSET ?`, name, since, off).Scan(&row).Error
 	if err != nil {

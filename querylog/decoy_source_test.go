@@ -19,9 +19,11 @@ import (
 // realRow mirrors the columns of log_entries that the replay sampler reads, so
 // the test can seed the replay pool without depending on the writer internals.
 type realRow struct {
-	RequestTS     time.Time `gorm:"column:request_ts"`
+	// mirror the composite index too: the client-scoped samplers pin it with
+	// INDEXED BY (a hard requirement, not a hint), so the seed table must carry it.
+	RequestTS     time.Time `gorm:"column:request_ts;index:idx_client_name_request_ts,priority:2"`
 	ClientIP      string    `gorm:"column:client_ip"`
-	ClientName    string    `gorm:"column:client_name"`
+	ClientName    string    `gorm:"column:client_name;index:idx_client_name_request_ts,priority:1"`
 	QuestionName  string    `gorm:"column:question_name"`
 	QuestionType  string    `gorm:"column:question_type"`
 	ResponseType  string    `gorm:"column:response_type"`

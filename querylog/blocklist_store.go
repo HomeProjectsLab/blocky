@@ -193,21 +193,34 @@ func (s *DecoySource) SeedBlocklistIfEmpty(category string, r io.Reader) (int, e
 	return s.ReplaceBlocklist(category, r)
 }
 
-// ReplaceBlocklist atomically repopulates one category: DELETE + bulk insert in
-// a single transaction, so a mid-stream failure rolls back and leaves the old
-// rows intact (never an empty category). Returns rows inserted.
+// ReplaceBlocklist repopulates one category: DELETE + bulk insert, chunked into
+// per-batch transactions so the sole sqlite write lock is released between
+// batches (the query-log flush can interleave). A single 1M-row transaction held
+// the write lock for seconds and starved the flush into SQLITE_BUSY. The old
+// category rows are dropped inside the first batch's transaction. Returns rows
+// inserted.
+//
+// ponytail: this is no longer all-or-nothing across the whole stream — a failure
+// AFTER the first committed batch leaves the category partially populated. It
+// self-heals: the updater bumps the version meta only after Replace succeeds
+// (lists/updater.go), so the next pass re-runs Replace over the partial. A failure
+// before the first batch commits still leaves the old rows intact (never empty).
 func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error) {
 	inserted := 0
+	deleted := false
 
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("DELETE FROM blocklist_domains WHERE category = ?", category).Error; err != nil {
-			return err
+	err := streamInsert(r, func(batch []string) error {
+		rows := make([]blocklistDomain, len(batch))
+		for i, d := range batch {
+			rows[i] = blocklistDomain{Category: category, Domain: d}
 		}
 
-		return streamInsert(r, func(batch []string) error {
-			rows := make([]blocklistDomain, len(batch))
-			for i, d := range batch {
-				rows[i] = blocklistDomain{Category: category, Domain: d}
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if !deleted {
+				if err := tx.Exec("DELETE FROM blocklist_domains WHERE category = ?", category).Error; err != nil {
+					return err
+				}
+				deleted = true
 			}
 
 			// ignore intra-category dup domains (composite PK conflict)
@@ -223,24 +236,40 @@ func (s *DecoySource) ReplaceBlocklist(category string, r io.Reader) (int, error
 		return 0, err
 	}
 
+	// Empty input streamed no batch, so the old rows were never dropped — preserve
+	// the original replace-with-empty semantics.
+	if !deleted {
+		if err := s.db.Exec("DELETE FROM blocklist_domains WHERE category = ?", category).Error; err != nil {
+			return 0, err
+		}
+	}
+
 	return inserted, s.loadBlMaxRowid()
 }
 
-// ReplaceDecoy atomically repopulates the whole decoy_domains table (Tranco
-// refresh): DELETE + bulk insert in one transaction. Rolls back on failure so
-// the old list survives. Returns rows inserted and refreshes maxRowid.
+// ReplaceDecoy repopulates the whole decoy_domains table (Tranco refresh): DELETE
+// + bulk insert, chunked into per-batch transactions so the sole sqlite write lock
+// is released between batches instead of held for the whole 1M-row load (see
+// ReplaceBlocklist for the contention rationale and the self-healing ponytail
+// ceiling). The old rows are dropped inside the first batch's transaction, so a
+// failure before it commits leaves the previous list intact. Returns rows inserted
+// and refreshes maxRowid.
 func (s *DecoySource) ReplaceDecoy(r io.Reader) (int, error) {
 	inserted := 0
+	deleted := false
 
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("DELETE FROM decoy_domains").Error; err != nil {
-			return err
+	err := streamInsert(r, func(batch []string) error {
+		rows := make([]decoyDomain, len(batch))
+		for i, d := range batch {
+			rows[i] = decoyDomain{Domain: d}
 		}
 
-		return streamInsert(r, func(batch []string) error {
-			rows := make([]decoyDomain, len(batch))
-			for i, d := range batch {
-				rows[i] = decoyDomain{Domain: d}
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if !deleted {
+				if err := tx.Exec("DELETE FROM decoy_domains").Error; err != nil {
+					return err
+				}
+				deleted = true
 			}
 
 			if err := tx.Create(&rows).Error; err != nil {
@@ -253,6 +282,12 @@ func (s *DecoySource) ReplaceDecoy(r io.Reader) (int, error) {
 	})
 	if err != nil {
 		return 0, err
+	}
+
+	if !deleted {
+		if err := s.db.Exec("DELETE FROM decoy_domains").Error; err != nil {
+			return 0, err
+		}
 	}
 
 	if err := s.loadMaxRowid(); err != nil {

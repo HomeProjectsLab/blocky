@@ -43,12 +43,12 @@ func (UpstreamEntry) TableName() string { return "upstream_entry" }
 // entries (ordered by position) keyed by group name.
 func (s *Store) ListUpstreamGroups() ([]UpstreamGroup, map[string][]UpstreamEntry, error) {
 	var groups []UpstreamGroup
-	if err := s.db.Order("name").Find(&groups).Error; err != nil {
+	if err := s.conn().Order("name").Find(&groups).Error; err != nil {
 		return nil, nil, fmt.Errorf("can't read upstream groups: %w", err)
 	}
 
 	var entries []UpstreamEntry
-	if err := s.db.Order("group_name, position, id").Find(&entries).Error; err != nil {
+	if err := s.conn().Order("group_name, position, id").Find(&entries).Error; err != nil {
 		return nil, nil, fmt.Errorf("can't read upstream entries: %w", err)
 	}
 
@@ -66,6 +66,9 @@ func (s *Store) PutUpstreamGroup(g UpstreamGroup) error {
 	if g.Name == "" {
 		return errors.New("upstream group name is required")
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	groups, entries, err := s.ListUpstreamGroups()
 	if err != nil {
@@ -89,7 +92,7 @@ func (s *Store) PutUpstreamGroup(g UpstreamGroup) error {
 		return err
 	}
 
-	if err := s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&g).Error; err != nil {
+	if err := s.conn().Clauses(clause.OnConflict{UpdateAll: true}).Create(&g).Error; err != nil {
 		return fmt.Errorf("can't persist upstream group: %w", err)
 	}
 
@@ -103,7 +106,7 @@ func (s *Store) DeleteUpstreamGroup(name string) error {
 		return errors.New("the default upstream group can't be deleted")
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("group_name = ?", name).Delete(&UpstreamEntry{}).Error; err != nil {
 			return fmt.Errorf("can't delete upstream entries: %w", err)
 		}
@@ -120,6 +123,9 @@ func (s *Store) DeleteUpstreamGroup(name string) error {
 // Positions are normalized to the given order; IDs are reassigned. The whole
 // candidate config is validated before anything is written.
 func (s *Store) SetUpstreamEntries(group string, entries []UpstreamEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	groups, byGroup, err := s.ListUpstreamGroups()
 	if err != nil {
 		return err
@@ -156,7 +162,7 @@ func (s *Store) SetUpstreamEntries(group string, entries []UpstreamEntry) error 
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("group_name = ?", group).Delete(&UpstreamEntry{}).Error; err != nil {
 			return fmt.Errorf("can't clear upstream entries: %w", err)
 		}
