@@ -3,12 +3,15 @@ package querylog
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/model"
 
+	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -158,7 +161,7 @@ func TestUIQueriesAreIndexBacked(t *testing.T) {
 
 		checked++
 
-		for _, detail := range explainPlan(t, r, sql) {
+		for _, detail := range explainPlan(t, r.db, sql) {
 			up := strings.ToUpper(strings.TrimSpace(detail))
 			if strings.HasPrefix(up, "SCAN") && namesBigTable(up) && !strings.Contains(up, "USING") {
 				t.Errorf("full table scan of a large table:\n  plan: %s\n  sql:  %s", detail, sql)
@@ -168,6 +171,128 @@ func TestUIQueriesAreIndexBacked(t *testing.T) {
 
 	if checked == 0 {
 		t.Fatal("no captured statement touched a large table — seeding or capture is wrong")
+	}
+}
+
+// TestDecoySamplersAreIndexBacked is the decoy-side sibling of the UI gate: it
+// seeds the same realistic db, opens a DecoySource on it, attaches the capture
+// logger to its read-only sampling pool, exercises every Sample*/read on the
+// emit hot path, and asserts EXPLAIN QUERY PLAN never bare-scans log_entries.
+// An ORDER BY RANDOM() (or otherwise unindexed) regression fails here, not in
+// production where it silently caps the decoy emit rate.
+func TestDecoySamplersAreIndexBacked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "q.db")
+
+	w, err := NewDatabaseWriter(context.Background(), config.QueryLogTypeSqlite, dbPath, 7, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sqlDB, err := w.db.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() })
+	}
+
+	seedForPlan(t, w)
+
+	src, err := NewDecoySource(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = src.Close() })
+
+	// Populate client_class + the materialized session models so SampleClientOfClass
+	// and the Markov samplers exercise their real (non-empty) read paths.
+	if err := src.RefreshClientClasses(); err != nil {
+		t.Fatal(err)
+	}
+
+	cl := &captureLogger{on: true}
+	src.ro.Logger = cl
+
+	// Force a fresh MIN/MAX rowid bounds probe so it, too, is captured + checked.
+	src.mu.Lock()
+	src.leRowidAt = time.Time{}
+	src.mu.Unlock()
+
+	mustRun := func(name string, err error) {
+		t.Helper()
+
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+
+	if _, err := src.SampleList(); err != nil {
+		mustRun("SampleList", err)
+	}
+
+	if _, err := src.SampleRealFingerprint(); err != nil {
+		mustRun("SampleRealFingerprint", err)
+	}
+
+	// www.example.com. has real history in the seed, so the etldp lookup path runs.
+	if _, err := src.SampleFingerprintForName("www.example.com."); err != nil {
+		mustRun("SampleFingerprintForName", err)
+	}
+
+	if _, err := src.SampleClient(); err != nil {
+		mustRun("SampleClient", err)
+	}
+
+	if _, err := src.SampleRecentReal(3); err != nil {
+		mustRun("SampleRecentReal", err)
+	}
+
+	if _, err := src.SampleCohort(); err != nil {
+		mustRun("SampleCohort", err)
+	}
+
+	if _, err := src.NextInSession("example.com"); err != nil {
+		mustRun("NextInSession", err)
+	}
+
+	if _, err := src.SessionSeed(); err != nil {
+		mustRun("SessionSeed", err)
+	}
+
+	// RevisitInterval returns (dur, ok), no error channel — run it for its SQL.
+	src.RevisitInterval("www.example.com.")
+
+	// Every effective class, so at least one has a matching client and the
+	// per-client log_entries read (2nd query) actually runs and is captured.
+	for _, class := range []string{ClassIoT, ClassWorkstation, ClassServer, ClassUnknown} {
+		if _, err := src.SampleClientOfClass(class); err != nil {
+			mustRun("SampleClientOfClass:"+class, err)
+		}
+	}
+
+	cl.on = false // stop capturing before we run the EXPLAINs themselves
+
+	if len(cl.sql) == 0 {
+		t.Fatal("captured no SQL — logger wiring is broken")
+	}
+
+	checked := 0
+
+	for _, sql := range cl.sql {
+		low := strings.ToLower(sql)
+		if !touchesBigTable(low) {
+			continue
+		}
+
+		checked++
+
+		for _, detail := range explainPlan(t, src.ro, sql) {
+			up := strings.ToUpper(strings.TrimSpace(detail))
+			if strings.HasPrefix(up, "SCAN") && namesBigTable(up) && !strings.Contains(up, "USING") {
+				t.Errorf("decoy sampler full-scans a large table:\n  plan: %s\n  sql:  %s", detail, sql)
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("no captured decoy statement touched a large table — seeding or capture is wrong")
 	}
 }
 
@@ -192,15 +317,16 @@ func namesBigTable(upperDetail string) bool {
 }
 
 // explainPlan returns the detail column of EXPLAIN QUERY PLAN for sql (already
-// interpolated, so no bind params are needed).
-func explainPlan(t *testing.T, r *Reader, sql string) []string {
+// interpolated, so no bind params are needed). db is any handle onto the same
+// database — the UI reader's or the decoy source's read-only pool.
+func explainPlan(t *testing.T, db *gorm.DB, sql string) []string {
 	t.Helper()
 
 	var rows []struct {
 		Detail string `gorm:"column:detail"`
 	}
 
-	if err := r.db.Raw("EXPLAIN QUERY PLAN " + sql).Scan(&rows).Error; err != nil {
+	if err := db.Raw("EXPLAIN QUERY PLAN " + sql).Scan(&rows).Error; err != nil {
 		t.Fatalf("EXPLAIN failed for %q: %v", sql, err)
 	}
 

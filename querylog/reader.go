@@ -33,8 +33,14 @@ type Reader struct {
 // totalQueriesTTL bounds how often TotalQueries re-runs its COUNT(*).
 const totalQueriesTTL = 30 * time.Second
 
-// NewReader opens the query-log database read-only (mode=ro, busy_timeout).
-func NewReader(sqlitePath string) (*Reader, error) {
+// openReadOnlyPool opens the query-log DB mode=ro with a bounded connection pool
+// and pings (so a missing file fails here, since mode=ro defers the real open).
+// maxConns<=0 leaves the driver default — the UI Reader keeps today's uncapped,
+// low-concurrency behavior. maxConns>0 sizes the pool for concurrent samplers and
+// keeps the connections warm across sub-second decoy emits (idle==max, no reaping).
+// Lives here (build-unconstrained) rather than beside the sqlite dialectors, which
+// are build-tagged: both callers here and in decoy_source.go are unconstrained.
+func openReadOnlyPool(sqlitePath string, maxConns int) (*gorm.DB, error) {
 	dialector, err := newSQLiteReadOnlyDialector(sqlitePath)
 	if err != nil {
 		return nil, err
@@ -53,16 +59,33 @@ func NewReader(sqlitePath string) (*Reader, error) {
 		return nil, fmt.Errorf("can't open query log database read-only: %w", err)
 	}
 
-	// mode=ro still defers the actual open; ping so a missing file fails here
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, fmt.Errorf("can't access query log connection pool: %w", err)
+	}
+
+	if maxConns > 0 {
+		sqlDB.SetMaxOpenConns(maxConns)
+		sqlDB.SetMaxIdleConns(maxConns)
+		sqlDB.SetConnMaxLifetime(0)
 	}
 
 	if err := sqlDB.Ping(); err != nil {
 		_ = sqlDB.Close()
 
 		return nil, fmt.Errorf("can't open query log database read-only: %w", err)
+	}
+
+	return db, nil
+}
+
+// NewReader opens the query-log database read-only (mode=ro, busy_timeout),
+// uncapped (UI concurrency is low). Behavior-preserving wrapper over the shared
+// read-only pool opener.
+func NewReader(sqlitePath string) (*Reader, error) {
+	db, err := openReadOnlyPool(sqlitePath, 0)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Reader{db: db}, nil

@@ -146,13 +146,17 @@ var _ = Describe("DecoySource", func() {
 	})
 
 	Describe("SampleRecentReal", func() {
-		It("returns only recent non-decoy queries", func() {
+		It("only ever samples recent non-decoy queries", func() {
+			// Independent random-rowid draws (one per requested item), so with only
+			// two eligible rows a limit of 10 yields repeats — but never the decoy
+			// row nor the 30-day-old row (both excluded by the per-draw predicate).
 			rows, e := source.SampleRecentReal(10)
 			Expect(e).Should(Succeed())
-			Expect(rows).Should(HaveLen(2)) // real1, real2; decoy + old excluded
+			Expect(rows).ShouldNot(BeEmpty())
 
-			names := []string{rows[0].Name, rows[1].Name}
-			Expect(names).Should(ConsistOf("real1.com", "real2.com"))
+			for _, r := range rows {
+				Expect(r.Name).Should(BeElementOf("real1.com", "real2.com"))
+			}
 		})
 	})
 
@@ -409,6 +413,9 @@ var _ = Describe("DecoySource", func() {
 				{RequestTS: now.Add(4*time.Hour + time.Minute), ClientName: "h1", QuestionName: "c.com", EffectiveTLDP: "c.com"},
 			})
 
+			// transitions are materialized on the class-refresh timer, not per emit
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
 			for range 30 {
 				nxt, e := src.NextInSession("a.com")
 				Expect(e).Should(Succeed())
@@ -428,6 +435,8 @@ var _ = Describe("DecoySource", func() {
 				{RequestTS: now.Add(45 * time.Minute), ClientName: "h1", QuestionName: "b.com", EffectiveTLDP: "b.com"},
 			})
 
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
 			nxt, e := src.NextInSession("a.com")
 			Expect(e).Should(Succeed())
 			Expect(nxt).Should(BeEmpty())
@@ -439,6 +448,8 @@ var _ = Describe("DecoySource", func() {
 				{RequestTS: now, ClientName: "h1", QuestionName: "start.com", EffectiveTLDP: "start.com"},
 				{RequestTS: now.Add(time.Minute), ClientName: "h1", QuestionName: "mid.com", EffectiveTLDP: "mid.com"},
 			})
+
+			Expect(src.RefreshClientClasses()).Should(Succeed())
 
 			seed, e := src.SessionSeed()
 			Expect(e).Should(Succeed())
