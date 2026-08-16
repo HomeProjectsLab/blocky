@@ -2,6 +2,7 @@ package prefetching
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,10 @@ type PrefetchingExpiringLRUCache[T any] struct {
 	// stored atomically because it is wired during setup while the cleanup goroutine
 	// (which reads it) is already running.
 	reloadPublisher atomic.Pointer[func(key string, val *T, ttl time.Duration)]
+
+	// trackMu guards ONLY counter creation in trackCacheKeyQueryCount; increments on
+	// an existing counter stay lock-free (atomic.Uint32).
+	trackMu sync.Mutex
 }
 
 type cacheValue[T any] struct {
@@ -126,9 +131,18 @@ func (e *PrefetchingExpiringLRUCache[T]) onExpired(
 }
 
 func (e *PrefetchingExpiringLRUCache[T]) trackCacheKeyQueryCount(cacheKey string) {
-	var x *atomic.Uint32
-	if x, _ = e.prefetchingNameCache.Get(cacheKey); x == nil {
-		x = &atomic.Uint32{}
+	x, _ := e.prefetchingNameCache.Get(cacheKey)
+	if x == nil {
+		// get-or-create under a lock so two concurrent first-queries share ONE
+		// counter instead of the second Put discarding the first's increment.
+		// The Put must happen inside the lock, or a racer re-checking here could
+		// still miss the fresh counter and create its own.
+		e.trackMu.Lock()
+		if x, _ = e.prefetchingNameCache.Get(cacheKey); x == nil {
+			x = &atomic.Uint32{}
+			e.prefetchingNameCache.Put(cacheKey, x, e.prefetchExpires)
+		}
+		e.trackMu.Unlock()
 	}
 
 	x.Add(1)

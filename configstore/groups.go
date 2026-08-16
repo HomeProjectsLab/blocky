@@ -88,12 +88,24 @@ func (s *Store) SaveGroup(name string, categories []string) error {
 		return errors.New("group name is required")
 	}
 
+	// "manual" is the UI's default entry group and "adlists" the URL deny group
+	// (see overlayBlocking): a household group with either name would silently
+	// re-scope every manual entry / merge into the adlist group.
+	if name == "manual" || name == "adlists" {
+		return fmt.Errorf("group name '%s' is reserved", name)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	b, err := s.loadBlockingRows()
 	if err != nil {
 		return err
+	}
+
+	// a group named after a category would merge into that category's sources
+	if slices.ContainsFunc(b.cats, func(c BlockingCategory) bool { return c.Name == name }) {
+		return fmt.Errorf("group name '%s' is reserved (blocklist category)", name)
 	}
 
 	for _, cat := range categories {
@@ -219,19 +231,40 @@ func (s *Store) SetGroupEnabled(name string, enabled bool) error {
 	return nil
 }
 
-// DeleteGroup removes a group with its categories and members.
+// DeleteGroup removes a group with its categories, members and group-scoped
+// manual allow/deny entries. The entries must go too: an orphaned GroupName is
+// no longer a group, so overlayBlocking would promote it to a GLOBAL manual
+// group (allow → household-wide always-allow, deny → blocks everyone).
 func (s *Store) DeleteGroup(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	return s.conn().Transaction(func(tx *gorm.DB) error {
+		// group row first: a name that is NOT a group ("manual", a category)
+		// must never reach the entry deletes below.
+		res := tx.Where("name = ?", name).Delete(&BlockingGroup{})
+		if res.Error != nil {
+			return fmt.Errorf("can't delete group: %w", res.Error)
+		}
+
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("unknown group '%s'", name)
+		}
+
+		if err := tx.Where("group_name = ?", name).Delete(&AllowlistEntry{}).Error; err != nil {
+			return fmt.Errorf("can't delete group allowlist entries: %w", err)
+		}
+
+		if err := tx.Where("group_name = ?", name).Delete(&DenylistEntry{}).Error; err != nil {
+			return fmt.Errorf("can't delete group denylist entries: %w", err)
+		}
+
 		if err := tx.Where("group_name = ?", name).Delete(&BlockingGroupCategory{}).Error; err != nil {
 			return fmt.Errorf("can't delete group categories: %w", err)
 		}
 
 		if err := tx.Where("group_name = ?", name).Delete(&BlockingGroupMember{}).Error; err != nil {
 			return fmt.Errorf("can't delete group members: %w", err)
-		}
-
-		if err := tx.Where("name = ?", name).Delete(&BlockingGroup{}).Error; err != nil {
-			return fmt.Errorf("can't delete group: %w", err)
 		}
 
 		return nil

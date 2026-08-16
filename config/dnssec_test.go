@@ -233,6 +233,32 @@ var _ = Describe("DNSSEC config", func() {
 		})
 	})
 
+	Describe("validate", func() {
+		It("should accept defaults", func() {
+			cfg := &DNSSEC{CacheExpirationHours: 1, MaxNSEC3Iterations: 150}
+
+			Expect(cfg.validate()).Should(Succeed())
+		})
+
+		It("should accept boundary values", func() {
+			cfg := &DNSSEC{CacheExpirationHours: 24 * 365, MaxNSEC3Iterations: 65535}
+
+			Expect(cfg.validate()).Should(Succeed())
+		})
+
+		It("should reject cacheExpirationHours above one year", func() {
+			cfg := &DNSSEC{CacheExpirationHours: 24*365 + 1}
+
+			Expect(cfg.validate()).Should(MatchError(ContainSubstring("cacheExpirationHours")))
+		})
+
+		It("should reject maxNSEC3Iterations above 65535", func() {
+			cfg := &DNSSEC{MaxNSEC3Iterations: 65536}
+
+			Expect(cfg.validate()).Should(MatchError(ContainSubstring("maxNSEC3Iterations")))
+		})
+	})
+
 	Describe("Configuration defaults", func() {
 		It("should document default values via struct tags", func() {
 			// This test documents the expected default values

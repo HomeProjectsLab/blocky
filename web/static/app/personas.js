@@ -73,7 +73,15 @@ function hourSum(hist) {
     for (let h = 0; h < 24; h++) if (a <= b ? h >= a && h <= b : h >= a || h <= b) s += hist[h];
     return s;
 }
-const hourQ = (c) => (S.filters.hour ? hourSum(c.hourLocal) : Number(c.queries));
+// hourLocal is the ~60d retention-wide histogram while c.queries is the
+// range-windowed count — treat the histogram as a distribution and apportion
+// the windowed count, or a brush would return retention-wide totals (> the
+// unfiltered window total).
+const hourQ = (c) => {
+    if (!S.filters.hour) return Number(c.queries);
+    const tot = sum(c.hourLocal);
+    return tot ? Math.round((hourSum(c.hourLocal) / tot) * Number(c.queries)) : 0;
+};
 function groupKey(c) {
     if (S.scope === "person") return c.person || "Unassigned";
     if (S.scope === "class") return c.class || "unknown";
@@ -291,6 +299,12 @@ function renderRoster(mount) {
             <td class="pcell"></td>`;
         tr.querySelector(".pcell").appendChild(presenceStrip(c.hourLocal, { micro: true, ramp: pColor(c.person || "x") }));
         tr.onclick = (e) => { if (e.target.closest(".pstrip")) return; openDrawer(c); };
+        // the roster is billed as the accessible equivalent of the charts —
+        // make its rows keyboard-focusable and activatable.
+        tr.tabIndex = 0;
+        tr.setAttribute("role", "button");
+        tr.setAttribute("aria-label", `Open profile for ${c.displayName || c.name}`);
+        tr.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(c); } };
         tb.appendChild(tr);
     });
 }
@@ -459,6 +473,7 @@ document.getElementById("pd-purge").onclick = async () => {
 // (falling back to the IP for unnamed clients), like live.js does.
 onQuery((item) => {
     if (!DATA || !DATA.enabled) return;
+    if (item.decoy) return; // decoys carry real client names — never light "Active now"
     const names = (item.clientNames && item.clientNames.length) ? item.clientNames : [item.client];
     const now = Date.now();
     for (const n of names) S.active.set(n, now);

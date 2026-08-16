@@ -186,6 +186,8 @@ function domainList(domains) {
 }
 
 let detailChart = null;
+let rebuildSpark = null; // rebuilds the drawer sparkline with fresh theme tokens
+addEventListener("themechange", () => { if (rebuildSpark && !drawer.hidden) rebuildSpark(); });
 
 // nameEditor: a manual display-name override for this client. Hidden for a
 // shared/NAT aggregate — a per-device name is meaningless for many devices
@@ -218,6 +220,7 @@ function nameEditor(d) {
 
 async function openDetail(name) {
     if (detailChart) { detailChart.destroy(); detailChart = null; }
+    rebuildSpark = null;
     title.textContent = name;
     detail.innerHTML = '<p class="empty">Loading…</p>';
     drawer.hidden = false;
@@ -250,9 +253,15 @@ async function openDetail(name) {
         const ys = d.history.map((h) => (h.counts && h.counts.queries) || 0);
         // defer so the element has a width. Canvas can't resolve CSS vars —
         // resolve the token first. height matches the 120px .spark box.
-        requestAnimationFrame(() => { detailChart = lineChart(chartEl, {
-            labels: ["queries"], colors: [cssTok("--c-resolved")], data: [xs, ys], height: 120, fmtVal: fmtNum,
-        }); });
+        // rebuildSpark: a theme toggle re-runs this with fresh tokens.
+        rebuildSpark = () => {
+            if (detailChart) detailChart.destroy();
+            chartEl.innerHTML = "";
+            detailChart = lineChart(chartEl, {
+                labels: ["queries"], colors: [cssTok("--c-resolved")], data: [xs, ys], height: 120, fmtVal: fmtNum,
+            });
+        };
+        requestAnimationFrame(() => { if (rebuildSpark) rebuildSpark(); });
     }
 
     if (d.presence) {

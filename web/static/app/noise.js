@@ -50,6 +50,7 @@ async function loadBuckets(token) {
     const empty = document.getElementById("noise-empty");
 
     if (chart) { chart.destroy(); chart = null; }
+    rebuildChart = null;
     el.innerHTML = "";
 
     if (buckets.length === 0) { empty.hidden = false; return; }
@@ -58,14 +59,22 @@ async function loadBuckets(token) {
     const xs = buckets.map((b) => b.ts);
     const rows = SOURCES.map((s) => buckets.map((b) => (b.counts || {})[s.key] || 0));
 
-    chart = stackedArea(el, {
-        labels: SOURCES.map((s) => s.key),
-        colors: SOURCES.map((s) => s.color),
-        data: [xs, ...rows],
-        xRange: [Math.floor(Date.parse(w.from) / 1000), Math.floor(Date.parse(w.to) / 1000)],
-        fmtVal: fmtNum,
-    });
+    // closure so a theme toggle can rebuild the canvas-baked axis/grid tokens.
+    rebuildChart = () => {
+        if (chart) chart.destroy();
+        el.innerHTML = "";
+        chart = stackedArea(el, {
+            labels: SOURCES.map((s) => s.key),
+            colors: SOURCES.map((s) => s.color),
+            data: [xs, ...rows],
+            xRange: [Math.floor(Date.parse(w.from) / 1000), Math.floor(Date.parse(w.to) / 1000)],
+            fmtVal: fmtNum,
+        });
+    };
+    rebuildChart();
 }
+let rebuildChart = null;
+addEventListener("themechange", () => { if (rebuildChart) rebuildChart(); });
 
 async function loadBars(path, elID, token) {
     const res = await getJSON(path, window_());

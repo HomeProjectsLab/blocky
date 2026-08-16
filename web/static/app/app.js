@@ -22,6 +22,9 @@ if (themeBtn) {
             ? root.dataset.theme === "dark"
             : matchMedia("(prefers-color-scheme: dark)").matches;
         root.dataset.theme = localStorage.theme = dark ? "light" : "dark";
+        // uPlot charts rasterize theme tokens into canvas at build time —
+        // tell chart owners to rebuild with the new palette.
+        dispatchEvent(new Event("themechange"));
     });
 }
 

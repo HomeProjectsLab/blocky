@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -87,7 +86,7 @@ func (u *uiAPI) putLocalDNS(rw http.ResponseWriter, req *http.Request) {
 		Zone    *string       `json:"zone"`
 	}
 
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+	if err := decodeJSON(rw, req, &body); err != nil {
 		badRequest(rw, err)
 
 		return
