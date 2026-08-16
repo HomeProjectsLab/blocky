@@ -313,25 +313,66 @@ func configureRobotsHandler(router *chi.Mux) {
 	router.Handle("/robots.txt", http.FileServer(http.FS(web.WebFs)))
 }
 
-// uiPages maps SPA shell routes to their page identity (data-page attr) and title.
+// uiPages maps SPA shell routes to their page identity (data-page attr), title
+// and menu Category. Category is presentation-only: the router still registers
+// one flat GET per Route (Category is ignored there) — it only groups the nav.
+// Category "" (login) is never shown in the nav. Category order = first-appearance
+// order in this slice; tab order within a category = slice order.
 var uiPages = []struct {
-	Route, Page, Title string
+	Route, Page, Title, Category string
 }{
-	{"/", "dashboard", "Dashboard"},
-	{"/live", "live", "Live"},
-	{"/queries", "queries", "Queries"},
-	{"/noise", "noise", "Noise"},
-	{"/clients", "clients", "Clients"},
-	{"/people", "people", "People"},
-	{"/upstreams", "upstreams", "Upstreams"},
-	{"/blocking", "blocking", "Blocking"},
-	{"/groups", "groups", "Groups"},
-	{"/localdns", "localdns", "Local DNS"},
-	{"/privacy", "privacy", "Privacy"},
-	{"/settings", "settings", "Settings"},
-	{"/system", "system", "System"},
-	{"/logs", "logs", "Console"},
-	{"/login", "login", "Sign in"},
+	{"/personas", "personas", "Personas", "People"}, // headline landing tab
+	{"/clients", "clients", "Clients", "People"},
+	{"/people", "people", "People", "People"},
+	{"/", "dashboard", "Dashboard", "Overview"},
+	{"/live", "live", "Live", "Overview"},
+	{"/queries", "queries", "Queries", "Traffic"},
+	{"/noise", "noise", "Noise", "Traffic"},
+	{"/upstreams", "upstreams", "Upstreams", "Traffic"},
+	{"/blocking", "blocking", "Blocking", "Policy"},
+	{"/groups", "groups", "Groups", "Policy"},
+	{"/localdns", "localdns", "Local DNS", "Policy"},
+	{"/privacy", "privacy", "Privacy", "System"},
+	{"/settings", "settings", "Settings", "System"},
+	{"/system", "system", "System", "System"},
+	{"/logs", "logs", "Console", "System"},
+	{"/login", "login", "Sign in", ""}, // "" => never in nav
+}
+
+// navItem / navGroup are the grouped nav model the shell template renders from.
+type navItem struct{ Route, Page, Title string }
+
+type navGroup struct {
+	Category string
+	Pages    []navItem
+}
+
+// navGroups is uiPages pre-grouped by Category once at init (text/template has no
+// groupby). Order-preserving: a group is emitted the first time its category is
+// seen, items append to the matching group thereafter. Category "" is skipped.
+var navGroups = buildNavGroups()
+
+func buildNavGroups() []navGroup {
+	var groups []navGroup
+
+	idx := map[string]int{}
+
+	for _, p := range uiPages {
+		if p.Category == "" {
+			continue
+		}
+
+		i, ok := idx[p.Category]
+		if !ok {
+			i = len(groups)
+			idx[p.Category] = i
+			groups = append(groups, navGroup{Category: p.Category})
+		}
+
+		groups[i].Pages = append(groups[i].Pages, navItem{Route: p.Route, Page: p.Page, Title: p.Title})
+	}
+
+	return groups
 }
 
 func configureRootHandler(router *chi.Mux) {
@@ -341,10 +382,11 @@ func configureRootHandler(router *chi.Mux) {
 		Page    string
 		Title   string
 		Version string
+		Nav     []navGroup
 	}
 
 	for _, p := range uiPages {
-		pd := pageData{Page: p.Page, Title: p.Title, Version: util.Version}
+		pd := pageData{Page: p.Page, Title: p.Title, Version: util.Version, Nav: navGroups}
 
 		router.Get(p.Route, func(writer http.ResponseWriter, request *http.Request) {
 			writer.Header().Set(contentTypeHeader, htmlContentType)

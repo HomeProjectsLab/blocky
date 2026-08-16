@@ -28,20 +28,14 @@
     <div class="shell-bar">
         <a class="wordmark" href="/">JungleBlock<span class="wordmark-star">*</span></a>
         <nav class="shell-nav" aria-label="Main">
-            <a href="/" {{if eq .Page "dashboard"}}aria-current="page"{{end}}>Dashboard</a>
-            <a href="/live" {{if eq .Page "live"}}aria-current="page"{{end}}>Live</a>
-            <a href="/queries" {{if eq .Page "queries"}}aria-current="page"{{end}}>Queries</a>
-            <a href="/noise" {{if eq .Page "noise"}}aria-current="page"{{end}}>Noise</a>
-            <a href="/clients" {{if eq .Page "clients"}}aria-current="page"{{end}}>Clients</a>
-            <a href="/people" {{if eq .Page "people"}}aria-current="page"{{end}}>People</a>
-            <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
-            <a href="/blocking" {{if eq .Page "blocking"}}aria-current="page"{{end}}>Blocking</a>
-            <a href="/groups" {{if eq .Page "groups"}}aria-current="page"{{end}}>Groups</a>
-            <a href="/localdns" {{if eq .Page "localdns"}}aria-current="page"{{end}}>Local DNS</a>
-            <a href="/privacy" {{if eq .Page "privacy"}}aria-current="page"{{end}}>Privacy</a>
-            <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
-            <a href="/system" {{if eq .Page "system"}}aria-current="page"{{end}}>System</a>
-            <a href="/logs" {{if eq .Page "logs"}}aria-current="page"{{end}}>Console</a>
+            {{range .Nav}}
+            <div class="nav-group" role="group" aria-label="{{.Category}}">
+                <span class="nav-group-label" aria-hidden="true">{{.Category}}</span>
+                {{range .Pages}}
+                <a href="{{.Route}}" {{if eq .Page $.Page}}aria-current="page"{{end}}>{{.Title}}</a>
+                {{end}}
+            </div>
+            {{end}}
         </nav>
         <button class="logout-btn" id="theme-btn" title="Toggle dark / light theme" aria-label="Toggle theme">◐</button>
         <button class="logout-btn" id="logout-btn" title="Sign out">Sign out</button>
@@ -334,6 +328,53 @@
         </div>
         <p class="empty" id="pp-empty" hidden>No devices to map in the last 24h.</p>
     </section>
+{{else if eq .Page "personas"}}
+    <div class="pdash" id="pdash">
+    <div class="page-head">
+        <h1>Personas</h1>
+        <div class="ctl-row">
+            <button type="button" id="pd-purge" class="btn-sub" title="Erase all profiling data">Purge profiles</button>
+        </div>
+    </div>
+    <div class="pd-banner" id="pd-banner" hidden>
+        <span class="pd-banner-ico" aria-hidden="true">🛡️</span>
+        <div class="pd-banner-txt">
+            <b id="pd-banner-title">Household profiling is on.</b>
+            <p>Presence patterns and person mapping are computed locally on your Pi and never leave the device. <code>privacy.profiling.enable = true</code></p>
+        </div>
+    </div>
+    <p class="empty" id="pd-status" hidden></p>
+
+    <div class="pd-controls" id="pd-controls" hidden>
+        <div class="ctl-group">
+            <span class="ctl-label">Group by</span>
+            <div class="seg" id="pd-group" role="group" aria-label="Group by">
+                <button data-v="person" aria-pressed="true">Person</button>
+                <button data-v="class" aria-pressed="false">Class</button>
+                <button data-v="identity" aria-pressed="false">Identity</button>
+                <button data-v="none" aria-pressed="false">None</button>
+            </div>
+        </div>
+        <div class="ctl-group"><span class="ctl-label">Class</span>
+            <select id="pd-fclass"><option value="">All</option></select></div>
+        <div class="ctl-group"><span class="ctl-label">Person</span>
+            <select id="pd-fperson"><option value="">All</option></select></div>
+        <div class="ctl-group"><span class="ctl-label">Identity</span>
+            <select id="pd-fidentity"><option value="">All</option><option value="recognized">Recognized</option><option value="unknown">Unknown</option><option value="shared">Shared / NAT</option></select></div>
+        <div class="ctl-group"><span class="ctl-label">Range</span>
+            <select id="pd-frange"><option value="24h">24h</option><option value="7d">7d</option><option value="30d">30d</option><option value="60d">60d</option></select></div>
+        <span class="spacer"></span>
+        <div class="pd-chipbar" id="pd-chipbar"></div>
+    </div>
+
+    <section class="tiles" id="pd-kpis" hidden></section>
+    <div class="pd-board" id="pd-board"></div>
+    </div>
+    <aside class="drawer" id="pd-drawer" hidden>
+        <div class="drawer-head"><h2 id="pd-drawer-title">Device</h2><button id="pd-drawer-close" aria-label="Close detail">✕</button></div>
+        <div id="pd-detail"></div>
+    </aside>
+    <div class="pd-tip" id="pd-tip" role="status"></div>
 {{else if eq .Page "localdns"}}
     <div class="page-head">
         <h1>Local DNS</h1>

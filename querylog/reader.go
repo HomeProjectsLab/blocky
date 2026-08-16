@@ -816,3 +816,257 @@ func (r *Reader) fingerprintClusters(d *ClientDetail, name string, from, to time
 
 	return nil
 }
+
+// --- Personas rollup (GET /api/ui/personas) --------------------------------
+//
+// PersonaRollup is the assembled personas-dashboard payload: the who/what/when
+// of the network folded from the four cache tables + the snapshot's client list.
+// It is a pure in-memory assembly (BuildPersonaRollup) over data the caller has
+// already fetched — no SQL of its own — so it is cheap enough to build in the
+// 45s background snapshot pass. Profiling-gated by the caller; the whole surface
+// is suppressed (endpoint returns {enabled:false}) when profiling is off.
+
+// PersonaRollup mirrors §4.2 of the personas plan.
+type PersonaRollup struct {
+	Enabled            bool            `json:"enabled"`
+	GeneratedAt        string          `json:"generatedAt"`
+	TZ                 string          `json:"tz"`
+	Classes            []TopItem       `json:"classes"`
+	OS                 []TopItem       `json:"os"`
+	Vendors            []TopItem       `json:"vendors"`
+	Apps               []TopItem       `json:"apps"`
+	Categories         []TopItem       `json:"categories"`
+	People             []PersonRollup  `json:"people"`
+	Unassigned         []string        `json:"unassigned"`
+	FleetPresenceLocal [24]int         `json:"fleetPresenceLocal"`
+	SharedSplit        SharedSplit     `json:"sharedSplit"`
+	Clients            []PersonaClient `json:"clients"`
+}
+
+// SharedSplit counts single-device vs shared/NAT identities.
+type SharedSplit struct {
+	Single int `json:"single"`
+	Shared int `json:"shared"`
+}
+
+// PersonRollup is one named household member's folded footprint.
+type PersonRollup struct {
+	Person        string         `json:"person"`
+	Queries       int64          `json:"queries"`
+	Blocked       int64          `json:"blocked"`
+	Clients       []string       `json:"clients"`
+	Classes       map[string]int `json:"classes"`
+	PresenceLocal [24]int        `json:"presenceLocal"`
+}
+
+// PersonaClient is one device row of the client-side fact table (§3.3): the
+// enriched ClientRow plus its person, class, localized presence and span.
+type PersonaClient struct {
+	Name        string   `json:"name"`
+	DisplayName string   `json:"displayName,omitempty"`
+	Person      string   `json:"person,omitempty"`
+	Class       string   `json:"class,omitempty"`
+	OS          string   `json:"os,omitempty"`
+	Vendor      []string `json:"vendor,omitempty"`
+	Apps        []string `json:"apps,omitempty"`
+	Shared      bool     `json:"shared,omitempty"`
+	FpCount     int      `json:"fpCount,omitempty"`
+	Queries     int64    `json:"queries"`
+	Blocked     int64    `json:"blocked"`
+	HourLocal   [24]int  `json:"hourLocal"`
+	FirstSeen   string   `json:"firstSeen,omitempty"`
+	LastSeen    string   `json:"lastSeen,omitempty"`
+}
+
+// BuildPersonaRollup assembles the personas payload from already-fetched inputs:
+//   - clientList: the snapshot's enriched ClientRows (fact table + os/vendor/app/shared)
+//   - classes:    ListClientClasses() (client_name -> effective device class)
+//   - persons:    ClientPersons() (client_name -> named person)
+//   - names:      ClientNames() (client_name -> display-name override)
+//   - profiles:   ListProfiles() (client_name -> presence histogram + span)
+//   - categories: CategoryTotals() fleet activity-category histogram (reused as-is)
+//   - tz:         Profiling.TZ, used to localize the UTC presence histograms
+//
+// Pure assembly, no SQL, no error. Join key throughout is client_name.
+func BuildPersonaRollup(
+	clientList []ClientRow, classes []ClientClassInfo, persons, names map[string]string,
+	profiles map[string]ClientProfileInfo, categories []TopItem, tz string,
+) *PersonaRollup {
+	loc, tzName := time.UTC, "UTC"
+	if tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc, tzName = l, tz
+		}
+	}
+
+	classOf := make(map[string]string, len(classes))
+	for _, c := range classes {
+		classOf[c.Client] = c.Effective
+	}
+
+	pr := &PersonaRollup{
+		Enabled:     true,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		TZ:          tzName,
+		Categories:  categories,
+		Unassigned:  []string{},
+		Clients:     make([]PersonaClient, 0, len(clientList)),
+	}
+
+	classHist := map[string]int{}
+	osHist := map[string]int{}
+	vendorHist := map[string]int{}
+	appHist := map[string]int{}
+
+	type personAcc struct {
+		rollup  *PersonRollup
+		clients []string
+	}
+
+	people := map[string]*personAcc{}
+
+	getPerson := func(name string) *personAcc {
+		a := people[name]
+		if a == nil {
+			a = &personAcc{rollup: &PersonRollup{Person: name, Classes: map[string]int{}}}
+			people[name] = a
+		}
+
+		return a
+	}
+
+	for i := range clientList {
+		row := &clientList[i]
+
+		class := classOf[row.Name]
+		if class == "" {
+			class = ClassUnknown
+		}
+
+		shared := row.Shared || row.NatAggregate
+
+		display := names[row.Name]
+		if display == "" {
+			display = row.DisplayName
+		}
+
+		var hourLocal [24]int
+		var firstSeen, lastSeen string
+
+		if p, ok := profiles[row.Name]; ok {
+			hourLocal = localizeHist(p.HourHistUTC, loc)
+			if !p.FirstSeen.IsZero() {
+				firstSeen = p.FirstSeen.UTC().Format(time.RFC3339)
+			}
+
+			if !p.LastSeen.IsZero() {
+				lastSeen = p.LastSeen.UTC().Format(time.RFC3339)
+			}
+
+			for h := 0; h < 24; h++ {
+				pr.FleetPresenceLocal[h] += hourLocal[h]
+			}
+		}
+
+		person := persons[row.Name]
+
+		pr.Clients = append(pr.Clients, PersonaClient{
+			Name: row.Name, DisplayName: display, Person: person, Class: class,
+			OS: row.OS, Vendor: row.Vendor, Apps: row.Apps, Shared: shared,
+			FpCount: row.FpCount, Queries: row.Queries, Blocked: row.Blocked,
+			HourLocal: hourLocal, FirstSeen: firstSeen, LastSeen: lastSeen,
+		})
+
+		// Fleet histograms (facets blanked on shared/NAT rows, per R3).
+		classHist[class]++
+
+		if !shared {
+			if row.OS != "" {
+				osHist[row.OS]++
+			}
+
+			for _, v := range row.Vendor {
+				vendorHist[v]++
+			}
+
+			for _, a := range row.Apps {
+				appHist[a]++
+			}
+		}
+
+		if shared {
+			pr.SharedSplit.Shared++
+		} else {
+			pr.SharedSplit.Single++
+		}
+
+		if person == "" {
+			pr.Unassigned = append(pr.Unassigned, row.Name)
+
+			continue
+		}
+
+		acc := getPerson(person)
+		acc.rollup.Queries += row.Queries
+		acc.rollup.Blocked += row.Blocked
+		acc.rollup.Classes[class]++
+		acc.clients = append(acc.clients, row.Name)
+
+		for h := 0; h < 24; h++ {
+			acc.rollup.PresenceLocal[h] += hourLocal[h]
+		}
+	}
+
+	pr.People = make([]PersonRollup, 0, len(people))
+	for _, a := range people {
+		a.rollup.Clients = a.clients
+		pr.People = append(pr.People, *a.rollup)
+	}
+
+	sort.Slice(pr.People, func(i, j int) bool { return pr.People[i].Queries > pr.People[j].Queries })
+
+	pr.Classes = histToTop(classHist)
+	pr.OS = histToTop(osHist)
+	pr.Vendors = histToTop(vendorHist)
+	pr.Apps = histToTop(appHist)
+
+	return pr
+}
+
+// localizeHist rotates a UTC hour-of-day histogram into loc by that zone's
+// current whole-hour offset (mirrors server.localizeHourHist; the :30/:45 and
+// DST-seam caveats there apply — buckets are hour-granular).
+func localizeHist(utc [24]int, loc *time.Location) [24]int {
+	_, off := time.Now().In(loc).Zone()
+	shift := off / 3600 //nolint:mnd // seconds -> whole hours
+
+	var out [24]int
+	for h := 0; h < 24; h++ {
+		out[((h+shift)%24+24)%24] = utc[h]
+	}
+
+	return out
+}
+
+// histToTop turns a name->count map into a count-desc TopItem slice (name-tiebroken
+// for stable output). Empty names are dropped.
+func histToTop(m map[string]int) []TopItem {
+	out := make([]TopItem, 0, len(m))
+	for name, c := range m {
+		if name == "" {
+			continue
+		}
+
+		out = append(out, TopItem{Name: name, Count: int64(c)})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+
+		return out[i].Name < out[j].Name
+	})
+
+	return out
+}

@@ -37,6 +37,7 @@ type clientClassifier interface {
 	// recompute; ClientProfile is a cheap PK read; PurgeProfiles wipes it all.
 	RefreshClientProfiles() error
 	ClientProfile(client string) (querylog.ClientProfileInfo, error)
+	ListProfiles() (map[string]querylog.ClientProfileInfo, error)
 	PurgeProfiles() error
 }
 
@@ -404,6 +405,110 @@ func (s *statsAPI) people(rw http.ResponseWriter, req *http.Request) {
 		"people":     out,
 		"unassigned": unassigned,
 	})
+}
+
+// buildPersonas gathers the four cache-table reads and folds them (with the
+// passed-in default-window clientList + fleet categories) into the personas
+// rollup. Pure cache reads + in-memory assembly — no log_entries scan beyond the
+// cats already computed — so it is safe in the background snapshot pass and on
+// the custom-window request path. Returns nil (skip this pass / 500) on any read
+// error or when no classifier is wired.
+func (s *statsAPI) buildPersonas(list []querylog.ClientRow, cats []querylog.TopItem) *querylog.PersonaRollup {
+	if s.classifier == nil {
+		return nil
+	}
+
+	classes, err := s.classifier.ListClientClasses()
+	if err != nil {
+		return nil
+	}
+
+	persons, err := s.classifier.ClientPersons()
+	if err != nil {
+		return nil
+	}
+
+	profiles, err := s.classifier.ListProfiles()
+	if err != nil {
+		return nil
+	}
+
+	names, _ := s.classifier.ClientNames() // best-effort display-name overlay
+
+	tz := ""
+	if s.store != nil {
+		if cfg, cerr := s.store.GetPrivacy(); cerr == nil {
+			tz = cfg.Profiling.TZ
+		}
+	}
+
+	return querylog.BuildPersonaRollup(list, classes, persons, names, profiles, cats, tz)
+}
+
+// personas serves the personas-dashboard payload (plan §4.2): the who/what/when
+// rollup for named household members. Most-sensitive surface — gated behind the
+// profiling opt-in, returning a bare {enabled:false} until it is turned on. The
+// default window is served from the background snapshot (zero reader work); a
+// custom window falls through to a live rebuild (cache reads + one CategoryTotals
+// scan), same pattern as every other stats handler.
+func (s *statsAPI) personas(rw http.ResponseWriter, req *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "device identity not available"})
+
+		return
+	}
+
+	if !s.profilingOn() {
+		writeJSON(rw, http.StatusOK, map[string]any{"enabled": false})
+
+		return
+	}
+
+	reader := s.readerOr503(rw)
+	if reader == nil {
+		return
+	}
+
+	from, to, err := parseTimeRange(req)
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	if pr, ok := s.snap.getPersonas(from, to); ok && pr != nil {
+		writeJSON(rw, http.StatusOK, pr)
+
+		return
+	}
+
+	// Custom window: rebuild live. Reuse the preheated clientList when the window
+	// happens to match; otherwise scan it (read-only, no copy — Build reads rows).
+	list, ok := s.snap.getClientList(from, to)
+	if !ok {
+		list, err = reader.ClientList(from, to)
+		if err != nil {
+			internalError(rw, err)
+
+			return
+		}
+	}
+
+	cats, err := reader.CategoryTotals(from, to)
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	pr := s.buildPersonas(list, cats)
+	if pr == nil {
+		internalError(rw, errors.New("persona rollup unavailable"))
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, pr)
 }
 
 // Clients + privacy UI endpoints. Registered alongside the other stats

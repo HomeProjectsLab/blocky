@@ -36,6 +36,7 @@ const pageModules = {
     localdns: "./localdns.js",
     clients: "./clients.js",
     people: "./people.js",
+    personas: "./personas.js",
     privacy: "./privacy.js",
     settings: "./settings.js",
     system: "./system.js",

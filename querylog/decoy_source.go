@@ -2024,6 +2024,31 @@ func (s *DecoySource) ClientProfile(client string) (ClientProfileInfo, error) {
 	}, nil
 }
 
+// ListProfiles bulk-reads every client's presence profile — ClientProfile with
+// the WHERE dropped. A full scan of the tiny one-row-per-client client_profile
+// cache table (safe off-request); backs the personas rollup's fleet/per-person
+// presence sums. Keyed by client_name (same key ClientProfile looks up).
+func (s *DecoySource) ListProfiles() (map[string]ClientProfileInfo, error) {
+	var rows []clientProfile
+	if err := s.ro.Raw(
+		"SELECT client, hour_hist_utc, first_seen, last_seen, updated_at FROM client_profile").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]ClientProfileInfo, len(rows))
+	for _, r := range rows {
+		out[r.Client] = ClientProfileInfo{
+			HourHistUTC: decodeHourHist(r.HourHistUTC),
+			FirstSeen:   r.FirstSeen,
+			LastSeen:    r.LastSeen,
+			UpdatedAt:   r.UpdatedAt,
+		}
+	}
+
+	return out, nil
+}
+
 // PurgeProfiles deletes all precomputed presence data (the profiling purge
 // button). Local-only feature, so a purge is a plain table wipe.
 func (s *DecoySource) PurgeProfiles() error {

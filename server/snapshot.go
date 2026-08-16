@@ -64,14 +64,16 @@ func isDefaultWindow(from, to time.Time) bool {
 }
 
 type statsSnapshot struct {
-	mu       sync.RWMutex
-	ready    bool
-	catReady bool // categories were computed this pass (profiling on)
+	mu           sync.RWMutex
+	ready        bool
+	catReady     bool // categories were computed this pass (profiling on)
+	personaReady bool // persona rollup was computed this pass (profiling on)
 
 	overview   *querylog.Overview
 	buckets    []querylog.Bucket
 	top        map[string][]querylog.TopItem
 	categories []querylog.TopItem
+	personas   *querylog.PersonaRollup
 	latency    *querylog.Percentiles
 	clientList []querylog.ClientRow // shared read-only; callers that mutate must copy
 	noise      *querylog.DecoyOverview
@@ -186,11 +188,20 @@ func (snap *statsSnapshot) refresh(s *statsAPI) {
 	// common, default-OFF case — to keep each pass a smaller DB hit.
 	var cats []querylog.TopItem
 
-	catReady := false
+	var personas *querylog.PersonaRollup
+
+	catReady, personaReady := false, false
 
 	if s.profilingOn() {
 		if c, cerr := reader.CategoryTotals(from, to); cerr == nil {
 			cats, catReady = c, true
+		}
+
+		// Persona rollup joins the four cache tables + this clientList + cats —
+		// pure in-memory folding (buildPersonas), so it rides the same off-request
+		// pass. Reuses the cats just computed; skipped entirely when profiling off.
+		if pr := s.buildPersonas(clientList, cats); pr != nil {
+			personas, personaReady = pr, true
 		}
 	}
 
@@ -203,6 +214,8 @@ func (snap *statsSnapshot) refresh(s *statsAPI) {
 	snap.noise = noise
 	snap.categories = cats
 	snap.catReady = catReady
+	snap.personas = personas
+	snap.personaReady = personaReady
 	snap.ready = true
 	snap.mu.Unlock()
 }
@@ -249,6 +262,17 @@ func (snap *statsSnapshot) getCategories(from, to time.Time) ([]querylog.TopItem
 	defer snap.mu.RUnlock()
 
 	return snap.categories, snap.catReady
+}
+
+func (snap *statsSnapshot) getPersonas(from, to time.Time) (*querylog.PersonaRollup, bool) {
+	if !isDefaultWindow(from, to) {
+		return nil, false
+	}
+
+	snap.mu.RLock()
+	defer snap.mu.RUnlock()
+
+	return snap.personas, snap.personaReady
 }
 
 func (snap *statsSnapshot) getLatency(from, to time.Time) (*querylog.Percentiles, bool) {

@@ -62,6 +62,7 @@ func registerStatsUIEndpoints(
 	router.Put("/api/ui/clients/persons/{client}", s.putClientPerson)
 	router.Delete("/api/ui/clients/profiles", s.purgeProfiles)
 	router.Get("/api/ui/people", s.people)
+	router.Get("/api/ui/personas", s.personas)
 	router.Get("/api/ui/clients/{name}", s.clientDetail)
 	router.Get("/api/ui/privacy", s.getPrivacy)
 	router.Put("/api/ui/privacy", s.putPrivacy)
