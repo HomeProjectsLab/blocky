@@ -643,7 +643,8 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 // stub's OPT shape is stable across its queries, so one sampled row is enough.
 type ClientPersona struct {
 	IP   string
-	Name string // client_name of the sampled row — the key client_class is stored under
+	Name string // client_name of the sampled row (display / people rollup)
+	Key  string // STABLE device_key (fp_hash, else name) — what association rows key on
 	Fp   FpSample
 }
 
@@ -658,9 +659,10 @@ func (s *DecoySource) SampleClient() (ClientPersona, error) {
 
 		ClientIP   string `gorm:"column:client_ip"`
 		ClientName string `gorm:"column:client_name"`
+		FpHash     string `gorm:"column:fp_hash"`
 	}
 
-	_, err := s.seekRandomReal(`SELECT client_ip, client_name, question_type, edns_udp_size, edns_opt_codes, fp_detail
+	_, err := s.seekRandomReal(`SELECT client_ip, client_name, fp_hash, question_type, edns_udp_size, edns_opt_codes, fp_detail
 		FROM log_entries
 		WHERE rowid >= ? AND decoy = 0 AND client_ip <> '' AND request_ts >= ?
 		ORDER BY rowid LIMIT 1`, []any{since}, &row)
@@ -668,7 +670,13 @@ func (s *DecoySource) SampleClient() (ClientPersona, error) {
 		return ClientPersona{}, err
 	}
 
-	return ClientPersona{IP: row.ClientIP, Name: row.ClientName, Fp: row.toFpSample()}, nil
+	// device_key = fp_hash when present (IP-independent), else the name (legacy).
+	key := row.FpHash
+	if key == "" {
+		key = row.ClientName
+	}
+
+	return ClientPersona{IP: row.ClientIP, Name: row.ClientName, Key: key, Fp: row.toFpSample()}, nil
 }
 
 // effectiveTLDP returns name's registrable domain (eTLD+1), or "" if it has none.
@@ -1178,17 +1186,30 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 // --- device-class classification (cached) -----------------------------------
 
 // Device classes a client can be assigned. "unknown" covers too-little-data.
+// The vendor-tell classes (game-console … printer) are only split when a strong
+// single-vendor telemetry share is present (see classify); everything else with
+// broad, browser-like behaviour stays "workstation" and low-diversity beacons
+// stay "iot". Classes the map flagged as DNS-inseparable (phone vs tablet,
+// desktop vs laptop, generic no-vendor IoT) are deliberately NOT split.
 const (
-	ClassIoT         = "iot"
-	ClassWorkstation = "workstation"
-	ClassServer      = "server"
-	ClassUnknown     = "unknown"
+	ClassIoT          = "iot"
+	ClassWorkstation  = "workstation"
+	ClassServer       = "server"
+	ClassMobile       = "mobile"        // push-endpoint + broad, bursty app traffic
+	ClassTVStreaming  = "tv-streaming"  // streaming-CDN dominated
+	ClassGameConsole  = "game-console"  // xbox/playstation/nintendo backends
+	ClassSmartSpeaker = "smart-speaker" // sonos / alexa voice service
+	ClassCamera       = "camera"        // hik/axis/reolink/wyze/ring
+	ClassPrinter      = "printer"       // hp/epson/canon/brother cloud print
+	ClassUnknown      = "unknown"
 )
 
 // validClass reports whether c is an assignable device class (empty = clear override).
 func validClass(c string) bool {
 	switch c {
-	case ClassIoT, ClassWorkstation, ClassServer, ClassUnknown:
+	case ClassIoT, ClassWorkstation, ClassServer,
+		ClassMobile, ClassTVStreaming, ClassGameConsole, ClassSmartSpeaker, ClassCamera, ClassPrinter,
+		ClassUnknown:
 		return true
 	default:
 		return false
@@ -1207,7 +1228,54 @@ const (
 	classIoTMaxDomains = 8    // iot: at most this many distinct eTLD+1
 	classIoTMaxQtypes  = 3    // iot: at most this many distinct qtypes
 	classIoTMaxCoV     = 2.0  // iot: inter-arrival coeff. of variation ≤ this (regular/periodic)
+
+	// Vendor-tell shares: minimum fraction of a cohort's queries hitting a
+	// vendor's telemetry backends before that class is assigned. HIGH-confidence
+	// single-vendor signals, so the bars are low — a device that beacons a console
+	// backend at all is almost certainly that console. printer is gated on low
+	// diversity too (a workstation that pings HP once must not become a printer).
+	// ponytail: fixed shares; tune per fleet if a class over/under-fires.
+	classGameShare    = 0.15
+	classCameraShare  = 0.15
+	classSpeakerShare = 0.15
+	classPrinterShare = 0.10
+	classStreamShare  = 0.30
 )
+
+// Vendor-telemetry signal sets for the extra classes. Matched as question_name
+// LIKE '%pattern%' (substring), same shape as serverNameLikes. Kept small and
+// HIGH-confidence — a seed, not an exhaustive registry. Deliberately avoid broad
+// app CDNs (spotify, steam) that a phone/PC also hits.
+//
+//nolint:gochecknoglobals // static signal tables
+var (
+	gameSignals    = []string{"xboxlive.com", "playstation.net", "nintendo.net"}
+	cameraSignals  = []string{"hik-connect.com", "axis.com", "reolink.com", "wyzecam.com", "ring.com", "ezvizlife.com"}
+	speakerSignals = []string{"sonos.com", "avs-alexa", "alexa.amazon"}
+	printerSignals = []string{"hpeprint", "hpconnected", "epsonconnect", "brother.com", "canon.com", "bjnp"}
+	streamSignals  = []string{"nflxvideo.net", "googlevideo.com", "roku.com", "amazonvideo.com", "ttvnw.net", "hulustream.com"}
+	pushSignals    = []string{"push.apple.com", "mtalk.google.com"} // OS push = interactive personal device
+)
+
+// likeHitExpr builds a "CASE WHEN qn LIKE '%p1%' OR … THEN 1 ELSE 0 END" over a
+// signal set (compile-time constants — no user input), summable in the classify
+// scan. Mirrors serverHitExpr; the CTE aliases question_name AS qn.
+func likeHitExpr(sigs []string) string {
+	likes := make([]string, len(sigs))
+	for i, p := range sigs {
+		likes[i] = "qn LIKE '%" + p + "%'"
+	}
+
+	return "CASE WHEN " + strings.Join(likes, " OR ") + " THEN 1 ELSE 0 END"
+}
+
+// deviceKeyExpr is the SQL for a row's STABLE device identity: its fp_hash (wire
+// software fields only — IP-independent by construction, see model.Fingerprint.
+// Hash) when present, else the client_name (legacy / fp-less rows keep the old
+// name keying so nothing regresses). This is the key every association table is
+// stored under, so a DHCP lease change / roam — which changes client_ip and the
+// IP-fallback client_name but NOT the fingerprint — keeps the same key.
+const deviceKeyExpr = "CASE WHEN fp_hash <> '' THEN fp_hash ELSE client_name END"
 
 // serverEtldps is the small embedded "server-ish" registrable-domain set: container
 // registries, OS package mirrors, and update/monitoring backends. A client whose
@@ -1249,25 +1317,54 @@ type ClientClassInfo struct {
 	UpdatedAt time.Time
 }
 
-// classFeatures is the per-client aggregate the classifier scores.
+// classFeatures is the per-device-key aggregate the classifier scores. Client
+// holds the STABLE device_key (fp_hash, else client_name — see deviceKeyExpr).
 type classFeatures struct {
-	Client     string  `gorm:"column:c"`
-	N          int64   `gorm:"column:n"`
-	Domains    int64   `gorm:"column:domains"`
-	Qtypes     int64   `gorm:"column:qtypes"`
-	ServerHits int64   `gorm:"column:serverhits"`
-	MeanGap    float64 `gorm:"column:meangap"`
-	MeanGap2   float64 `gorm:"column:meangap2"`
+	Client      string  `gorm:"column:c"`
+	N           int64   `gorm:"column:n"`
+	Domains     int64   `gorm:"column:domains"`
+	Qtypes      int64   `gorm:"column:qtypes"`
+	ServerHits  int64   `gorm:"column:serverhits"`
+	GameHits    int64   `gorm:"column:gamehits"`
+	CameraHits  int64   `gorm:"column:camerahits"`
+	SpeakerHits int64   `gorm:"column:speakerhits"`
+	PrinterHits int64   `gorm:"column:printerhits"`
+	StreamHits  int64   `gorm:"column:streamhits"`
+	PushHits    int64   `gorm:"column:pushhits"`
+	MeanGap     float64 `gorm:"column:meangap"`
+	MeanGap2    float64 `gorm:"column:meangap2"`
 }
 
-// classify scores one client's features into a device class.
+// classify scores one device-key's features into a device class. Vendor-tell
+// classes (single-vendor telemetry share) are checked before the generic
+// behavioural fallbacks, since a console/camera/printer backend hit is far more
+// specific than "broad → workstation" or "narrow → iot".
 func (f classFeatures) classify() string {
 	if f.N < classMinSamples {
 		return ClassUnknown
 	}
 
-	if float64(f.ServerHits)/float64(f.N) >= classServerShare {
+	share := func(hits int64) float64 { return float64(hits) / float64(f.N) }
+
+	switch {
+	case share(f.ServerHits) >= classServerShare:
 		return ClassServer
+	case share(f.GameHits) >= classGameShare:
+		return ClassGameConsole
+	case share(f.CameraHits) >= classCameraShare:
+		return ClassCamera
+	case share(f.SpeakerHits) >= classSpeakerShare:
+		return ClassSmartSpeaker
+	// printer: distinctive but low-volume, so also require low diversity — a
+	// workstation that pings a print-cloud once must not flip to printer.
+	case share(f.PrinterHits) >= classPrinterShare && f.Domains <= classIoTMaxDomains:
+		return ClassPrinter
+	case share(f.StreamHits) >= classStreamShare:
+		return ClassTVStreaming
+	// mobile: an OS push endpoint (interactive personal device) plus broad
+	// browsing breadth — distinguishes a phone from a narrow-beacon IoT device.
+	case f.PushHits > 0 && f.Domains > classIoTMaxDomains:
+		return ClassMobile
 	}
 
 	// Inter-arrival coefficient of variation: low = regular/periodic (beacon).
@@ -1319,20 +1416,26 @@ func (s *DecoySource) RefreshClientClasses() error {
 	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	query := `WITH gaps AS (
-		SELECT client_name AS c,
+		SELECT ` + deviceKeyExpr + ` AS c,
 		       effective_tldp AS etldp,
 		       question_type AS qt,
 		       question_name AS qn,
 		       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
 		FROM log_entries
-		WHERE decoy = 0 AND client_name <> '' AND request_ts >= ?
-		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+		WHERE decoy = 0 AND (fp_hash <> '' OR client_name <> '') AND request_ts >= ?
+		WINDOW w AS (PARTITION BY ` + deviceKeyExpr + ` ORDER BY request_ts)
 	)
 	SELECT c,
 	       COUNT(*) AS n,
 	       COUNT(DISTINCT etldp) AS domains,
 	       COUNT(DISTINCT qt) AS qtypes,
 	       SUM(` + serverHitExpr() + `) AS serverhits,
+	       SUM(` + likeHitExpr(gameSignals) + `) AS gamehits,
+	       SUM(` + likeHitExpr(cameraSignals) + `) AS camerahits,
+	       SUM(` + likeHitExpr(speakerSignals) + `) AS speakerhits,
+	       SUM(` + likeHitExpr(printerSignals) + `) AS printerhits,
+	       SUM(` + likeHitExpr(streamSignals) + `) AS streamhits,
+	       SUM(` + likeHitExpr(pushSignals) + `) AS pushhits,
 	       COALESCE(AVG(gap),0) AS meangap,
 	       COALESCE(AVG(gap*gap),0) AS meangap2
 	FROM gaps
@@ -1361,9 +1464,134 @@ func (s *DecoySource) RefreshClientClasses() error {
 		}
 	}
 
+	// Re-key the manual overrides (name, person, class override) from the legacy
+	// client_name key to the stable fp device_key. The auto class above rebuilds
+	// itself under the new key, but the manual `override` column does not — nor do
+	// the identity/person tables — so they must be migrated explicitly (best-effort,
+	// idempotent, off the request path — see migrateLegacyKeys). Runs on this
+	// throttled timer, never at boot.
+	s.migrateLegacyKeys(since)
+
 	// Same timer, same recent window: rematerialize the Markov session models so
 	// NextInSession/SessionSeed read cheap tables instead of scanning per emit.
 	return s.refreshSessionModels(since)
+}
+
+// dominantFPByName maps every client_name seen in the window to its STABLE
+// device_key: the modal (most-frequent) non-empty fp_hash it presented, or the
+// name itself when it has no fingerprinted rows. This is the read-side inverse of
+// deviceKeyExpr — used to translate a UI-facing client_name into the key its
+// association rows are stored under, and to fan a stored key back out to the
+// current client_name(s) presenting it (people/name rollups).
+//
+// ponytail: one windowed GROUP BY over log_entries; called off the request path
+// (refresh timer + people/clients pages), not per emit.
+func (s *DecoySource) dominantFPByName(since time.Time) map[string]string {
+	var rows []struct {
+		Name string `gorm:"column:client_name"`
+		FP   string `gorm:"column:fp_hash"`
+		Cnt  int64  `gorm:"column:cnt"`
+	}
+
+	err := s.ro.Raw(`SELECT client_name, fp_hash, COUNT(*) AS cnt
+		FROM log_entries
+		WHERE decoy = 0 AND client_name <> '' AND request_ts >= ?
+		GROUP BY client_name, fp_hash`, since).Scan(&rows).Error
+	if err != nil {
+		return nil
+	}
+
+	best := map[string]int64{}
+	out := map[string]string{}
+
+	for _, r := range rows {
+		if r.FP == "" {
+			if _, ok := out[r.Name]; !ok {
+				out[r.Name] = r.Name // fp-less: key on the name (legacy behaviour)
+			}
+
+			continue
+		}
+
+		if r.Cnt > best[r.Name] {
+			best[r.Name] = r.Cnt
+			out[r.Name] = r.FP
+		}
+	}
+
+	return out
+}
+
+// deviceKey returns the STABLE device_key for a single client_name: the modal
+// non-empty fp_hash it presents over the window, else the name unchanged. This is
+// what re-keys class/person/name lookups off client_ip: two IPs of one device
+// share a fingerprint, so both resolve to the same key. One indexed query; used by
+// the (rare) UI setters and the display-side ClientClass, NOT the emit hot path
+// (the engine carries ClientPersona.Key and calls ClientClassByKey directly).
+func (s *DecoySource) deviceKey(name string) string {
+	if name == "" {
+		return name
+	}
+
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts stored UTC, compared lexically
+
+	var fp string
+
+	// idx_client_name_request_ts pins the client prefix; GROUP BY fp_hash sorts the
+	// (tiny) per-client subset. Error / no fp → fall back to the name.
+	_ = s.ro.Raw(`SELECT fp_hash FROM log_entries INDEXED BY idx_client_name_request_ts
+		WHERE decoy = 0 AND client_name = ? AND fp_hash <> '' AND request_ts >= ?
+		GROUP BY fp_hash ORDER BY COUNT(*) DESC LIMIT 1`, name, since).Scan(&fp).Error
+
+	if fp == "" {
+		return name
+	}
+
+	return fp
+}
+
+// migrateLegacyKeys re-points manual overrides (display name, person mapping,
+// class override) from the old client_name key onto the stable fp device_key, so
+// a user's "Alex's iPhone → Alex" mapping and any manual class survive the
+// re-keying instead of being silently orphaned. The AUTO class rebuilds itself
+// under the new key on every refresh; the manual `override` column does NOT, so
+// it is migrated here alongside the other irreplaceable manual tables.
+//
+// Pi3-safe: bounded to the ~fleet-size set of names with a fp, plain indexed
+// upsert/delete on the writer handle, on the throttled refresh timer — NEVER a
+// blocking boot op. Idempotent: once a row is fp-keyed its key is no longer a
+// name in nameToKey, so it is skipped.
+func (s *DecoySource) migrateLegacyKeys(since time.Time) {
+	nameToKey := s.dominantFPByName(since)
+
+	for name, key := range nameToKey {
+		if key == name { // fp-less name: nothing stable to re-key onto
+			continue
+		}
+
+		// Move the name-keyed manual rows onto the fp key without clobbering a row
+		// already stored there (INSERT OR IGNORE new key, then drop the old name row).
+		s.db.Exec(`INSERT OR IGNORE INTO client_identity (client, name, updated_at)
+			SELECT ?, name, updated_at FROM client_identity WHERE client = ?`, key, name)
+		s.db.Exec(`DELETE FROM client_identity WHERE client = ?`, name)
+
+		s.db.Exec(`INSERT OR IGNORE INTO client_person (client, person, updated_at)
+			SELECT ?, person, updated_at FROM client_person WHERE client = ?`, key, name)
+		s.db.Exec(`DELETE FROM client_person WHERE client = ?`, name)
+
+		// class override: the fp-keyed row already exists (RefreshClientClasses ran
+		// first with its auto class), so INSERT OR IGNORE alone can't carry the
+		// override. Adopt the legacy override onto the fp row only when that row has
+		// none of its own (never clobber a newer manual choice), then drop the stale
+		// name-keyed row so it can't shadow-revert on the next read.
+		s.db.Exec(`INSERT OR IGNORE INTO client_class (client, class, override, updated_at)
+			SELECT ?, class, override, updated_at FROM client_class WHERE client = ?`, key, name)
+		s.db.Exec(`UPDATE client_class
+			SET override = (SELECT override FROM client_class WHERE client = ?)
+			WHERE client = ? AND COALESCE(override,'') = ''
+			  AND COALESCE((SELECT override FROM client_class WHERE client = ?),'') <> ''`, name, key, name)
+		s.db.Exec(`DELETE FROM client_class WHERE client = ?`, name)
+	}
 }
 
 // refreshSessionModels rebuilds the decoy_transitions and decoy_session_seeds
@@ -1418,13 +1646,14 @@ func (s *DecoySource) refreshSessionModels(since time.Time) error {
 		GROUP BY cur`, since, gapSecs).Error
 }
 
-// ClientClass returns the cached effective class for client (override if set,
-// else the auto class), or ClassUnknown when the client has no cached row yet.
-// Fast: one primary-key lookup, no scan — safe to call per emission.
-func (s *DecoySource) ClientClass(client string) (string, error) {
+// ClientClassByKey returns the cached effective class for a STABLE device_key
+// (override if set, else the auto class), or ClassUnknown when the key has no
+// cached row yet. Fast: one primary-key lookup, no scan — this is the emit
+// hot-path entry (the engine passes ClientPersona.Key, already IP-independent).
+func (s *DecoySource) ClientClassByKey(key string) (string, error) {
 	var row clientClass
 
-	err := s.ro.Raw("SELECT class, override FROM client_class WHERE client = ? LIMIT 1", client).Scan(&row).Error
+	err := s.ro.Raw("SELECT class, override FROM client_class WHERE client = ? LIMIT 1", key).Scan(&row).Error
 	if err != nil {
 		return ClassUnknown, err
 	}
@@ -1440,12 +1669,33 @@ func (s *DecoySource) ClientClass(client string) (string, error) {
 	return row.Class, nil
 }
 
+// ClientClass returns the effective class for a client_name (display / UI /
+// tests). It first resolves the name to its stable device_key, so it stays
+// correct across an IP change, then does the same cheap lookup as
+// ClientClassByKey. One extra indexed query for the translation — fine off the
+// emit hot path (which uses ClientClassByKey directly).
+func (s *DecoySource) ClientClass(client string) (string, error) {
+	return s.ClientClassByKey(s.deviceKey(client))
+}
+
 // ListClientClasses returns every cached client classification (auto + override +
 // resolved effective), for the management UI.
 func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 	var rows []clientClass
 	if err := s.ro.Raw("SELECT client, class, override, updated_at FROM client_class ORDER BY client").Scan(&rows).Error; err != nil {
 		return nil, err
+	}
+
+	// device_key → a representative current client_name, so the UI shows a name
+	// (not a raw fp hash). The name still round-trips: a PUT with it re-resolves to
+	// the same key. Keys with no current traffic keep the raw key.
+	since := time.Now().Add(-decoyReplayWindow).UTC()
+	keyToName := map[string]string{}
+
+	for name, key := range s.dominantFPByName(since) {
+		if _, ok := keyToName[key]; !ok {
+			keyToName[key] = name
+		}
 	}
 
 	out := make([]ClientClassInfo, 0, len(rows))
@@ -1460,8 +1710,13 @@ func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 			eff = ClassUnknown
 		}
 
+		client := r.Client
+		if n, ok := keyToName[r.Client]; ok {
+			client = n
+		}
+
 		out = append(out, ClientClassInfo{
-			Client: r.Client, Class: r.Class, Override: r.Override, Effective: eff, UpdatedAt: r.UpdatedAt,
+			Client: client, Class: r.Class, Override: r.Override, Effective: eff, UpdatedAt: r.UpdatedAt,
 		})
 	}
 
@@ -1486,10 +1741,12 @@ func (s *DecoySource) SetClientClassOverride(client, class string) error {
 		return fmt.Errorf("invalid device class %q", class)
 	}
 
+	key := s.deviceKey(client) // store the override under the stable device_key
+
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "client"}},
 		DoUpdates: clause.Assignments(map[string]any{"override": class}),
-	}).Create(&clientClass{Client: client, Override: class, UpdatedAt: time.Now()}).Error
+	}).Create(&clientClass{Client: key, Override: class, UpdatedAt: time.Now()}).Error
 }
 
 // SampleClientOfClass returns a random real client whose EFFECTIVE class matches
@@ -1497,32 +1754,38 @@ func (s *DecoySource) SetClientClassOverride(client, class string) error {
 // ClientPersona (empty IP) when no such client exists — caller falls back to
 // SampleClient. Two cheap indexed random-row reads.
 func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
-	var name string
+	var key string
 
 	// ~110-row client_class table: ORDER BY RANDOM() is negligible, left as-is.
+	// `client` is the stable device_key (fp_hash, else client_name).
 	err := s.ro.Raw(`SELECT client FROM client_class
 		WHERE CASE WHEN override <> '' THEN override ELSE class END = ?
-		ORDER BY RANDOM() LIMIT 1`, class).Scan(&name).Error
+		ORDER BY RANDOM() LIMIT 1`, class).Scan(&key).Error
 	if err != nil {
 		return ClientPersona{}, err
 	}
 
-	if name == "" {
+	if key == "" {
 		return ClientPersona{}, nil
 	}
 
 	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
-	// A random real row FOR THIS ONE CLIENT: a rowid seek would jump across
-	// clients, so instead count this client's matching rows and take a random
-	// offset. INDEXED BY pins idx_client_name_request_ts: without it the planner
-	// rides idx_decoy_request_ts (decoy=0 prefix) and scans the whole decoy=0
-	// partition per emit (~30ms Pi3), instead of seeking the client's rows (~0ms).
+	// A random real row FOR THIS device_key. The key is a fp_hash (prod / IP-
+	// independent case) or a legacy client_name; each rides its OWN single-column
+	// index, never idx_decoy_request_ts (the emit hot path must not scan the whole
+	// decoy=0 partition — see the #10 index-plan guard). Count then random OFFSET.
+	col, idx := "client_name", "idx_client_name_request_ts"
+	if looksLikeFPHash(key) {
+		col, idx = "fp_hash", "idx_log_entries_fp_hash"
+	}
+
+	base := "FROM log_entries INDEXED BY " + idx +
+		" WHERE decoy = 0 AND " + col + " = ? AND client_ip <> '' AND request_ts >= ?"
+
 	var cnt int64
 
-	err = s.ro.Raw(`SELECT COUNT(*) FROM log_entries INDEXED BY idx_client_name_request_ts
-		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?`,
-		name, since).Scan(&cnt).Error
+	err = s.ro.Raw("SELECT COUNT(*) "+base, key, since).Scan(&cnt).Error
 	if err != nil {
 		return ClientPersona{}, err
 	}
@@ -1538,18 +1801,38 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 	var row struct {
 		fpRow
 
-		ClientIP string `gorm:"column:client_ip"`
+		ClientIP   string `gorm:"column:client_ip"`
+		ClientName string `gorm:"column:client_name"`
 	}
 
-	err = s.ro.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail
-		FROM log_entries INDEXED BY idx_client_name_request_ts
-		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?
-		ORDER BY request_ts LIMIT 1 OFFSET ?`, name, since, off).Scan(&row).Error
+	err = s.ro.Raw("SELECT client_ip, client_name, question_type, edns_udp_size, edns_opt_codes, fp_detail "+
+		base+" ORDER BY request_ts LIMIT 1 OFFSET ?", key, since, off).Scan(&row).Error
 	if err != nil {
 		return ClientPersona{}, err
 	}
 
-	return ClientPersona{IP: row.ClientIP, Name: name, Fp: row.toFpSample()}, nil
+	return ClientPersona{IP: row.ClientIP, Name: row.ClientName, Key: key, Fp: row.toFpSample()}, nil
+}
+
+// looksLikeFPHash reports whether s has the shape of a fp_hash (20 lowercase hex
+// chars — hex.EncodeToString of 10 bytes). Used to route a device_key to the
+// right single-column index: fp keys → idx_log_entries_fp_hash, everything else
+// (IP strings, hostnames) → the client_name index.
+//
+// ponytail: a 20-char all-lowercase-hex HOSTNAME would misroute, but that never
+// occurs in practice; not worth a schema flag.
+func looksLikeFPHash(s string) bool {
+	if len(s) != 20 {
+		return false
+	}
+
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+
+	return true
 }
 
 // --- manual client display-name override (Phase 2) --------------------------
@@ -1748,7 +2031,8 @@ func sanitizeDisplayName(s string) string {
 func (s *DecoySource) ClientName(client string) (string, error) {
 	var name string
 
-	err := s.ro.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", client).Scan(&name).Error
+	// Resolve to the stable device_key first, so a display name survives an IP change.
+	err := s.ro.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", s.deviceKey(client)).Scan(&name).Error
 
 	return name, err
 }
@@ -1761,12 +2045,34 @@ func (s *DecoySource) ClientNames() (map[string]string, error) {
 		return nil, err
 	}
 
-	out := make(map[string]string, len(rows))
+	byKey := make(map[string]string, len(rows))
 	for _, r := range rows {
-		out[r.Client] = r.Name
+		byKey[r.Client] = r.Name
 	}
 
-	return out, nil
+	return s.fanKeysToNames(byKey), nil
+}
+
+// fanKeysToNames turns a device_key→value map (how association rows are stored)
+// into a client_name→value map (how the name-keyed ClientList/people rollups look
+// values up). Every current client_name presenting a keyed device gets the value
+// — so a device that changed IP is found under its NEW name, and a cohort of
+// identical stacks all resolve (the accepted fp-cohort ceiling). Raw keys are
+// also passed through so idle (no window traffic) mappings still surface.
+func (s *DecoySource) fanKeysToNames(byKey map[string]string) map[string]string {
+	out := make(map[string]string, len(byKey))
+	for k, v := range byKey {
+		out[k] = v // passthrough: idle mappings + fp-less/legacy name keys
+	}
+
+	since := time.Now().Add(-decoyReplayWindow).UTC()
+	for name, key := range s.dominantFPByName(since) {
+		if v := byKey[key]; v != "" {
+			out[name] = v
+		}
+	}
+
+	return out
 }
 
 // SetClientName sets (or clears, with an empty/blank name) the display-name
@@ -1780,11 +2086,12 @@ func (s *DecoySource) SetClientName(client, name string) error {
 
 	name = sanitizeDisplayName(name)
 	now := time.Now()
+	key := s.deviceKey(client) // store under the stable device_key
 
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "client"}},
 		DoUpdates: clause.Assignments(map[string]any{"name": name, "updated_at": now}),
-	}).Create(&clientIdentity{Client: client, Name: name, UpdatedAt: now}).Error
+	}).Create(&clientIdentity{Client: key, Name: name, UpdatedAt: now}).Error
 }
 
 // ClientPerson returns the household-member mapping for client, or "" when none
@@ -1793,7 +2100,8 @@ func (s *DecoySource) SetClientName(client, name string) error {
 func (s *DecoySource) ClientPerson(client string) (string, error) {
 	var person string
 
-	err := s.ro.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", client).Scan(&person).Error
+	// Resolve to the stable device_key first (IP-independent person mapping).
+	err := s.ro.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", s.deviceKey(client)).Scan(&person).Error
 
 	return person, err
 }
@@ -1807,12 +2115,12 @@ func (s *DecoySource) ClientPersons() (map[string]string, error) {
 		return nil, err
 	}
 
-	out := make(map[string]string, len(rows))
+	byKey := make(map[string]string, len(rows))
 	for _, r := range rows {
-		out[r.Client] = r.Person
+		byKey[r.Client] = r.Person
 	}
 
-	return out, nil
+	return s.fanKeysToNames(byKey), nil
 }
 
 // SetClientPerson sets (or clears, with a blank person) the household-member
@@ -1827,11 +2135,12 @@ func (s *DecoySource) SetClientPerson(client, person string) error {
 
 	person = sanitizeDisplayName(person)
 	now := time.Now()
+	key := s.deviceKey(client) // store under the stable device_key
 
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "client"}},
 		DoUpdates: clause.Assignments(map[string]any{"person": person, "updated_at": now}),
-	}).Create(&clientPerson{Client: client, Person: person, UpdatedAt: now}).Error
+	}).Create(&clientPerson{Client: key, Person: person, UpdatedAt: now}).Error
 }
 
 // qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)

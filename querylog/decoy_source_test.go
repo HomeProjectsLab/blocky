@@ -28,6 +28,7 @@ type realRow struct {
 	QuestionType  string    `gorm:"column:question_type"`
 	ResponseType  string    `gorm:"column:response_type"`
 	EffectiveTLDP string    `gorm:"column:effective_tldp"`
+	FpHash        string    `gorm:"column:fp_hash;index"`
 	Decoy         bool      `gorm:"column:decoy"`
 	EDNSUDPSize   uint16    `gorm:"column:edns_udp_size"`
 	EDNSOptCodes  string    `gorm:"column:edns_opt_codes"`
@@ -665,6 +666,119 @@ var _ = Describe("DecoySource", func() {
 			p, e = src.SampleClientOfClass(ClassServer)
 			Expect(e).Should(Succeed())
 			Expect(p.IP).Should(BeEmpty())
+		})
+
+		// fpBeacon: an IoT-shaped periodic beacon carrying an explicit fingerprint
+		// hash, at a given IP/name. Same shape as beacon() but sets fp_hash + lets the
+		// caller vary the (ip, name) pair to simulate a DHCP lease change / roam.
+		fpBeacon := func(ip, name, fp string, domains []string, n int, start time.Time) []realRow {
+			rows := make([]realRow, 0, n)
+			for i := range n {
+				rows = append(rows, realRow{
+					RequestTS: start.Add(time.Duration(i) * 5 * time.Minute),
+					ClientIP:  ip, ClientName: name, FpHash: fp,
+					QuestionName: domains[i%len(domains)], QuestionType: "A",
+					EffectiveTLDP: domains[i%len(domains)],
+				})
+			}
+
+			return rows
+		}
+
+		It("keeps class/person/persona associated to the SAME fingerprint across an IP change (goal 3)", func() {
+			now := time.Now()
+			const fp = "aabbccddeeff00112233" // 20-hex, shape of a real fp_hash
+			iotDomains := []string{"telemetry.tuya.com", "time.nist.gov"}
+
+			// Same device, same fingerprint, two different IPs/names (the DHCP/roam
+			// case: client_name falls back to the IP string, so both change together).
+			// Contiguous 5-min beacons so the cohort stays cleanly IoT-shaped.
+			var rows []realRow
+			rows = append(rows, fpBeacon("10.0.0.5", "10.0.0.5", fp, iotDomains, 40, now.Add(-8*time.Hour))...)
+			rows = append(rows, fpBeacon("10.0.0.99", "10.0.0.99", fp, iotDomains, 40, now.Add(-8*time.Hour+205*time.Minute))...)
+
+			src := seedLog("ipindep.db", rows)
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
+			// (a) the stable device_key is the fingerprint, identical under both IPs.
+			keyA := src.deviceKey("10.0.0.5")
+			keyB := src.deviceKey("10.0.0.99")
+			Expect(keyA).Should(Equal(fp))
+			Expect(keyB).Should(Equal(keyA), "device_key must not depend on client_ip")
+
+			// (b) class resolves the same under the old and the new IP.
+			cA, e := src.ClientClass("10.0.0.5")
+			Expect(e).Should(Succeed())
+			cB, e := src.ClientClass("10.0.0.99")
+			Expect(e).Should(Succeed())
+			Expect(cA).Should(Equal(ClassIoT))
+			Expect(cB).Should(Equal(cA), "class must survive an IP change")
+
+			// (c) a person mapped under the OLD IP is found under the NEW IP.
+			Expect(src.SetClientPerson("10.0.0.5", "Alex")).Should(Succeed())
+			pB, e := src.ClientPerson("10.0.0.99")
+			Expect(e).Should(Succeed())
+			Expect(pB).Should(Equal("Alex"), "person mapping must follow the fingerprint, not the IP")
+
+			// (d) the sampled persona keys on the stable fingerprint regardless of
+			// which IP the sampled row happened to carry.
+			persona, e := src.SampleClientOfClass(ClassIoT)
+			Expect(e).Should(Succeed())
+			Expect(persona.Key).Should(Equal(fp))
+			Expect(persona.IP).Should(BeElementOf("10.0.0.5", "10.0.0.99"))
+		})
+
+		It("classifies a console-backend cohort as game-console and a camera-backend cohort as camera", func() {
+			now := time.Now()
+
+			// game-console: dominated by xbox live telemetry.
+			game := fpBeacon("10.0.0.40", "10.0.0.40", "1111111111aaaaaaaaaa",
+				[]string{"title.xboxlive.com", "notify.xboxlive.com"}, 30, now.Add(-6*time.Hour))
+			// camera: dominated by Hikvision cloud.
+			cam := fpBeacon("10.0.0.41", "10.0.0.41", "2222222222bbbbbbbbbb",
+				[]string{"dev.hik-connect.com", "push.hik-connect.com"}, 30, now.Add(-6*time.Hour))
+
+			src := seedLog("newclasses.db", append(game, cam...))
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
+			c, e := src.ClientClass("10.0.0.40")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassGameConsole))
+
+			c, e = src.ClientClass("10.0.0.41")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassCamera))
+		})
+
+		It("migrates a legacy name-keyed class override onto the fp device_key (no silent revert on upgrade)", func() {
+			now := time.Now()
+			const fp = "3333333333cccccccccc"
+			rows := fpBeacon("10.0.0.42", "10.0.0.42", fp,
+				[]string{"telemetry.tuya.com", "time.nist.gov"}, 40, now.Add(-8*time.Hour))
+			src := seedLog("classmig.db", rows)
+
+			// simulate a pre-upgrade override stored under the OLD client_name key
+			// (auto class IoT for this cohort; user manually pinned it to server).
+			Expect(src.db.Exec(
+				`INSERT INTO client_class (client, class, override, updated_at) VALUES (?, ?, ?, ?)`,
+				"10.0.0.42", "", ClassServer, now).Error).Should(Succeed())
+
+			Expect(src.RefreshClientClasses()).Should(Succeed())
+
+			// override must now resolve under the stable fp key AND via the name.
+			c, e := src.ClientClassByKey(fp)
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassServer), "override must follow the fp key, not silently revert to auto")
+
+			c, e = src.ClientClass("10.0.0.42")
+			Expect(e).Should(Succeed())
+			Expect(c).Should(Equal(ClassServer))
+
+			// the stale name-keyed row is gone (can't shadow-revert later).
+			var n int64
+			Expect(src.db.Raw(`SELECT COUNT(*) FROM client_class WHERE client = ?`, "10.0.0.42").
+				Scan(&n).Error).Should(Succeed())
+			Expect(n).Should(BeZero())
 		})
 	})
 })

@@ -254,7 +254,10 @@ type Source interface {
 	SessionSeed() (string, error)
 	RevisitInterval(domain string) (time.Duration, bool)
 	SampleClient() (querylog.ClientPersona, error)
-	ClientClass(client string) (string, error)
+	// ClientClassByKey looks up a device class by the persona's STABLE device_key
+	// (fp_hash-derived, IP-independent) — not by client_name, so a client that
+	// changed IP keeps its class. One PK lookup, safe per emit.
+	ClientClassByKey(key string) (string, error)
 }
 
 // Engine emits background noise queries at a randomized rate, mixing replayed
@@ -1459,7 +1462,9 @@ func (e *Engine) pickPersona() (querylog.ClientPersona, bool) {
 	defer e.personaMu.Unlock()
 
 	if len(e.personas) < personaPoolSize {
-		if p, err := e.source.SampleClient(); err == nil && p.IP != "" && !hasPersona(e.personas, p.IP) {
+		// Dedup on the STABLE device_key, not IP: one device seen at two IPs must
+		// not fill two pool slots, and its shaping stays consistent across the move.
+		if p, err := e.source.SampleClient(); err == nil && p.IP != "" && !hasPersona(e.personas, p.Key) {
 			e.personas = append(e.personas, p)
 		}
 	}
@@ -1498,10 +1503,11 @@ func (e *Engine) classPersona() (querylog.ClientPersona, string, bool) {
 		return persona, "", false
 	}
 
-	// client_class is keyed by client NAME (RefreshClientClasses groups on
-	// client_name) — looking up by IP matched zero rows wherever names resolve,
-	// silently disabling device-class shaping.
-	class, err := e.source.ClientClass(persona.Name)
+	// client_class is keyed by the STABLE device_key (fp_hash-derived), carried on
+	// the persona from sample time — so a client that changed IP (DHCP/roam) still
+	// resolves to the same class instead of losing its shaping. No per-emit
+	// name→key translation: the key is already on the persona.
+	class, err := e.source.ClientClassByKey(persona.Key)
 	if err != nil {
 		e.logger.WithError(err).Debug("client class lookup failed")
 
@@ -1600,9 +1606,9 @@ func (e *Engine) emitServer(ctx context.Context, persona querylog.ClientPersona)
 	e.resolveOne(ctx, q)
 }
 
-func hasPersona(ps []querylog.ClientPersona, ip string) bool {
+func hasPersona(ps []querylog.ClientPersona, key string) bool {
 	for _, p := range ps {
-		if p.IP == ip {
+		if p.Key == key {
 			return true
 		}
 	}

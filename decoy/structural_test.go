@@ -52,7 +52,7 @@ func (m *mockSource) NextInSession(primary string) (string, error) {
 func (m *mockSource) SessionSeed() (string, error)                  { return m.seed, nil }
 func (m *mockSource) RevisitInterval(string) (time.Duration, bool)  { return m.revisit, m.revisitOK }
 func (m *mockSource) SampleClient() (querylog.ClientPersona, error) { return m.persona, nil }
-func (m *mockSource) ClientClass(string) (string, error) {
+func (m *mockSource) ClientClassByKey(string) (string, error) {
 	if m.class == "" {
 		return querylog.ClassUnknown, nil
 	}

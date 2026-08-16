@@ -64,10 +64,33 @@ type Fingerprint struct {
 	Mixed0x20 bool // qname contains uppercase
 }
 
-// Hash returns a stable identifier over the software-identifying fields only.
+// hasEntropy reports whether the fingerprint carries any device-discriminating
+// signal beyond a bare default-stub query. A plain Do53 query with no EDNS, no
+// TLS and no User-Agent is content-free: every default resolver on a LAN emits
+// the identical shape, so hashing it would collapse physically distinct devices
+// — and, worse, their person mappings (Phase 5) — into ONE device_key. Below
+// this floor we return no hash so callers fall back to the per-name legacy key
+// (see deviceKeyExpr / SampleClient: fp_hash == "" → key on client_name).
+//
+// ponytail: naive entropy floor. Two devices that DO share an identical wire
+// stack (same model, same EDNS/TLS shape) still merge into one key above the
+// floor — the accepted fp-cohort ceiling. Tighten only if same-model person
+// bleed shows up in practice (would need a per-device secret, not wire fields).
+func (f *Fingerprint) hasEntropy() bool {
+	return f.HadEDNS0 || f.TLSVersion != 0 || f.UserAgent != "" ||
+		(f.Transport != TransportDo53UDP && f.Transport != TransportDo53TCP)
+}
+
+// Hash returns a stable identifier over the software-identifying fields only,
+// or "" when the fingerprint is below the entropy floor (see hasEntropy) — a
+// content-free bare query is keyed by name, never merged by fingerprint.
 // Per-query noise (MsgID, SrcPort, SNI, cookie presence, 0x20 casing) is
 // deliberately excluded so the same client stack always hashes the same.
 func (f *Fingerprint) Hash() string {
+	if !f.hasEntropy() {
+		return ""
+	}
+
 	opts := make([]string, len(f.EDNSOptCodes))
 	for i, c := range f.EDNSOptCodes {
 		opts[i] = strconv.FormatUint(uint64(c), 10)

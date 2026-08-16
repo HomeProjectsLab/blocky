@@ -69,6 +69,26 @@ var _ = Describe("Fingerprint", func() {
 			Expect(a.Hash()).Should(Equal(a.Hash()))
 			Expect(a.Hash()).Should(HaveLen(20)) // 10 bytes hex
 		})
+
+		It("returns no hash below the entropy floor (bare Do53-UDP, no EDNS/TLS/UA)", func() {
+			// A default stub query with nothing device-specific must NOT mint a
+			// fp_hash, or every plain-DNS device on the LAN collapses into one key.
+			bare := Fingerprint{Transport: TransportDo53UDP, RD: true, QClass: 1}
+			Expect(bare.Hash()).Should(BeEmpty())
+
+			// Any one discriminating signal lifts it over the floor.
+			withEDNS := bare
+			withEDNS.HadEDNS0 = true
+			Expect(withEDNS.Hash()).ShouldNot(BeEmpty())
+
+			withUA := bare
+			withUA.UserAgent = "curl/8.0"
+			Expect(withUA.Hash()).ShouldNot(BeEmpty())
+
+			doh := bare
+			doh.Transport = TransportDoH
+			Expect(doh.Hash()).ShouldNot(BeEmpty())
+		})
 	})
 
 	Describe("Transport String", func() {
