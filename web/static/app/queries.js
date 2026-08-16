@@ -1,5 +1,6 @@
 // queries.js — query explorer: filter form, paginated table, CSV export.
-import { getJSON } from "./api.js";
+import { getJSON, send } from "./api.js";
+import { confirmDialog, toast } from "./modal.js";
 import { fmtDateTime, band, csvField } from "./format.js";
 
 const LIMIT = 50;
@@ -94,6 +95,28 @@ document.getElementById("csv-btn").addEventListener("click", () => {
     a.download = "jungleblock-queries.csv";
     a.click();
     URL.revokeObjectURL(a.href);
+});
+
+// Clear the entire query log (raw rows + hourly aggregates). Config, blocklists
+// and client identity are kept.
+const purgeBtn = document.getElementById("q-purge");
+purgeBtn.addEventListener("click", async () => {
+    const ok = await confirmDialog(
+        "Delete ALL logged queries and their stats? Config, blocklists and client identity are kept. This can't be undone.",
+        { title: "Clear query log", okText: "Delete all", danger: true });
+    if (!ok) return;
+
+    purgeBtn.disabled = true;
+    try {
+        await send("DELETE", "/api/ui/queries");
+        toast("Query log cleared.", { type: "success" });
+        offset = 0;
+        load();
+    } catch (err) {
+        toast("Could not clear the log: " + err.message, { type: "error" });
+    } finally {
+        purgeBtn.disabled = false;
+    }
 });
 
 load();

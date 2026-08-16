@@ -47,6 +47,7 @@ func registerStatsUIEndpoints(
 	})
 
 	router.Get("/api/ui/queries", s.queries)
+	router.Delete("/api/ui/queries", s.purgeQueries)
 	router.Get("/api/ui/stream", s.stream)
 	router.Get("/api/ui/system", s.system)
 	router.Get("/api/ui/clients", s.clients)
@@ -177,6 +178,29 @@ func badRequest(rw http.ResponseWriter, err error) {
 
 func internalError(rw http.ResponseWriter, err error) {
 	writeJSON(rw, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+}
+
+// purgeQueries deletes ALL logged queries and their hourly aggregate rollups.
+// Config, blocklists, decoy corpus and client identity/class are untouched — only
+// the query history and its stats are cleared.
+func (s *statsAPI) purgeQueries(rw http.ResponseWriter, _ *http.Request) {
+	if s.qlCfg.Type != config.QueryLogTypeSqlite {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "query log not in sqlite mode"})
+
+		return
+	}
+
+	// Drop the cached read-only reader so subsequent reads reopen against the
+	// emptied log instead of a handle whose page cache still holds deleted rows.
+	_ = s.Close()
+
+	if err := querylog.PurgeQueryLog(s.qlCfg.Target.Reveal()); err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
 }
 
 func (s *statsAPI) overview(rw http.ResponseWriter, req *http.Request) {

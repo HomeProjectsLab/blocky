@@ -118,7 +118,10 @@
         <dl id="drawer-body"></dl>
     </aside>
 {{else if eq .Page "queries"}}
-    <div class="page-head"><h1>Queries</h1></div>
+    <div class="page-head">
+        <h1>Queries</h1>
+        <button type="button" id="q-purge" class="btn-danger" title="Delete all logged queries and their stats">Clear query log</button>
+    </div>
     <section class="panel">
         <form id="qform" class="qform">
             <input type="text" name="client" placeholder="client" autocomplete="off">
