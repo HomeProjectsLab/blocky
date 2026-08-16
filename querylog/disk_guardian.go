@@ -32,8 +32,11 @@ const (
 	// history when the disk is full from something OTHER than the query log
 	// (deleting query rows wouldn't help there anyway).
 	diskGuardMinRetain = 1 * time.Hour
-	diskGuardBatch     = 20_000 // raw rows per delete step
-	diskGuardMaxSteps  = 100    // bound work per tick (<= 2M rows)
+	diskGuardBatch     = 5_000 // raw rows per delete step; small so flush + RO readers interleave between steps
+	diskGuardMaxSteps  = 100   // bound work per tick (<= 500k rows/tick; relief continues next tick)
+	// diskGuardStepPause yields SD IO to the flush + RO readers between delete
+	// steps (same IO-starvation class as the index build).
+	diskGuardStepPause = 100 * time.Millisecond
 )
 
 // freeFractionFn is the free-space probe; a var so tests can simulate disk
@@ -112,6 +115,15 @@ func (d *DatabaseWriter) enforceDiskTarget(ctx context.Context, dir string) {
 
 		if free, err = freeFractionFn(dir); err != nil || free >= diskFreeTargetFrac {
 			break
+		}
+
+		// Yield SD IO to the flush + RO readers between steps; the guardian ticks every
+		// 5m, so relief spread over a few extra ms/step costs nothing and stops a tick
+		// from monopolising the disk (the same IO-starvation class as the index build).
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(diskGuardStepPause):
 		}
 	}
 

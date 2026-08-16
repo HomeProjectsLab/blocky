@@ -25,7 +25,7 @@ import (
 )
 
 type logEntry struct {
-	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2;index:idx_decoy_request_ts,priority:2;index:idx_log_entries_etldp_ts,priority:2"`
+	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2;index:idx_decoy_request_ts,priority:2"`
 	ClientIP      string
 	ClientName    string `gorm:"index;index:idx_client_name_request_ts,priority:1"`
 	DurationMs    int64
@@ -33,7 +33,7 @@ type logEntry struct {
 	ResponseType  string `gorm:"index"`
 	QuestionType  string
 	QuestionName  string `gorm:"index"`
-	EffectiveTLDP string `gorm:"index:idx_log_entries_etldp_ts,priority:1"`
+	EffectiveTLDP string // indexed by idx_log_entries_etldp_ts, built in the background (buildDeferredIndexes)
 	Answer        string
 	ResponseCode  string
 	Hostname      string
@@ -140,24 +140,10 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 
 		sqlDB.SetMaxOpenConns(1)
 
-		// Enable incremental auto-vacuum so the disk guardian can return freed pages
-		// to the OS via incremental_vacuum. SQLite silently ignores the pragma once
-		// the file header is written — and the WAL DSN writes it on open — so the
-		// pragma alone is a no-op (the db stays auto_vacuum=NONE even when fresh). A
-		// single VACUUM right after the pragma actually applies the new mode, on both
-		// a fresh WAL db and a pre-existing appliance db. VACUUM needs ~2x space and
-		// rewrites the whole file, so gate it on the current mode: the writer is
-		// rebuilt on every config hot-swap, and re-VACUUMing a multi-GB appliance DB
-		// on each apply holds a long write lock and can hit SQLITE_FULL under the disk
-		// guardian's steady state. auto_vacuum=2 (INCREMENTAL) means the mode is
-		// already applied, so subsequent applies become a cheap PRAGMA read.
-		var mode int
-		db.Raw("PRAGMA auto_vacuum").Scan(&mode)
-
-		if mode != 2 {
-			db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
-			db.Exec("VACUUM")
-		}
+		// The one-time INCREMENTAL auto_vacuum apply (a whole-file VACUUM) and the
+		// heavy etldp index build run OFF this synchronous boot/apply path in
+		// buildDeferredIndexes — on a multi-GB appliance DB each is minutes of write
+		// lock that would block NewServer, DNS and the UI readers. See that method.
 	}
 
 	// Migrate the schema
@@ -174,7 +160,68 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 
 	go w.periodicFlush(ctx)
 
+	if dbType == config.QueryLogTypeSqlite {
+		go w.buildDeferredIndexes(ctx)
+	}
+
 	return w, nil
+}
+
+// buildDeferredIndexes runs the heavy one-time sqlite maintenance (INCREMENTAL
+// auto_vacuum apply + the etldp composite index) OFF the synchronous boot/apply
+// path, so NewServer returns and the box serves DNS + reads immediately. Queries
+// touching effective_tldp table-scan until the index lands: slower, not broken.
+//
+// Held under d.lock for the full build: flushes/prunes queue behind it (no batch
+// loss), and Write() blocks, so the resolver's logChan fills and it drops intake
+// at its existing non-blocking send (query_logging_resolver.go:246) — bounded,
+// already logged, DNS never touched. A second connection is NOT used on purpose:
+// CREATE INDEX/VACUUM hold an exclusive write lock for their whole duration, so a
+// flush on a second conn would exhaust busy_timeout and doDBWrite would clear the
+// batch on the error (silent loss). Serializing on d.lock makes flushes queue.
+//
+// ponytail: SQLite has no CREATE INDEX CONCURRENTLY, so reader latency still
+// degrades from SD IO *during* this one-shot build — unavoidable; but it is one
+// event, boot no longer blocks for minutes, and DNS/config stay live throughout.
+func (d *DatabaseWriter) buildDeferredIndexes(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	logger := log.PrefixedLog("database_writer")
+
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	// One-time: apply INCREMENTAL auto_vacuum (the disk guardian's incremental_vacuum
+	// needs it). VACUUM rewrites the whole file; gated so every later boot is a cheap
+	// PRAGMA read once mode==2.
+	var mode int
+
+	d.db.Raw("PRAGMA auto_vacuum").Scan(&mode)
+
+	if mode != 2 {
+		d.db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
+
+		if err := d.db.Exec("VACUUM").Error; err != nil {
+			logger.Errorf("deferred VACUUM failed: %v", err)
+		}
+	}
+
+	// The heavy composite index. IF NOT EXISTS = idempotent/resumable across restarts
+	// (no HasIndex needed; a no-op once built).
+	const stmt = "CREATE INDEX IF NOT EXISTS idx_log_entries_etldp_ts " +
+		"ON log_entries (effective_tldp, request_ts)"
+
+	if err := d.db.Exec(stmt).Error; err != nil {
+		logger.Errorf("deferred index build failed: %v", err)
+
+		return
+	}
+
+	// Fold the build's WAL frames into the main DB so readers don't inherit a giant
+	// -wal from the index write.
+	d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 }
 
 func databaseMigration(db *gorm.DB, dbType config.QueryLogType, logRetentionDays uint64) error {
@@ -400,6 +447,19 @@ func (d *DatabaseWriter) doDBWrite() error {
 
 		if multiErr := err.ErrorOrNil(); multiErr != nil {
 			return fmt.Errorf("failed to write querylog entries to database: %w", multiErr)
+		}
+	}
+
+	// Bound the -wal under sustained decoy writes. SQLite's passive auto-checkpoint
+	// (wal_autocheckpoint pages) can't reset the WAL past a held read-mark, and the
+	// dashboard polls readers continuously, so it starves → the -wal grows unbounded
+	// → every RO reader scans a multi-GB WAL (the 15-20s hang). A TRUNCATE checkpoint
+	// on the flush loop resets it every dbFlushPeriod. Same connection + lock: no new
+	// writer. It also reclaims the DecoySource second-writer connection's frames (same
+	// file, it never checkpoints). Non-fatal; sqlite-only (d.aggregate).
+	if d.aggregate {
+		if err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
+			log.Log().Tracef("wal checkpoint failed: %v", err)
 		}
 	}
 

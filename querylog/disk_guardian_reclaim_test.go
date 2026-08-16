@@ -34,6 +34,17 @@ func realFileWriter() *DatabaseWriter {
 		}
 	})
 
+	// The heavy sqlite maintenance (INCREMENTAL auto_vacuum apply + the etldp index)
+	// now runs off the boot path in buildDeferredIndexes; these real-file tests assume
+	// it has completed (auto_vacuum=INCREMENTAL so incremental_vacuum drains freed
+	// pages), so wait for it.
+	Eventually(func() int {
+		var mode int
+		writer.db.Raw("PRAGMA auto_vacuum").Scan(&mode)
+
+		return mode
+	}, "10s", "20ms").Should(Equal(2))
+
 	return writer
 }
 

@@ -331,7 +331,8 @@ var _ = Describe("DatabaseWriter", func() {
 	Describe("buildSQLiteDSN", func() {
 		It("builds a file URI with WAL and busy_timeout pragmas", func() {
 			Expect(buildSQLiteDSN("/var/lib/blocky/querylog.db")).Should(Equal(
-				"file:/var/lib/blocky/querylog.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"))
+				"file:/var/lib/blocky/querylog.db?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+					"&_pragma=busy_timeout(5000)&_pragma=wal_autocheckpoint(1000)"))
 		})
 	})
 
@@ -375,7 +376,9 @@ var _ = Describe("DatabaseWriter", func() {
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_fp_hash"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_decoy"`).WillReturnResult(sqlmock.NewResult(0, 0))
 					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_decoy_source"`).WillReturnResult(sqlmock.NewResult(0, 0))
-					mock.ExpectExec(`CREATE INDEX IF NOT EXISTS "idx_log_entries_etldp_ts"`).WillReturnResult(sqlmock.NewResult(0, 0))
+					// idx_log_entries_etldp_ts is no longer a struct-tag index: it is built
+					// off the boot path (sqlite-only) in buildDeferredIndexes, so AutoMigrate
+					// on non-sqlite targets never emits it.
 				})
 
 				By("create postgres specific manually defined primary key", func() {

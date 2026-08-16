@@ -25,6 +25,10 @@ import (
 // connection so transient lock contention with external readers is retried, not failed.
 const sqliteBusyTimeoutMs = 5000
 
+// sqliteWALAutocheckpointPages: passive-checkpoint backstop between the flush
+// loop's TRUNCATE checkpoints (doDBWrite). The SQLite default, made explicit.
+const sqliteWALAutocheckpointPages = 1000
+
 // sqliteDirPermission is the permission used when creating the parent directory of the sqlite database file.
 const sqliteDirPermission os.FileMode = 0o750
 
@@ -69,9 +73,17 @@ func newSQLiteReadOnlyDialector(target string) (gorm.Dialector, error) {
 // opening a different file, possibly without WAL) and "%xx" would be decoded into
 // a different path. "%" is encoded first as it is the escape character itself;
 // strings.Replacer never re-scans its own output, so the inserted "%25" is safe.
+// synchronous=NORMAL under WAL is durable against app/process crash and never
+// corrupts (append-only WAL, torn writes detected); only power-loss can lose the
+// last un-fsync'd commits (≤ one flush period) — acceptable for a query log, and
+// far cheaper than FULL's per-commit fsync on an SD card. Set explicitly so it is
+// documented and immune to a driver default change. wal_autocheckpoint is the
+// passive backstop between the flush loop's TRUNCATE checkpoints (doDBWrite).
 func buildSQLiteDSN(path string) string {
-	return fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)",
-		encodeSQLitePath(path), sqliteBusyTimeoutMs)
+	return fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"+
+			"&_pragma=busy_timeout(%d)&_pragma=wal_autocheckpoint(%d)",
+		encodeSQLitePath(path), sqliteBusyTimeoutMs, sqliteWALAutocheckpointPages)
 }
 
 func encodeSQLitePath(path string) string {

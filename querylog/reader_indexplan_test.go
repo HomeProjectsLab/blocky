@@ -51,6 +51,7 @@ var bigTables = []string{"log_entries", "agg_hourly", "agg_domains_hourly"}
 func TestUIQueriesAreIndexBacked(t *testing.T) {
 	w, r := writerReaderOnTemp(t)
 	seedForPlan(t, w)
+	waitForETLDPIndex(t, w) // etldp index is now built async (buildDeferredIndexes)
 
 	cl := &captureLogger{on: true}
 	r.db.Logger = cl
@@ -193,6 +194,7 @@ func TestDecoySamplersAreIndexBacked(t *testing.T) {
 	}
 
 	seedForPlan(t, w)
+	waitForETLDPIndex(t, w) // etldp index is now built async (buildDeferredIndexes)
 
 	src, err := NewDecoySource(dbPath)
 	if err != nil {
@@ -375,4 +377,26 @@ func seedForPlan(t *testing.T, w *DatabaseWriter) {
 	if err := w.doDBWrite(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// waitForETLDPIndex blocks until the background builder (buildDeferredIndexes) has
+// landed idx_log_entries_etldp_ts, so the index-plan gates don't race it. On a
+// small temp db the build is milliseconds; also asserts the deferred build ran at
+// all (a regression that never creates the index trips the deadline here).
+func waitForETLDPIndex(t *testing.T, w *DatabaseWriter) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int64
+		if err := w.db.Raw(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_log_entries_etldp_ts'").
+			Scan(&n).Error; err == nil && n == 1 {
+			return
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("idx_log_entries_etldp_ts was not built by the background builder within 10s")
 }
