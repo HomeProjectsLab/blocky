@@ -144,7 +144,8 @@ applyBtn.addEventListener("click", async () => {
 // ── Conditional forwarding ────────────────────────────────────────────────
 // conditional.mapping.<domain> = <resolver(s)>. Own panel, own PUT endpoint.
 const condEl = el("div");
-groupsEl.after(condEl);
+// After the "+ Add group" panel, so that button reads as part of the group list.
+document.getElementById("add-group-btn").closest("section").after(condEl);
 
 function condRow(domain, upstreams) {
     const row = el("div", { class: "entry-row" });

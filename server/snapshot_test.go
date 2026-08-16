@@ -31,3 +31,21 @@ func TestIsDefaultWindow(t *testing.T) {
 		}
 	}
 }
+
+// Regression: a persistently-failing refresh must not serve the last good pass
+// forever — past snapshotMaxAge the getters report not-ok so handlers fall
+// through to the live reader (which surfaces the real error).
+func TestSnapshotStalenessCap(t *testing.T) {
+	now := time.Now()
+	snap := &statsSnapshot{ready: true, computedAt: now}
+
+	if _, ok := snap.getOverview(now.Add(-defaultWindow), now); !ok {
+		t.Fatal("fresh snapshot must be served")
+	}
+
+	snap.computedAt = now.Add(-snapshotMaxAge - time.Second)
+
+	if _, ok := snap.getOverview(now.Add(-defaultWindow), now); ok {
+		t.Fatal("stale snapshot must not be served")
+	}
+}

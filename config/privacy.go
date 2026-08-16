@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -140,8 +141,8 @@ type DeviceClassConfig struct {
 	// iot/server-classed clients instead of browse companions.
 	VendorTelemetry bool `default:"true" yaml:"vendorTelemetry"`
 	// VendorFamilies names which telemetry families to draw beacon domains from
-	// (e.g. "apple", "google", "amazon", "microsoft", "samsung", "tuya", "sonos").
-	// Empty = the engine's built-in default family set.
+	// (e.g. "hue", "nest", "ring", "sonos", "tesla", "tuya"; see knownVendorFamilies
+	// for the full set). Empty = the engine's built-in default family set.
 	VendorFamilies []string `yaml:"vendorFamilies"`
 	// PhantomDevicesPct is the share of vendor-telemetry chaff drawn from families
 	// NOT present in the real fleet, to obscure true fleet size and vendor mix.
@@ -244,6 +245,27 @@ func (c *PrivacyConfig) validate(_ *logrus.Entry) error {
 func (c *DecoyConfig) validate() error {
 	if !c.Enable {
 		return nil
+	}
+
+	// NaN/Inf sail through every `<` guard below (NaN compares false to
+	// everything) and end up as timer.Reset(0)/negative Durations that spin the
+	// emit loop at 100% CPU. Reject non-finite values outright.
+	for _, f := range []struct {
+		name string
+		val  float64
+	}{
+		{"queriesPerMinute", c.QueriesPerMinute},
+		{"targetQpmPeak", c.TargetQPMPeak},
+		{"targetQpmTrough", c.TargetQPMTrough},
+		{"offHoursFloorQPM", c.OffHoursFloorQPM},
+	} {
+		if math.IsNaN(f.val) || math.IsInf(f.val, 0) {
+			return fmt.Errorf("privacy.decoy: %s (%v) must be a finite number", f.name, f.val)
+		}
+	}
+
+	if c.QueriesPerMinute < 0 {
+		return fmt.Errorf("privacy.decoy: queriesPerMinute (%.2f) must be >= 0", c.QueriesPerMinute)
 	}
 
 	if c.ActiveHoursStart < 0 || c.ActiveHoursStart > 23 {

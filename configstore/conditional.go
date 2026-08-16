@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v2"
+	yaml3 "gopkg.in/yaml.v3"
 )
 
 // GetConditional returns the conditional.mapping out of the RAW stored blob.
@@ -42,22 +43,25 @@ func (s *Store) GetConditional() (map[string][]string, error) {
 // mappings and the rewrite config untouched. Validated through the full
 // pipeline (SetRawYAML) before persist; nothing is written on failure.
 func (s *Store) SetConditionalMapping(domain string, upstreams []string) error {
-	return s.mutateConditional(func(mapping map[any]any) {
-		mapping[domain] = strings.Join(upstreams, ",")
+	return s.mutateConditional(func(mapping *yaml3.Node) {
+		setMapEntry(mapping, domain,
+			&yaml3.Node{Kind: yaml3.ScalarNode, Tag: "!!str", Value: strings.Join(upstreams, ",")})
 	})
 }
 
 // DeleteConditionalMapping removes conditional.mapping.<domain>.
 func (s *Store) DeleteConditionalMapping(domain string) error {
-	return s.mutateConditional(func(mapping map[any]any) {
-		delete(mapping, domain)
+	return s.mutateConditional(func(mapping *yaml3.Node) {
+		deleteMapEntry(mapping, domain)
 	})
 }
 
 // mutateConditional serializes a read-modify-write of conditional.mapping: each
 // section writer rewrites the WHOLE document from its own snapshot, so a
 // concurrent writer would otherwise clobber this change (last full write wins).
-func (s *Store) mutateConditional(mutate func(mapping map[any]any)) error {
+// yaml.v3 node surgery (see customdns.go) touches only the conditional key,
+// preserving the hand-editable blob's comments, anchors and key order.
+func (s *Store) mutateConditional(mutate func(mapping *yaml3.Node)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -66,30 +70,29 @@ func (s *Store) mutateConditional(mutate func(mapping map[any]any)) error {
 		return err
 	}
 
-	root := map[string]any{}
-	if err := yaml.Unmarshal([]byte(raw), &root); err != nil {
-		return fmt.Errorf("can't parse stored config: %w", err)
+	doc, root, err := parseDocNode(raw)
+	if err != nil {
+		return err
 	}
 
-	// yaml.v2 decodes nested maps as map[any]any, not map[string]any.
-	cond, _ := root["conditional"].(map[any]any)
-	if cond == nil {
-		cond = map[any]any{}
-		root["conditional"] = cond
+	cond := mapEntry(root, "conditional")
+	if cond == nil || cond.Kind != yaml3.MappingNode {
+		cond = &yaml3.Node{Kind: yaml3.MappingNode, Tag: "!!map"}
+		setMapEntry(root, "conditional", cond)
 	}
 
-	mapping, _ := cond["mapping"].(map[any]any)
-	if mapping == nil {
-		mapping = map[any]any{}
-		cond["mapping"] = mapping
+	mapping := mapEntry(cond, "mapping")
+	if mapping == nil || mapping.Kind != yaml3.MappingNode {
+		mapping = &yaml3.Node{Kind: yaml3.MappingNode, Tag: "!!map"}
+		setMapEntry(cond, "mapping", mapping)
 	}
 
 	mutate(mapping)
 
-	merged, err := yaml.Marshal(root)
+	merged, err := marshalDocNode(doc)
 	if err != nil {
-		return fmt.Errorf("can't marshal merged config: %w", err)
+		return err
 	}
 
-	return s.setRawYAML(string(merged))
+	return s.setRawYAML(merged)
 }

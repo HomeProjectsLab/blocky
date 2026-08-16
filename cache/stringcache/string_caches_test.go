@@ -199,6 +199,7 @@ var _ = Describe("Caches", func() {
 			Expect(factory.addEntry("example.*")).Should(BeTrue())
 			Expect(factory.addEntry("sub.*.example.com")).Should(BeTrue())
 			Expect(factory.addEntry("*.example.*")).Should(BeTrue())
+			Expect(factory.addEntry("*.")).Should(BeTrue()) // empty after normalization; must not count
 
 			Expect(factory.count()).Should(BeNumerically("==", 0))
 			Expect(factory.create()).Should(BeNil())

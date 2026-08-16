@@ -19,6 +19,10 @@ const (
 var ErrInvalidArpaAddrLen = errors.New("arpa hostname is not of expected length")
 
 func ParseIPFromArpaAddr(arpa string) (net.IP, error) {
+	// DNS names are case-insensitive and 0x20-randomized queries arrive mixed-case;
+	// lowercase once so the suffix checks below (and hex nibble parsing) match.
+	arpa = strings.ToLower(arpa)
+
 	if strings.HasSuffix(arpa, IPv4PtrSuffix) {
 		return parseIPv4FromArpaAddr(arpa)
 	}

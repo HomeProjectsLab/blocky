@@ -74,6 +74,11 @@ var _ = Describe("QueryLogConfig", func() {
 			Expect(c.validate()).Should(MatchError(ContainSubstring("creationAttempts")))
 		})
 
+		It("rejects logRetentionDays above the cap", func() {
+			c.LogRetentionDays = 1 << 31 // wraps int() on 32-bit and wipes the table
+			Expect(c.validate()).Should(MatchError(ContainSubstring("logRetentionDays")))
+		})
+
 		It("skips validation for console/none types", func() {
 			Expect((&QueryLog{Type: QueryLogTypeConsole}).validate()).Should(Succeed())
 			Expect((&QueryLog{Type: QueryLogTypeNone}).validate()).Should(Succeed())

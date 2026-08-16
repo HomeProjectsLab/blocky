@@ -52,6 +52,16 @@ func (c *QueryLog) SetDefaults() {
 // makes retry-go retry forever on the synchronous startup path (attempts==0
 // means retry-until-success; negatives wrap through uint the same way).
 func (c *QueryLog) validate() error {
+	// Cap retention: the writer computes int(-logRetentionDays) for AddDate, and
+	// on 32-bit builds a value >= 2^31 wraps to a POSITIVE day offset — the
+	// cleanup then deletes every row (deletionDate in the future). 100 years is
+	// far beyond any sane retention and far below the wrap point.
+	const maxLogRetentionDays = 36_500
+
+	if c.LogRetentionDays > maxLogRetentionDays {
+		return fmt.Errorf("queryLog.logRetentionDays (%d) must be <= %d", c.LogRetentionDays, maxLogRetentionDays)
+	}
+
 	switch c.Type {
 	case QueryLogTypeConsole, QueryLogTypeNone:
 		// Writer creation can't fail and nothing uses the flush ticker.

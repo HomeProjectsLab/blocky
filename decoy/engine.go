@@ -73,6 +73,11 @@ const (
 	// personaPoolSize bounds the rotating pool of sampled real-client personas.
 	// A household has few clients, so the pool fills fast and then stops sampling.
 	personaPoolSize = 8
+	// personaFillAttempts caps the TOTAL DB samples the pool fill may spend: a
+	// household with fewer distinct device keys than personaPoolSize can never
+	// fill the pool, and without this cap it would keep running one SampleClient
+	// per emission under personaMu forever.
+	personaFillAttempts = 8 * personaPoolSize
 	// Adaptive back-off: over the last backoffWindow decoy resolve outcomes, if the
 	// error rate exceeds backoffErrThreshold the rate multiplier is cut by
 	// backoffDecay (floored at backoffMin); otherwise it recovers by backoffRecover.
@@ -293,8 +298,9 @@ type Engine struct {
 	startOff int        // today's start-edge jitter, minutes
 	endOff   int        // today's end-edge jitter, minutes
 
-	personaMu sync.Mutex               // guards personas (#6 per-client attribution)
-	personas  []querylog.ClientPersona // small rotating pool of sampled real clients
+	personaMu    sync.Mutex               // guards personas + personaTries (#6 per-client attribution)
+	personas     []querylog.ClientPersona // small rotating pool of sampled real clients
+	personaTries int                      // fill attempts spent (capped at personaFillAttempts)
 
 	backoffMu sync.Mutex // guards adaptive-backoff state (#7)
 	outcomes  []bool     // ring of recent decoy resolve outcomes (true = failed)
@@ -1212,9 +1218,14 @@ func (e *Engine) resolveOne(ctx context.Context, q decoyQuery) {
 	// real clients and each client's wire profile stays consistent. Falls back to
 	// the synthetic split-upstream identity + name-keyed fingerprint when disabled
 	// or at cold start.
-	persona, attributed := e.pickPersona()
-	if q.persona != nil { // device-class routing already chose the client
+	var persona querylog.ClientPersona
+
+	var attributed bool
+
+	if q.persona != nil { // device-class routing already chose the client — skip the sample
 		persona, attributed = *q.persona, true
+	} else {
+		persona, attributed = e.pickPersona()
 	}
 
 	ip := e.clientIP()
@@ -1481,7 +1492,11 @@ func (e *Engine) pickPersona() (querylog.ClientPersona, bool) {
 	e.personaMu.Lock()
 	defer e.personaMu.Unlock()
 
-	if len(e.personas) < personaPoolSize {
+	// Fill capped by ATTEMPTS, not by reaching personaPoolSize distinct keys: a
+	// <8-key household never fills the pool, and an uncapped fill would run one
+	// DB sample per emission under personaMu forever.
+	if len(e.personas) < personaPoolSize && e.personaTries < personaFillAttempts {
+		e.personaTries++
 		// Dedup on the STABLE device_key, not IP: one device seen at two IPs must
 		// not fill two pool slots, and its shaping stays consistent across the move.
 		if p, err := e.source.SampleClient(); err == nil && p.IP != "" && !hasPersona(e.personas, p.Key) {
@@ -1846,19 +1861,24 @@ func (e *Engine) mutate(q decoyQuery) decoyQuery {
 // real query resolves, with probability CompanionPct it fires a browse-style
 // cluster derived from that domain, after randomized sub-resource delays. The
 // timer-driven clusterOf (ClusterPct) stays as a low-probability secondary for
-// the quiet/no-live-tap path. Runs the burst in its own goroutine so the tap
-// loop is never blocked by the inter-companion sleeps.
+// the quiet/no-live-tap path. Derives AND runs the burst in its own goroutine:
+// companionsFor does DB reads (SampleList + downstream block checks), so inline
+// it would stall the tap consumer at real-traffic peaks, dropping hub events and
+// making decoys over-emit exactly when real traffic spikes. One goroutine per
+// accepted roll — same bound as the emitBurst goroutine it already spawned.
 func (e *Engine) maybeCompanion(ctx context.Context, domain string) {
 	if !e.rndPct(e.cfg.CompanionPct) {
 		return
 	}
 
-	companions := e.companionsFor(domain)
-	if len(companions) == 0 {
-		return
-	}
+	go func() {
+		companions := e.companionsFor(domain)
+		if len(companions) == 0 {
+			return
+		}
 
-	go e.emitBurst(ctx, companions)
+		e.emitBurst(ctx, companions)
+	}()
 }
 
 // emitBurst resolves each companion after a randomized, bounded delay so the

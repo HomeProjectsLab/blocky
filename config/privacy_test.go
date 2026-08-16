@@ -1,6 +1,8 @@
 package config
 
 import (
+	"math"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -175,6 +177,22 @@ var _ = Describe("Privacy config", func() {
 			p.Decoy.TargetQPMTrough = 40
 			p.Decoy.TargetQPMPeak = 10
 			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("targetQpmPeak")))
+		})
+
+		It("rejects non-finite QPM values", func() {
+			p.Decoy.Enable = true
+			p.Decoy.TargetQPMPeak = math.NaN()
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("finite")))
+
+			p.Decoy.TargetQPMPeak = 40
+			p.Decoy.QueriesPerMinute = math.Inf(1)
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("finite")))
+		})
+
+		It("rejects negative queriesPerMinute", func() {
+			p.Decoy.Enable = true
+			p.Decoy.QueriesPerMinute = -1
+			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("queriesPerMinute")))
 		})
 
 		It("rejects an unknown personaProfile", func() {

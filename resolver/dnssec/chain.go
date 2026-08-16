@@ -120,7 +120,10 @@ func (v *Validator) walkChainOfTrust(ctx context.Context, domain string) Validat
 
 				return result
 			}
-			// Trust anchor verified, continue to validate child zones
+			// Trust anchor verified — memoize this zone too so child levels
+			// recursing through walkChainOfTrust don't re-verify it.
+			v.setCachedValidation(ctx, currentDomain, result)
+			// Continue to validate child zones
 			continue
 		}
 
@@ -139,8 +142,24 @@ func (v *Validator) walkChainOfTrust(ctx context.Context, domain string) Validat
 	return ValidationResultSecure
 }
 
-// validateDomainLevel validates a single level in the DNSSEC chain
+// validateDomainLevel validates a single level in the DNSSEC chain, memoizing the
+// result per zone in the validation cache. Without the memo every level re-walks its
+// full parent chain via walkChainOfTrust (line below), costing n(n+1)/2 DS/DNSKEY
+// upstream queries for an n-label name and exhausting the per-request query budget.
 func (v *Validator) validateDomainLevel(ctx context.Context, domain string) ValidationResult {
+	if cached, found := v.getCachedValidation(ctx, domain); found {
+		v.logger.Debugf("Using cached validation result for zone %s: %s", domain, cached.String())
+
+		return cached
+	}
+
+	result := v.validateDomainLevelUncached(ctx, domain)
+	v.setCachedValidation(ctx, domain, result)
+
+	return result
+}
+
+func (v *Validator) validateDomainLevelUncached(ctx context.Context, domain string) ValidationResult {
 	v.logger.Debugf("Validating domain level: %s", domain)
 
 	// Query DS records from parent zone

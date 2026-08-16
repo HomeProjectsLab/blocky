@@ -104,11 +104,13 @@ func (s *Store) SetPassword(pw string) error {
 }
 
 // VerifyPassword constant-time compares pw against the stored argon2id hash.
+// The mutex only covers the row read: the 64 MiB argon2 derivation runs
+// outside it, so a login attempt can't stall every other store user.
 func (s *Store) VerifyPassword(pw string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	a, err := s.authRow()
+	s.mu.Unlock()
+
 	if err != nil || a.PasswordHash == "" {
 		return false
 	}
