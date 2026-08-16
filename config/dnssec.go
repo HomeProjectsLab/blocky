@@ -1,15 +1,8 @@
 package config
 
 import (
-	"fmt"
-
 	"github.com/sirupsen/logrus"
 )
-
-// maxCacheExpirationHours bounds the DNSSEC verdict cache lifetime (1 year).
-// Larger values risk int64 overflow when converted to time.Duration and would
-// pin secure/bogus verdicts across key rollovers.
-const maxCacheExpirationHours = 24 * 365
 
 // DNSSEC is the configuration for DNSSEC validation
 type DNSSEC struct {
@@ -29,22 +22,6 @@ type DNSSEC struct {
 	// Matches Unbound/BIND defaults for real-world deployments (VMs, containers, embedded systems).
 	// Per RFC 6781 §4.1.2: Validators should account for clock skew in deployment environments.
 	ClockSkewToleranceSec uint `default:"3600" yaml:"clockSkewToleranceSec"`
-}
-
-// validate checks bounds on DNSSEC settings.
-func (c *DNSSEC) validate() error {
-	if c.CacheExpirationHours > maxCacheExpirationHours {
-		return fmt.Errorf("dnssec: cacheExpirationHours (%d) must be <= %d",
-			c.CacheExpirationHours, maxCacheExpirationHours)
-	}
-
-	// Compared against a uint16 iteration count (RFC 5155); larger values
-	// truncate to uint16 and would reject every NSEC3 proof.
-	if c.MaxNSEC3Iterations > 65535 {
-		return fmt.Errorf("dnssec: maxNSEC3Iterations (%d) must be <= 65535", c.MaxNSEC3Iterations)
-	}
-
-	return nil
 }
 
 // IsEnabled returns true if DNSSEC validation is enabled

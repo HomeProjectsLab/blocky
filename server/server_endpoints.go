@@ -224,12 +224,7 @@ func createHTTPRouter(
 	// Gate the web UI before any route is registered so it wraps them all
 	// (chi applies Use-middleware to routes added after it). Runs after the
 	// mux-level CORS/secure-headers in withCommonMiddleware.
-	metricsPath := ""
-	if cfg.Prometheus.Enable {
-		metricsPath = cfg.Prometheus.Path
-	}
-
-	router.Use(newSessionGate(store, cfg.Ports.DOHPath, metricsPath))
+	router.Use(newSessionGate(store, cfg.Ports.DOHPath))
 
 	api.RegisterOpenAPIEndpoints(router, openAPIImpl)
 

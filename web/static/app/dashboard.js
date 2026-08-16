@@ -110,7 +110,6 @@ async function loadBuckets(token) {
     const empty = document.getElementById("qps-empty");
 
     if (chart) { chart.destroy(); chart = null; }
-    rebuildChart = null;
     el.innerHTML = "";
 
     if (buckets.length === 0) { empty.hidden = false; return; }
@@ -129,23 +128,14 @@ async function loadBuckets(token) {
     const toSec = Math.floor(Date.parse(w.to) / 1000);
     const fromSec = Math.floor(Date.parse(w.from) / 1000);
 
-    // closure so a theme toggle can rebuild with fresh tokens (canvas
-    // rasterizes them) without refetching.
-    rebuildChart = () => {
-        if (chart) chart.destroy();
-        el.innerHTML = "";
-        chart = stackedArea(el, {
-            labels: SERIES.map((s) => s.label),
-            colors: SERIES.map((s) => cssTok(s.tok)),
-            data: [xs, ...rows],
-            xRange: [fromSec, toSec],
-            fmtVal: fmtNum,
-        });
-    };
-    rebuildChart();
+    chart = stackedArea(el, {
+        labels: SERIES.map((s) => s.label),
+        colors: SERIES.map((s) => cssTok(s.tok)),
+        data: [xs, ...rows],
+        xRange: [fromSec, toSec],
+        fmtVal: fmtNum,
+    });
 }
-let rebuildChart = null;
-addEventListener("themechange", () => { if (rebuildChart) rebuildChart(); });
 
 // TOP_PANELS maps each top-N column to its list element id.
 const TOP_PANELS = { domain: "top-domain", blocked: "top-blocked", client: "top-client", transport: "top-transport" };

@@ -114,33 +114,6 @@ func (v *Validator) validateNSECNODATA(nsecRecords []*dns.NSEC, qname string, qt
 		}
 	}
 
-	// RFC 4035 §3.1.3.4: wildcard NODATA — qname itself doesn't exist (proven by a
-	// covering NSEC) but was synthesized from a wildcard whose NSEC lacks the qtype
-	// (mirrors checkWildcardNSEC3Match and the NXDOMAIN wildcard path above).
-	for _, nsec := range nsecRecords {
-		if !v.nsecCoversName(nsec, qname) {
-			continue
-		}
-
-		wildcardName := dns.CanonicalName("*." + strings.TrimSuffix(nsecClosestEncloser(nsec, qname), "."))
-
-		for _, wc := range nsecRecords {
-			if dns.CanonicalName(wc.Header().Name) != wildcardName {
-				continue
-			}
-
-			if v.nsecHasType(wc, qtype) {
-				v.logger.Warnf("NSEC at wildcard %s claims type %d exists but no answer returned", wildcardName, qtype)
-
-				return ValidationResultBogus
-			}
-
-			v.logger.Debugf("NSEC proves wildcard NODATA for %s type %d via %s", qname, qtype, wildcardName)
-
-			return ValidationResultSecure
-		}
-	}
-
 	v.logger.Warnf("No matching NSEC record found for NODATA proof: %s", qname)
 
 	return ValidationResultBogus

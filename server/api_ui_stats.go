@@ -126,13 +126,6 @@ type statsAPI struct {
 	profRefreshAt  time.Time
 	profRefreshing bool
 
-	// short-TTL cache of store.GetPrivacy (a FULL config re-parse per call),
-	// consulted several times per stats request. See getPrivacyCached.
-	privMu  sync.Mutex
-	privCfg config.PrivacyConfig
-	privAt  time.Time
-	privOK  bool
-
 	// sysUsage holds the latest system-usage sample (per-core CPU / RAM / disk +
 	// R/W), published by a persistent sampler on the server-lifetime ctx and
 	// merged into GET /api/ui/system. nil until the first sample / on non-linux.
@@ -232,12 +225,6 @@ func (s *statsAPI) purgeQueries(rw http.ResponseWriter, _ *http.Request) {
 		internalError(rw, err)
 
 		return
-	}
-
-	// Drop the preheated snapshot too, or the dashboard keeps serving the purged
-	// data for up to a full refresh interval after the user wiped it.
-	if s.snap != nil {
-		s.snap.invalidate()
 	}
 
 	rw.WriteHeader(http.StatusNoContent)
@@ -427,7 +414,7 @@ func (s *statsAPI) categories(rw http.ResponseWriter, req *http.Request) {
 
 	enabled := false
 	if s.store != nil {
-		if cfg, err := s.getPrivacyCached(); err == nil {
+		if cfg, err := s.store.GetPrivacy(); err == nil {
 			enabled = cfg.Profiling.Enable
 		}
 	}

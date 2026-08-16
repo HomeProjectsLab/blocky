@@ -74,7 +74,7 @@ type fpBinding struct {
 	FpHash     string    `gorm:"column:fp_hash;primaryKey;index:idx_fp_binding_fp"`
 	Hits       int64     `gorm:"column:hits;not null;default:0"`
 	FirstSeen  time.Time `gorm:"column:first_seen;not null"`
-	LastSeen   time.Time `gorm:"column:last_seen;not null;index:idx_fp_binding_last_seen"`
+	LastSeen   time.Time `gorm:"column:last_seen;not null"`
 }
 
 func (fpBinding) TableName() string { return "fp_binding" }
@@ -526,9 +526,8 @@ func applyHeuristics(tx *gorm.DB,
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "fp_hash"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"hits":       gorm.Expr("hits + excluded.hits"),
-				"first_seen": gorm.Expr("MIN(first_seen, excluded.first_seen)"),
-				"last_seen":  gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+				"hits":      gorm.Expr("hits + excluded.hits"),
+				"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
 			}),
 		}).Create(&rows).Error; err != nil {
 			return err
@@ -540,9 +539,8 @@ func applyHeuristics(tx *gorm.DB,
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "client_name"}, {Name: "fp_hash"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"hits":       gorm.Expr("hits + excluded.hits"),
-				"first_seen": gorm.Expr("MIN(first_seen, excluded.first_seen)"),
-				"last_seen":  gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+				"hits":      gorm.Expr("hits + excluded.hits"),
+				"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
 			}),
 		}).Create(&rows).Error; err != nil {
 			return err
@@ -554,10 +552,9 @@ func applyHeuristics(tx *gorm.DB,
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "fp_hash"}, {Name: "facet"}, {Name: "label"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"hits":       gorm.Expr("hits + excluded.hits"),
-				"conf":       gorm.Expr("MAX(conf, excluded.conf)"),
-				"first_seen": gorm.Expr("MIN(first_seen, excluded.first_seen)"),
-				"last_seen":  gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+				"hits":      gorm.Expr("hits + excluded.hits"),
+				"conf":      gorm.Expr("MAX(conf, excluded.conf)"),
+				"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
 			}),
 		}).Create(&rows).Error; err != nil {
 			return err
@@ -579,9 +576,8 @@ func applyHeuristics(tx *gorm.DB,
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "fp_hash"}, {Name: "service"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"hits":       gorm.Expr("hits + excluded.hits"),
-				"first_seen": gorm.Expr("MIN(first_seen, excluded.first_seen)"),
-				"last_seen":  gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+				"hits":      gorm.Expr("hits + excluded.hits"),
+				"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
 			}),
 		}).Create(&rows).Error; err != nil {
 			return err
@@ -593,9 +589,8 @@ func applyHeuristics(tx *gorm.DB,
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "fp_hash"}, {Name: "category"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"hits":       gorm.Expr("hits + excluded.hits"),
-				"first_seen": gorm.Expr("MIN(first_seen, excluded.first_seen)"),
-				"last_seen":  gorm.Expr("MAX(last_seen, excluded.last_seen)"),
+				"hits":      gorm.Expr("hits + excluded.hits"),
+				"last_seen": gorm.Expr("MAX(last_seen, excluded.last_seen)"),
 			}),
 		}).Create(&rows).Error; err != nil {
 			return err
@@ -806,11 +801,6 @@ func categoryFor(qn string) string {
 func (s *DecoySource) classScorerLoop() {
 	defer close(s.classDone)
 
-	// Boot pass: a headless box (no UI visit ever) still needs session models,
-	// legacy-key migration and classes without waiting a full tick. Runs in this
-	// goroutine — off the boot critical path.
-	s.classScorerPass()
-
 	ticker := time.NewTicker(classScorerInterval)
 	defer ticker.Stop()
 
@@ -819,23 +809,15 @@ func (s *DecoySource) classScorerLoop() {
 		case <-s.classStop:
 			return
 		case <-ticker.C:
-			s.classScorerPass()
+			if err := s.scoreDeviceClasses(); err != nil {
+				log.PrefixedLog("heuristics").WithError(err).Warn("class scorer pass failed")
+			}
+
+			// Same 5-min tick refreshes the cached client_name→device_key overlay so
+			// /clients, /people and /clients/classes keep serving it off the request path.
+			s.refreshDominantFP()
 		}
 	}
-}
-
-// classScorerPass runs the FULL durable-intelligence refresh (class scoring +
-// legacy-key migration + session-model rematerialization), not just the scorer:
-// refreshSessionModels/migrateLegacyKeys used to run only from the UI-triggered
-// RefreshClientClasses, so a headless box served stale/empty session models
-// forever. Also re-warms the client_name→device_key overlay (single-flighted)
-// so /clients, /people and /clients/classes keep serving it off the request path.
-func (s *DecoySource) classScorerPass() {
-	if err := s.RefreshClientClasses(); err != nil {
-		log.PrefixedLog("heuristics").WithError(err).Warn("class scorer pass failed")
-	}
-
-	s.kickDominantFP()
 }
 
 // scoreDeviceClasses classifies every device from the durable accumulator and
@@ -915,7 +897,7 @@ func (s *DecoySource) evictStaleHeuristics(cutoff time.Time) error {
 	stale := `SELECT fp_hash FROM device_identity WHERE last_seen < ?`
 
 	deps := []string{
-		"device_facet", "device_presence", "service_usage",
+		"fp_binding", "device_facet", "device_presence", "service_usage",
 		"category_usage", "device_class_signal", "device_class_domainset",
 	}
 	for _, t := range deps {
@@ -925,26 +907,8 @@ func (s *DecoySource) evictStaleHeuristics(cutoff time.Time) error {
 		}
 	}
 
-	// fp_binding ages out ROW-level on its own last_seen (idx_fp_binding_last_seen):
-	// an ACTIVE device whose old client_name binding went silent never trips the
-	// device-level cutoff, so keying on device_identity alone let dead bindings
-	// accumulate and inflate distinct_clients monotonically. A stale device's
-	// bindings are covered too (binding last_seen ≤ device last_seen).
-	if err := s.db.Exec(`DELETE FROM fp_binding WHERE last_seen < ?`, cutoff).Error; err != nil {
-		return err
-	}
-
 	if err := s.db.Exec(
 		`DELETE FROM device_class WHERE COALESCE(override,'') = '' AND fp_hash IN (`+stale+`)`,
-		cutoff).Error; err != nil {
-		return err
-	}
-
-	// client_class is upserted per device key by scoreDeviceClasses (one row per
-	// churned fp-less key), so it needs the same growth bound as device_class —
-	// preserving manual overrides identically.
-	if err := s.db.Exec(
-		`DELETE FROM client_class WHERE COALESCE(override,'') = '' AND client IN (`+stale+`)`,
 		cutoff).Error; err != nil {
 		return err
 	}

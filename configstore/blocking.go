@@ -346,12 +346,6 @@ func (s *Store) validateBlockingCandidate(b *blockingRows) error {
 		return err
 	}
 
-	// LoadConfig only overlays the blocking tables in sqlite query-log mode;
-	// validating an overlay that never loads would accept/reject divergently.
-	if cfg.QueryLog.Type != config.QueryLogTypeSqlite {
-		return nil
-	}
-
 	overlayBlocking(cfg, b)
 
 	return cfg.Validate()
@@ -502,11 +496,6 @@ func (s *Store) AddAllowEntry(group, domain, comment string) (uint, error) {
 		group = "manual"
 	}
 
-	// s.mu: every manual mutator must serialize against SnapshotTo/RestoreDB
-	// (see store.go SnapshotTo) and the validate-then-persist writers.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	e := AllowlistEntry{GroupName: group, Domain: domain, Enabled: true, Comment: comment}
 	if err := s.conn().Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist allowlist entry: %w", err)
@@ -526,9 +515,6 @@ func (s *Store) AddDenyEntry(group, domain, comment string) (uint, error) {
 		group = "manual"
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	e := DenylistEntry{GroupName: group, Domain: domain, Enabled: true, Comment: comment}
 	if err := s.conn().Create(&e).Error; err != nil {
 		return 0, fmt.Errorf("can't persist denylist entry: %w", err)
@@ -539,17 +525,10 @@ func (s *Store) AddDenyEntry(group, domain, comment string) (uint, error) {
 
 // SetAllowEntry updates one manual allow entry's enabled flag and comment.
 func (s *Store) SetAllowEntry(id uint, enabled bool, comment string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	res := s.conn().Model(&AllowlistEntry{}).Where("id = ?", id).
 		Updates(map[string]any{"enabled": enabled, "comment": comment})
 	if res.Error != nil {
 		return fmt.Errorf("can't persist allowlist entry: %w", res.Error)
-	}
-
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("unknown allowlist entry %d", id)
 	}
 
 	return nil
@@ -557,17 +536,10 @@ func (s *Store) SetAllowEntry(id uint, enabled bool, comment string) error {
 
 // SetDenyEntry updates one manual deny entry's enabled flag and comment.
 func (s *Store) SetDenyEntry(id uint, enabled bool, comment string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	res := s.conn().Model(&DenylistEntry{}).Where("id = ?", id).
 		Updates(map[string]any{"enabled": enabled, "comment": comment})
 	if res.Error != nil {
 		return fmt.Errorf("can't persist denylist entry: %w", res.Error)
-	}
-
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("unknown denylist entry %d", id)
 	}
 
 	return nil
@@ -575,36 +547,12 @@ func (s *Store) SetDenyEntry(id uint, enabled bool, comment string) error {
 
 // DeleteAllowEntry removes one manual allow entry by id.
 func (s *Store) DeleteAllowEntry(id uint) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	res := s.conn().Delete(&AllowlistEntry{}, id)
-	if res.Error != nil {
-		return fmt.Errorf("can't delete allowlist entry: %w", res.Error)
-	}
-
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("unknown allowlist entry %d", id)
-	}
-
-	return nil
+	return s.conn().Delete(&AllowlistEntry{}, id).Error
 }
 
 // DeleteDenyEntry removes one manual deny entry by id.
 func (s *Store) DeleteDenyEntry(id uint) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	res := s.conn().Delete(&DenylistEntry{}, id)
-	if res.Error != nil {
-		return fmt.Errorf("can't delete denylist entry: %w", res.Error)
-	}
-
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("unknown denylist entry %d", id)
-	}
-
-	return nil
+	return s.conn().Delete(&DenylistEntry{}, id).Error
 }
 
 // --- adlist accessors --------------------------------------------------------
@@ -698,17 +646,5 @@ func (s *Store) updateAdlist(id uint, cols map[string]any, mutate func(*AdlistEn
 
 // DeleteAdlistEntry removes one blocklist URL by id.
 func (s *Store) DeleteAdlistEntry(id uint) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	res := s.conn().Delete(&AdlistEntry{}, id)
-	if res.Error != nil {
-		return fmt.Errorf("can't delete adlist entry: %w", res.Error)
-	}
-
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("unknown adlist entry %d", id)
-	}
-
-	return nil
+	return s.conn().Delete(&AdlistEntry{}, id).Error
 }

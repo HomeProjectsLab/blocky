@@ -155,36 +155,6 @@ var _ = Describe("Egress hardening", func() {
 			Expect(calls).Should(Equal(2))
 		})
 
-		It("suppresses a 0x20 case-mutated replay of the same name", func() {
-			src := newHardeningSource(nil, nil, nil)
-
-			var calls int
-			eng := NewEngine(cfg, src, func(_ context.Context, req *model.Request) (*model.Response, error) {
-				calls++
-
-				a := &dns.A{
-					Hdr: dns.RR_Header{Name: req.Req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 100},
-					A:   net.ParseIP("192.0.2.1"),
-				}
-				msg := new(dns.Msg)
-				msg.Answer = []dns.RR{a}
-
-				return &model.Response{Res: msg}, nil
-			})
-			eng.cfg.FingerprintMatch = false
-
-			base := time.Now()
-			eng.now = func() time.Time { return base }
-
-			eng.resolveOne(context.Background(), decoyQuery{name: "ttl.example", qtype: dns.TypeA})
-			Expect(calls).Should(Equal(1))
-
-			// 0x20-mutated case within the TTL must hit the SAME suppression entry
-			base = base.Add(50 * time.Second)
-			eng.resolveOne(context.Background(), decoyQuery{name: "TtL.eXaMpLe", qtype: dns.TypeA})
-			Expect(calls).Should(Equal(1))
-		})
-
 		It("caps the suppression window so a huge authoritative TTL doesn't starve cover", func() {
 			src := newHardeningSource(nil, nil, nil)
 

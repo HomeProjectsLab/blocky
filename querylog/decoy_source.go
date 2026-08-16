@@ -160,12 +160,9 @@ type DecoySource struct {
 	// class scorer (heuristics.go): the durable-intelligence ticker. classStop/
 	// classDone tie the goroutine to Close (mirrors blWarmStop/blWarmDone); classMu
 	// serializes the ticker against a manual RefreshClientClasses on the writer conn.
-	// classStopOnce makes the stop idempotent (tests halt the scorer early to
-	// single-thread s.db, then Close runs the same stop again).
-	classStop     chan struct{}
-	classDone     chan struct{}
-	classStopOnce sync.Once
-	classMu       sync.Mutex
+	classStop chan struct{}
+	classDone chan struct{}
+	classMu   sync.Mutex
 
 	// cached MIN/MAX rowid of log_entries for indexed random-rowid sampling of the
 	// real-query replay pool, refreshed on leRowidTTL (all guarded by mu).
@@ -304,23 +301,14 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	// Warm the client_name→device_key overlay off the request path so the first
 	// /clients, /people or /clients/classes visit after boot serves from cache and
 	// never runs the windowed log_entries GROUP BY inline. Re-warmed on the class
-	// tick and after a name/person write. Via kickDominantFP: EVERY refresh rides
-	// the single-flight CAS + failure backoff, never a bare goroutine.
-	s.kickDominantFP()
+	// tick and after a name/person write.
+	go s.refreshDominantFP()
 
 	// Class scorer: advance durable device classes from the accumulator on a timer,
 	// independent of any UI visit (heuristics.go).
 	go s.classScorerLoop()
 
 	return s, nil
-}
-
-// stopClassScorer halts the background class-scorer goroutine and waits for it
-// to exit. Idempotent: called from Close, and early by tests that need s.db
-// single-threaded (logger capture) while the source stays open.
-func (s *DecoySource) stopClassScorer() {
-	s.classStopOnce.Do(func() { close(s.classStop) })
-	<-s.classDone
 }
 
 func (s *DecoySource) Close() error {
@@ -330,7 +318,8 @@ func (s *DecoySource) Close() error {
 	<-s.blWarmDone
 
 	// Stop the class scorer (uses s.db) before closing the writer connection below.
-	s.stopClassScorer()
+	close(s.classStop)
+	<-s.classDone
 
 	if s.ro != nil {
 		if roDB, err := s.ro.DB(); err == nil {
@@ -1813,48 +1802,43 @@ func (s *DecoySource) migrateLegacyKeys(since time.Time) {
 func (s *DecoySource) refreshSessionModels(since time.Time) error {
 	gapSecs := sessionGap.Seconds()
 
-	// ONE transaction for both DELETE+INSERT pairs: as separate autocommits, an
-	// INSERT failure (SQLITE_BUSY) left the just-DELETEd model table empty until
-	// the next refresh — the rollback keeps the previous model instead.
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		// Transitions: cur→nxt same-session hop counts (mirrors the former
-		// NextInSession subquery, minus the per-call cur=? filter).
-		if err := tx.Exec(`DELETE FROM decoy_transitions`).Error; err != nil {
-			return err
-		}
+	// Transitions: cur→nxt same-session hop counts (mirrors the former
+	// NextInSession subquery, minus the per-call cur=? filter).
+	if err := s.db.Exec(`DELETE FROM decoy_transitions`).Error; err != nil {
+		return err
+	}
 
-		err := tx.Exec(`INSERT INTO decoy_transitions (cur, nxt, cnt)
-			SELECT cur, nxt, COUNT(*) AS cnt FROM (
-				SELECT effective_tldp AS cur,
-				       LEAD(effective_tldp) OVER w AS nxt,
-				       (julianday(LEAD(request_ts) OVER w) - julianday(request_ts))*86400 AS gap
-				FROM log_entries
-				WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
-				WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
-			)
-			WHERE nxt IS NOT NULL AND nxt <> cur AND gap >= 0 AND gap <= ?
-			GROUP BY cur, nxt`, since, gapSecs).Error
-		if err != nil {
-			return err
-		}
+	err := s.db.Exec(`INSERT INTO decoy_transitions (cur, nxt, cnt)
+		SELECT cur, nxt, COUNT(*) AS cnt FROM (
+			SELECT effective_tldp AS cur,
+			       LEAD(effective_tldp) OVER w AS nxt,
+			       (julianday(LEAD(request_ts) OVER w) - julianday(request_ts))*86400 AS gap
+			FROM log_entries
+			WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
+			WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+		)
+		WHERE nxt IS NOT NULL AND nxt <> cur AND gap >= 0 AND gap <= ?
+		GROUP BY cur, nxt`, since, gapSecs).Error
+	if err != nil {
+		return err
+	}
 
-		// Session seeds: first-of-session primary counts (mirrors the former
-		// SessionSeed subquery).
-		if err := tx.Exec(`DELETE FROM decoy_session_seeds`).Error; err != nil {
-			return err
-		}
+	// Session seeds: first-of-session primary counts (mirrors the former
+	// SessionSeed subquery).
+	if err := s.db.Exec(`DELETE FROM decoy_session_seeds`).Error; err != nil {
+		return err
+	}
 
-		return tx.Exec(`INSERT INTO decoy_session_seeds (cur, cnt)
-			SELECT cur, COUNT(*) AS cnt FROM (
-				SELECT effective_tldp AS cur,
-				       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
-				FROM log_entries
-				WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
-				WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
-			)
-			WHERE gap IS NULL OR gap > ?
-			GROUP BY cur`, since, gapSecs).Error
-	})
+	return s.db.Exec(`INSERT INTO decoy_session_seeds (cur, cnt)
+		SELECT cur, COUNT(*) AS cnt FROM (
+			SELECT effective_tldp AS cur,
+			       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
+			FROM log_entries
+			WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
+			WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+		)
+		WHERE gap IS NULL OR gap > ?
+		GROUP BY cur`, since, gapSecs).Error
 }
 
 // ClientClassByKey returns the cached effective class for a STABLE device_key
@@ -1900,12 +1884,12 @@ func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 		return nil, err
 	}
 
-	// device_key → EVERY current client_name presenting it, so the UI shows names
-	// (not raw fp hashes) and the name-keyed classOf join downstream resolves for
-	// ALL of a device's names. A single lexically-first representative broke a
-	// roamed device: its active (non-representative) name missed the join and fell
-	// back to unknown. Names still round-trip: a PUT re-resolves to the same key.
-	// Keys with no current traffic keep the raw key; sorted for a stable order.
+	// device_key → a representative current client_name, so the UI shows a name
+	// (not a raw fp hash). The name still round-trips: a PUT with it re-resolves to
+	// the same key. Keys with no current traffic keep the raw key. Names are
+	// sorted before first-wins: a Go map range is randomly ordered, so two names
+	// sharing a key would otherwise flap the representative (and the downstream
+	// classOf[row.Name] persona join) between passes.
 	overlay := s.dominantFPByNameCached()
 
 	names := make([]string, 0, len(overlay))
@@ -1915,11 +1899,13 @@ func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 
 	slices.Sort(names)
 
-	keyToNames := map[string][]string{}
+	keyToName := map[string]string{}
 
 	for _, name := range names {
 		key := overlay[name]
-		keyToNames[key] = append(keyToNames[key], name)
+		if _, ok := keyToName[key]; !ok {
+			keyToName[key] = name
+		}
 	}
 
 	out := make([]ClientClassInfo, 0, len(rows))
@@ -1934,16 +1920,14 @@ func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 			eff = ClassUnknown
 		}
 
-		clients := keyToNames[r.Client]
-		if len(clients) == 0 {
-			clients = []string{r.Client}
+		client := r.Client
+		if n, ok := keyToName[r.Client]; ok {
+			client = n
 		}
 
-		for _, client := range clients {
-			out = append(out, ClientClassInfo{
-				Client: client, Class: r.Class, Override: r.Override, Effective: eff, UpdatedAt: r.UpdatedAt,
-			})
-		}
+		out = append(out, ClientClassInfo{
+			Client: client, Class: r.Class, Override: r.Override, Effective: eff, UpdatedAt: r.UpdatedAt,
+		})
 	}
 
 	return out, nil
@@ -2134,11 +2118,13 @@ func decodeHourHist(s string) [24]int {
 }
 
 // RefreshClientProfiles recomputes every client's presence histogram from the
-// hourly aggregates and upserts client_profile. This is a windowed agg_hourly
-// scan + GROUP BY — heavy recompute-all — so it runs ONLY on the throttled
-// off-request timer (mirrors RefreshClientClasses), never on the request path.
-// Windowed to heuristicsStaleAfter: bounds the scan on hour (the PK prefix) and
-// keeps stale months from diluting the "when is this device active" signal.
+// hourly aggregates and upserts client_profile. This is a full agg_hourly scan +
+// GROUP BY — heavy recompute-all — so it runs ONLY on the throttled off-request
+// timer (mirrors RefreshClientClasses), never on the request path.
+//
+// ponytail: scans all of agg_hourly (bounded by the writer's aggregate
+// retention). Add a `WHERE hour >= ?` window if that retention ever grows
+// unbounded and stale months dilute the "when is this device active" signal.
 func (s *DecoySource) RefreshClientProfiles() error {
 	var rows []struct {
 		Client string    `gorm:"column:client_name"`
@@ -2146,10 +2132,8 @@ func (s *DecoySource) RefreshClientProfiles() error {
 		Cnt    int64     `gorm:"column:cnt"`
 	}
 
-	since := time.Now().Add(-heuristicsStaleAfter).UTC() // UTC bind: hour is stored UTC, compared lexically
-
 	err := s.db.Raw(`SELECT client_name, hour, SUM(cnt) AS cnt FROM agg_hourly
-		WHERE hour >= ? AND client_name <> '' GROUP BY client_name, hour`, since).Scan(&rows).Error
+		WHERE client_name <> '' GROUP BY client_name, hour`).Scan(&rows).Error
 	if err != nil {
 		return err
 	}
@@ -2355,7 +2339,7 @@ func (s *DecoySource) SetClientName(client, name string) error {
 		DoUpdates: clause.Assignments(map[string]any{"name": name, "updated_at": now}),
 	}).Create(&clientIdentity{Client: key, Name: name, UpdatedAt: now}).Error
 	if err == nil {
-		s.kickDominantFP() // pick up a just-named new device (single-flighted)
+		go s.refreshDominantFP() // pick up a just-named new device on the next read
 	}
 
 	return err
@@ -2415,7 +2399,7 @@ func (s *DecoySource) SetClientPerson(client, person string) error {
 		DoUpdates: clause.Assignments(map[string]any{"person": person, "updated_at": now}),
 	}).Create(&clientPerson{Client: key, Person: person, UpdatedAt: now}).Error
 	if err == nil {
-		s.kickDominantFP() // pick up a just-mapped new device (single-flighted)
+		go s.refreshDominantFP() // pick up a just-mapped new device on the next read
 	}
 
 	return err

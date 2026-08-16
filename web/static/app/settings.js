@@ -1,5 +1,5 @@
 // settings.js — read-only config summary + raw YAML editor (validate/save/apply).
-import { getText, putText, send, guard } from "./api.js";
+import { getText, putText, send } from "./api.js";
 import { confirmDialog } from "./modal.js";
 
 const yamlEl = document.getElementById("set-yaml");
@@ -62,7 +62,7 @@ document.getElementById("set-validate").addEventListener("click", async () => {
     showErr(null);
     try {
         // validate the current textarea content (empty body would validate the stored blob)
-        const res = guard(await fetch("/api/ui/config/validate", { method: "POST", body: yamlEl.value }));
+        const res = await fetch("/api/ui/config/validate", { method: "POST", body: yamlEl.value });
         const data = await res.json();
         if (data.valid) { showErr(null); msg("Configuration is valid."); }
         else { showErr(data.error || "invalid configuration"); msg("Validation failed.", true); }
@@ -102,7 +102,7 @@ importInput.addEventListener("change", async () => {
 
     showErr(null); msg("Restoring…");
     try {
-        const res = guard(await fetch("/api/ui/config/import", { method: "POST", body: file }));
+        const res = await fetch("/api/ui/config/import", { method: "POST", body: file });
         if (res.status === 202) { msg("Restored — reloading."); window.location.reload(); return; }
         let err = "restore failed";
         try { err = (await res.json()).error || err; } catch { /* non-JSON error body */ }

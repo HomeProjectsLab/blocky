@@ -332,16 +332,14 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 				WithField("categories_total", len(bl.cats)).
 				WithField("adlists_enabled", enabledAdlists).
 				WithField("client_segments", len(bl.segs)).
-				Debug("blocking lists reloaded from store")
+				Info("blocking lists reloaded from store")
 		}
 	}
 
-	// Debug, not Info: LoadConfig also backs GetPrivacy and runs on request
-	// paths — at Info this line spammed the console once per privacy read.
 	log.PrefixedLog("configstore").
 		WithField("upstreams_overlaid", len(groups) > 0).
 		WithField("blocking_overlaid", blockingOverlaid).
-		Debug("config loaded")
+		Info("config loaded")
 
 	if !overlaid {
 		return cfg, nil

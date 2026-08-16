@@ -236,10 +236,8 @@ button[aria-pressed="true"] { background: var(--accent); border-color: var(--acc
 .wire td { padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 .wire td.q { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .wire td.num, .wire th.num { text-align: right; }
-/* clickable affordance only on the tables that actually attach row handlers
-   (live wire drawer, clients detail drawer) — not all .wire tables. */
-#wire tbody tr, #cl-table tbody tr { cursor: pointer; }
-#wire tbody tr:hover, #cl-table tbody tr:hover { background: var(--bg2); }
+.wire tbody tr { cursor: pointer; }
+.wire tbody tr:hover { background: var(--bg2); }
 .rail-h { width: 3px; padding: 0; }
 td.rail { width: 3px; padding: 0; }
 tr[data-band="resolved"] td.rail { background: var(--c-resolved); }
@@ -319,9 +317,7 @@ tr[data-decoy="1"] td.rail {
 
 /* ---------- management pages (upstreams/blocking/privacy/settings/system) ---------- */
 .ctl-row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-/* global: spacers live in .ctl-row, .pd-controls, .seg-head, .entry-row and
-   .entry-list li — all flex parents; scoping per-parent kept missing some. */
-.spacer { flex: 1; }
+.ctl-row .spacer { flex: 1; }
 .sub-h { margin-top: 1rem; }
 
 .btn-danger { border-color: var(--c-error); color: var(--c-error); }
@@ -451,9 +447,7 @@ dl.kv dd { margin: 0; color: var(--ink); }
 .chip.cc-workstation { color: var(--c-cached);   border-color: var(--c-cached); }
 .chip.cc-unknown     { color: var(--ink2);       border-color: var(--grid); }
 /* OS badge: the primary identity facet, filled so it reads first among the plain vendor/app chips */
-/* fill mixed toward --ink (the opposite of the --bg0 text) so the badge hits
-   AA 4.5:1 in BOTH themes — pure --c-resolved under light --bg0 text was ~3.4:1. */
-.chip.os-badge { color: var(--bg0); background: color-mix(in srgb, var(--c-resolved) 75%, var(--ink)); border-color: var(--c-resolved); font-weight: 600; }
+.chip.os-badge { color: var(--bg0); background: var(--c-resolved); border-color: var(--c-resolved); font-weight: 600; }
 select.cc-override { font-size: 12px; padding: 0.15rem 0.3rem; }
 #cc-msg { display: inline-block; margin-top: 0.4rem; }
 
@@ -576,6 +570,7 @@ select.cc-override { font-size: 12px; padding: 0.15rem 0.3rem; }
 .pd-controls .ctl-group { display: flex; align-items: center; gap: 0.4rem; }
 .pd-controls .ctl-label { font-size: 10px; text-transform: uppercase;
     letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+.pd-controls .spacer { flex: 1; }
 .pd-controls select { font-size: 12px; padding: 0.2rem 0.4rem; }
 .seg { display: inline-flex; background: var(--bg2); border: 1px solid var(--grid);
     border-radius: 6px; padding: 2px; }
@@ -604,7 +599,7 @@ select.cc-override { font-size: 12px; padding: 0.15rem 0.3rem; }
 .pd-hd { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
 @media (max-width: 900px) {
     .pd-board { grid-template-columns: repeat(6, 1fr); }
-    .pd-card, .pd-card.span4, .pd-card.span8, .pd-card.span12 { grid-column: span 6; }
+    .pd-card, .pd-card.span4, .pd-card.span8 { grid-column: span 6; }
 }
 
 /* KPI tiles clickable */

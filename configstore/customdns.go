@@ -1,12 +1,9 @@
 package configstore
 
 import (
-	"errors"
 	"fmt"
-	"strings"
 
 	"gopkg.in/yaml.v2"
-	yaml3 "gopkg.in/yaml.v3"
 )
 
 // GetLocalDNSZone returns the customDNS.zone text out of the RAW stored blob.
@@ -49,30 +46,26 @@ func (s *Store) SetLocalDNSZone(zoneText string) error {
 		return err
 	}
 
-	doc, root, err := parseDocNode(raw)
+	root := map[string]any{}
+	if err := yaml.Unmarshal([]byte(raw), &root); err != nil {
+		return fmt.Errorf("can't parse stored config: %w", err)
+	}
+
+	// yaml.v2 decodes nested maps as map[any]any, not map[string]any.
+	sub, _ := root["customDNS"].(map[any]any)
+	if sub == nil {
+		sub = map[any]any{}
+		root["customDNS"] = sub
+	}
+
+	sub["zone"] = zoneText
+
+	merged, err := yaml.Marshal(root)
 	if err != nil {
-		return err
-	}
-
-	sub := mapEntry(root, "customDNS")
-	if sub == nil || sub.Kind != yaml3.MappingNode {
-		sub = &yaml3.Node{Kind: yaml3.MappingNode, Tag: "!!map"}
-		setMapEntry(root, "customDNS", sub)
-	}
-
-	zone := &yaml3.Node{}
-	if err := zone.Encode(zoneText); err != nil {
 		return fmt.Errorf("can't marshal merged config: %w", err)
 	}
 
-	setMapEntry(sub, "zone", zone)
-
-	merged, err := marshalDocNode(doc)
-	if err != nil {
-		return err
-	}
-
-	return s.setRawYAML(merged)
+	return s.setRawYAML(string(merged))
 }
 
 // GetLocalDNSNXDomains returns the customDNS.nxdomain list (domains answered with
@@ -116,112 +109,34 @@ func (s *Store) SetLocalDNSNXDomains(domains []string) error {
 		return err
 	}
 
-	doc, root, err := parseDocNode(raw)
-	if err != nil {
-		return err
+	root := map[string]any{}
+	if err := yaml.Unmarshal([]byte(raw), &root); err != nil {
+		return fmt.Errorf("can't parse stored config: %w", err)
 	}
 
-	sub := mapEntry(root, "customDNS")
-	if sub == nil || sub.Kind != yaml3.MappingNode {
-		sub = &yaml3.Node{Kind: yaml3.MappingNode, Tag: "!!map"}
-		setMapEntry(root, "customDNS", sub)
+	sub, _ := root["customDNS"].(map[any]any)
+	if sub == nil {
+		sub = map[any]any{}
+		root["customDNS"] = sub
 	}
 
 	if len(domains) == 0 {
-		deleteMapEntry(sub, "nxdomain")
+		delete(sub, "nxdomain")
 	} else {
-		list := &yaml3.Node{}
-		if err := list.Encode(domains); err != nil {
-			return fmt.Errorf("can't marshal merged config: %w", err)
+		list := make([]any, len(domains))
+		for i, d := range domains {
+			list[i] = d
 		}
 
-		setMapEntry(sub, "nxdomain", list)
+		sub["nxdomain"] = list
 	}
 
-	merged, err := marshalDocNode(doc)
+	merged, err := yaml.Marshal(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("can't marshal merged config: %w", err)
 	}
 
-	return s.setRawYAML(merged)
-}
-
-// --- yaml.v3 node surgery ----------------------------------------------------
-// The Settings blob is hand-editable: section writers must touch ONLY their
-// key, not flatten comments/anchors/order the way a map round-trip does.
-
-// parseDocNode parses raw into a yaml.v3 document whose root is a mapping,
-// synthesizing an empty mapping for an empty blob.
-func parseDocNode(raw string) (doc, root *yaml3.Node, err error) {
-	doc = &yaml3.Node{}
-	if err := yaml3.Unmarshal([]byte(raw), doc); err != nil {
-		return nil, nil, fmt.Errorf("can't parse stored config: %w", err)
-	}
-
-	if len(doc.Content) == 0 {
-		doc.Kind = yaml3.DocumentNode
-		doc.Content = []*yaml3.Node{{Kind: yaml3.MappingNode, Tag: "!!map"}}
-	}
-
-	root = doc.Content[0]
-	if root.Kind != yaml3.MappingNode {
-		return nil, nil, errors.New("can't parse stored config: not a YAML mapping")
-	}
-
-	return doc, root, nil
-}
-
-// mapEntry returns the value node for key in mapping m, or nil.
-func mapEntry(m *yaml3.Node, key string) *yaml3.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-
-	return nil
-}
-
-// setMapEntry replaces key's value in mapping m, appending the pair if absent.
-func setMapEntry(m *yaml3.Node, key string, val *yaml3.Node) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content[i+1] = val
-
-			return
-		}
-	}
-
-	m.Content = append(m.Content, &yaml3.Node{Kind: yaml3.ScalarNode, Tag: "!!str", Value: key}, val)
-}
-
-// deleteMapEntry removes key (and its value) from mapping m if present.
-func deleteMapEntry(m *yaml3.Node, key string) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-
-			return
-		}
-	}
-}
-
-// marshalDocNode renders doc with the blob's conventional 2-space indent.
-func marshalDocNode(doc *yaml3.Node) (string, error) {
-	var buf strings.Builder
-
-	enc := yaml3.NewEncoder(&buf)
-	enc.SetIndent(2)
-
-	if err := enc.Encode(doc); err != nil {
-		return "", fmt.Errorf("can't marshal merged config: %w", err)
-	}
-
-	if err := enc.Close(); err != nil {
-		return "", fmt.Errorf("can't marshal merged config: %w", err)
-	}
-
-	return buf.String(), nil
+	return s.setRawYAML(string(merged))
 }
 
 // nestedMap normalizes a yaml.v2 submap (map[any]any) or a map[string]any into

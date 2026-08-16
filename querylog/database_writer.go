@@ -482,20 +482,6 @@ func (d *DatabaseWriter) CleanUp() {
 		logger.WithField("deleted", total).WithField("retention_days", d.logRetentionDays).
 			Info("query-log retention cleanup pruned expired rows")
 	}
-
-	// Aggregate retention (sqlite-only tables): agg_hourly/agg_domains_hourly had
-	// none, so the rollups grew forever. hour is the PK prefix → indexed range
-	// delete; same cutoff as the raw log. UTC bind: hour is stored UTC, compared
-	// lexically. Serialized against the flush via d.lock (mirrors pruneOldest).
-	if d.aggregate {
-		d.lock.Lock()
-		for _, table := range []string{"agg_hourly", "agg_domains_hourly"} {
-			if err := d.db.Exec("DELETE FROM "+table+" WHERE hour < ?", deletionDate.UTC()).Error; err != nil {
-				logger.Errorf("aggregate retention cleanup failed (%s): %v", table, err)
-			}
-		}
-		d.lock.Unlock()
-	}
 }
 
 // maxRetainedEntries caps the flush retry buffer (pendingEntries kept across

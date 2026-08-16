@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
@@ -124,7 +125,7 @@ func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
 		Class string `json:"class"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -139,30 +140,10 @@ func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
 	rw.WriteHeader(http.StatusNoContent)
 }
 
-// perDeviceGateWindow derives the evidence window the shared/NAT gate scans.
-// It must always contain CURRENT evidence: a valid-but-stale request window
-// (e.g. from/to in 2001, span >= 1h) scans zero rows, ClientIsShared then
-// reports "not shared", and a NAT aggregate slips through the gate. So `to` is
-// pinned to now unconditionally, and the requested `from` may only WIDEN the
-// window beyond the default last-24h — never narrow it below, and a garbage /
-// future `from` falls back to it.
-func perDeviceGateWindow(req *http.Request) (from, to time.Time) {
-	to = time.Now()
-	floor := to.Add(-24 * time.Hour)
-
-	from, _, err := parseTimeRange(req)
-	if err != nil || from.After(floor) {
-		from = floor
-	}
-
-	return from, to
-}
-
 // allowPerDevice enforces the shared/NAT rejection gate (R3/P1) for a
 // per-device write and reports whether the handler may proceed. It fails
-// CLOSED: the evidence window always ends at now and covers at least the last
-// 24h (see perDeviceGateWindow — a crafted stale window must not scan zero
-// rows), and a ClientIsShared DB error rejects — this is the only
+// CLOSED: a garbage from/to falls back to the default 24h window instead of
+// skipping the gate, and a ClientIsShared DB error rejects — this is the only
 // enforcement point keeping a NAT aggregate from being named/mapped to a
 // household member. The reader stays optional (no sqlite query log = no
 // shared-client concept), so a missing reader still skips the gate.
@@ -172,7 +153,14 @@ func (s *statsAPI) allowPerDevice(rw http.ResponseWriter, req *http.Request, cli
 		return true
 	}
 
-	from, to := perDeviceGateWindow(req)
+	from, to, err := parseTimeRange(req)
+	if err != nil || to.Sub(from) < time.Hour {
+		// bad, inverted or near-empty range: gate on the default 24h window
+		// instead of skipping the gate — a valid 1s window scans zero rows and
+		// would let a NAT aggregate through as "not shared"
+		to = time.Now()
+		from = to.Add(-24 * time.Hour)
+	}
 
 	shared, err := reader.ClientIsShared(client, from, to)
 	if err != nil {
@@ -204,7 +192,7 @@ func (s *statsAPI) putClientName(rw http.ResponseWriter, req *http.Request) {
 		Name string `json:"name"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -227,43 +215,6 @@ func (s *statsAPI) putClientName(rw http.ResponseWriter, req *http.Request) {
 	rw.WriteHeader(http.StatusNoContent)
 }
 
-// privacyCacheTTL bounds how stale the request-path privacy read may be. Writes
-// through putPrivacy invalidate immediately; an out-of-band edit (raw YAML
-// editor, restore) surfaces within the TTL — fine for dashboard reads.
-const privacyCacheTTL = 5 * time.Second
-
-// getPrivacyCached returns the privacy config through a short-TTL cache.
-// store.GetPrivacy re-parses and re-validates the ENTIRE stored config (plus
-// overlay-table reads) on every call, and a single stats request may consult it
-// several times (people, personas, drill-downs, snapshot pass) — uncached, that
-// multiplied into visible per-request latency on the Pi. The lock is held across
-// the miss so concurrent cold readers don't stampede N full config loads.
-func (s *statsAPI) getPrivacyCached() (config.PrivacyConfig, error) {
-	s.privMu.Lock()
-	defer s.privMu.Unlock()
-
-	if s.privOK && time.Since(s.privAt) < privacyCacheTTL {
-		return s.privCfg, nil
-	}
-
-	p, err := s.store.GetPrivacy()
-	if err != nil {
-		return p, err
-	}
-
-	s.privCfg, s.privAt, s.privOK = p, time.Now(), true
-
-	return p, nil
-}
-
-// invalidatePrivacyCache drops the cached privacy config after a write, so the
-// next read reflects it immediately instead of after the TTL.
-func (s *statsAPI) invalidatePrivacyCache() {
-	s.privMu.Lock()
-	s.privOK = false
-	s.privMu.Unlock()
-}
-
 // profilingOn reports whether the opt-in profiling toggle is enabled. Person
 // mapping is the most-sensitive sub-feature and rides the same opt-in gate: OFF
 // by default, so nothing here profiles a household member until the operator
@@ -274,7 +225,7 @@ func (s *statsAPI) profilingOn() bool {
 		return false
 	}
 
-	cfg, err := s.getPrivacyCached()
+	cfg, err := s.store.GetPrivacy()
 
 	return err == nil && cfg.Profiling.Enable
 }
@@ -300,7 +251,7 @@ func (s *statsAPI) putClientPerson(rw http.ResponseWriter, req *http.Request) {
 		Person string `json:"person"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -434,14 +385,9 @@ func (s *statsAPI) people(rw http.ResponseWriter, req *http.Request) {
 
 	// Mapped-but-idle devices (no traffic in the window) still appear under their
 	// person with zero counts, so every mapping stays visible and un-mappable —
-	// this is the purgeable, most-sensitive layer. Raw fp_hash passthrough keys
-	// are skipped: ClientPersons fans each stored device_key out to its current
-	// client_name AND passes the raw key through, so for every active fp-keyed
-	// device the raw key would surface as a phantom zero-count hash-named row
-	// next to the real one. The mapping is not lost — it shows under the resolved
-	// client_name whenever the device has window traffic.
+	// this is the purgeable, most-sensitive layer.
 	for client, person := range persons {
-		if seen[client] || looksLikeFpHash(client) {
+		if seen[client] {
 			continue
 		}
 
@@ -461,26 +407,6 @@ func (s *statsAPI) people(rw http.ResponseWriter, req *http.Request) {
 		"people":     out,
 		"unassigned": unassigned,
 	})
-}
-
-// looksLikeFpHash reports whether s has the exact shape of a device fp_hash:
-// 20 lowercase-hex chars (hex of the sha1[:10] in model.Fingerprint.Hash).
-// Client names are hostnames/IPs, which never match this shape in practice.
-func looksLikeFpHash(s string) bool {
-	const fpHashLen = 20 // hex.EncodedLen of the sha1[:10] prefix
-
-	if len(s) != fpHashLen {
-		return false
-	}
-
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-
-	return true
 }
 
 // buildPersonas gathers the four cache-table reads and folds them (with the
@@ -513,7 +439,7 @@ func (s *statsAPI) buildPersonas(list []querylog.ClientRow, cats []querylog.TopI
 
 	tz := ""
 	if s.store != nil {
-		if cfg, cerr := s.getPrivacyCached(); cerr == nil {
+		if cfg, cerr := s.store.GetPrivacy(); cerr == nil {
 			tz = cfg.Profiling.TZ
 		}
 	}
@@ -702,7 +628,7 @@ func (s *statsAPI) categoriesFor(reader *querylog.Reader, name string, from, to 
 		return nil
 	}
 
-	cfg, err := s.getPrivacyCached()
+	cfg, err := s.store.GetPrivacy()
 	if err != nil || !cfg.Profiling.Enable {
 		return nil
 	}
@@ -732,7 +658,7 @@ func (s *statsAPI) presenceFor(name string, shared bool) *presenceJSON {
 		return nil
 	}
 
-	cfg, err := s.getPrivacyCached()
+	cfg, err := s.store.GetPrivacy()
 	if err != nil || !cfg.Profiling.Enable {
 		return nil
 	}
@@ -955,7 +881,7 @@ func (s *statsAPI) getPrivacy(rw http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	p, err := s.getPrivacyCached()
+	p, err := s.store.GetPrivacy()
 	if err != nil {
 		internalError(rw, err)
 
@@ -972,23 +898,18 @@ func (s *statsAPI) putPrivacy(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	var body privacyJSON
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
 	// Overlay onto the CURRENT config (defaults applied) instead of a zero value,
 	// so decoy knobs the wire shape doesn't carry are preserved across a save.
 	cur, err := s.store.GetPrivacy()
 	if err != nil {
 		internalError(rw, err)
-
-		return
-	}
-
-	// Decode over the CURRENT wire state, not a zero privacyJSON: json.Decode
-	// only touches fields present in the body, so a partial body (a panel that
-	// renders one section) keeps every absent field's stored value instead of
-	// zeroing it — Enable=false decoy configs validate, so a zeroed section
-	// would silently persist.
-	body := privacyToJSON(cur)
-	if err := decodeJSON(rw, req, &body); err != nil {
-		badRequest(rw, err)
 
 		return
 	}
@@ -999,8 +920,6 @@ func (s *statsAPI) putPrivacy(rw http.ResponseWriter, req *http.Request) {
 
 		return
 	}
-
-	s.invalidatePrivacyCache()
 
 	rw.WriteHeader(http.StatusNoContent)
 }

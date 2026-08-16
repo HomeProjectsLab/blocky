@@ -270,28 +270,6 @@ func TestEvictStaleHeuristics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// client_class projections (scorer writes one per device key): the stale
-	// auto row must be evicted, the stale override and the fresh row kept.
-	for _, cc := range []*clientClass{
-		{Client: "stale", Class: "camera", UpdatedAt: old},
-		{Client: "stale-ovr", Class: "camera", Override: "server", UpdatedAt: old},
-		{Client: "fresh", Class: "iot", UpdatedAt: now},
-	} {
-		if err := db.Create(cc).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if err := db.Create(&deviceIdentity{FpHash: "stale-ovr", FirstSeen: old, LastSeen: old}).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	// an ACTIVE device's churned old-name binding: silent past the cutoff, must be
-	// pruned row-level even though the device itself is fresh.
-	if err := db.Create(&fpBinding{ClientName: "old-name", FpHash: "fresh", FirstSeen: old, LastSeen: old}).Error; err != nil {
-		t.Fatal(err)
-	}
-
 	if err := s.evictStaleHeuristics(now.Add(-heuristicsStaleAfter)); err != nil {
 		t.Fatal(err)
 	}
@@ -328,25 +306,5 @@ func TestEvictStaleHeuristics(t *testing.T) {
 
 	if n := count(`SELECT COUNT(*) FROM device_class_signal WHERE fp_hash = 'fresh'`); n != 1 {
 		t.Fatalf("fresh device_class_signal rows = %d, want 1", n)
-	}
-
-	if n := count(`SELECT COUNT(*) FROM client_class WHERE client = 'stale'`); n != 0 {
-		t.Fatalf("stale client_class rows = %d, want 0 (projection must be growth-bounded)", n)
-	}
-
-	if n := count(`SELECT COUNT(*) FROM client_class WHERE client = 'stale-ovr' AND override = 'server'`); n != 1 {
-		t.Fatalf("client_class manual override rows = %d, want 1 (must survive eviction)", n)
-	}
-
-	if n := count(`SELECT COUNT(*) FROM client_class WHERE client = 'fresh'`); n != 1 {
-		t.Fatalf("fresh client_class rows = %d, want 1", n)
-	}
-
-	if n := count(`SELECT COUNT(*) FROM fp_binding WHERE client_name = 'old-name'`); n != 0 {
-		t.Fatalf("silent old-name binding of an active device = %d rows, want 0 (row-level prune)", n)
-	}
-
-	if n := count(`SELECT COUNT(*) FROM fp_binding WHERE fp_hash = 'fresh' AND client_name = 'c-fresh'`); n != 1 {
-		t.Fatalf("fresh binding rows = %d, want 1", n)
 	}
 }

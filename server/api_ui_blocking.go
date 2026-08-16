@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -181,7 +182,7 @@ func (b *blockingAPI) putCategory(rw http.ResponseWriter, req *http.Request) {
 		Enable bool `json:"enable"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -206,7 +207,7 @@ func (b *blockingAPI) putSegment(rw http.ResponseWriter, req *http.Request) {
 		Categories []string `json:"categories"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -237,7 +238,7 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 			Comment string `json:"comment"`
 		}
 
-		if err := decodeJSON(rw, req, &body); err != nil {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			var tooBig *http.MaxBytesError
 			if errors.As(err, &tooBig) {
 				writeJSON(rw, http.StatusRequestEntityTooLarge,
@@ -325,7 +326,7 @@ func (b *blockingAPI) setEntry(isAllow bool) http.HandlerFunc {
 			Comment string `json:"comment"`
 		}
 
-		if err := decodeJSON(rw, req, &body); err != nil {
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			badRequest(rw, err)
 
 			return
@@ -356,7 +357,7 @@ func (b *blockingAPI) addAdlist(rw http.ResponseWriter, req *http.Request) {
 		Comment string `json:"comment"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -391,7 +392,7 @@ func (b *blockingAPI) putAdlist(rw http.ResponseWriter, req *http.Request) {
 		Comment string  `json:"comment"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -485,7 +486,7 @@ func (b *blockingAPI) putGroup(rw http.ResponseWriter, req *http.Request) {
 		Categories []string `json:"categories"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -509,7 +510,7 @@ func (b *blockingAPI) putGroupMembers(rw http.ResponseWriter, req *http.Request)
 		Members []string `json:"members"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -533,7 +534,7 @@ func (b *blockingAPI) putGroupEnabled(rw http.ResponseWriter, req *http.Request)
 		Enable bool `json:"enable"`
 	}
 
-	if err := decodeJSON(rw, req, &body); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		badRequest(rw, err)
 
 		return

@@ -340,8 +340,7 @@ func (d *Dashboard) draw(s tcell.Screen) {
 
 func (d *Dashboard) drawSplash(s tcell.Screen, w, h int) {
 	msg := "waiting for JungleBlock at " + d.api.Base + " ..."
-	// clamp: a negative start x makes tcell drop the leading cells, rendering only the tail
-	drawText(s, max(0, (w-len(msg))/2), h/2, tcell.StyleDefault.Foreground(tcell.ColorYellow), msg)
+	drawText(s, (w-len(msg))/2, h/2, tcell.StyleDefault.Foreground(tcell.ColorYellow), msg)
 }
 
 // drawTiny: title · compact KPI strip (2 rows) · live ticker · footer.

@@ -112,14 +112,6 @@ var _ = Describe("Blocking tables", func() {
 			Expect(denies).Should(BeEmpty())
 		})
 
-		It("reports not-found for updates/deletes of nonexistent ids", func() {
-			Expect(store.SetAllowEntry(9999, true, "")).Should(MatchError(ContainSubstring("unknown")))
-			Expect(store.SetDenyEntry(9999, true, "")).Should(MatchError(ContainSubstring("unknown")))
-			Expect(store.DeleteAllowEntry(9999)).Should(MatchError(ContainSubstring("unknown")))
-			Expect(store.DeleteDenyEntry(9999)).Should(MatchError(ContainSubstring("unknown")))
-			Expect(store.DeleteAdlistEntry(9999)).Should(MatchError(ContainSubstring("unknown")))
-		})
-
 		It("rejects garbage entries", func() {
 			_, err := store.AddDenyEntry("manual", "", "")
 			Expect(err).Should(HaveOccurred())

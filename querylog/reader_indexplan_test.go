@@ -542,10 +542,6 @@ func TestHeuristicsFoldTouchesNoLogEntries(t *testing.T) {
 
 	t.Cleanup(func() { _ = src.Close() })
 
-	// Halt the background scorer (it runs a boot pass on s.db) before swapping the
-	// logger: the swap and the capture slice are unsynchronized by design.
-	src.stopClassScorer()
-
 	scorerCap := &captureLogger{on: true}
 	src.db.Logger = scorerCap
 

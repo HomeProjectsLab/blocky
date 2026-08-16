@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/0xERR0R/blocky/config"
-	yaml3 "gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 )
 
 // GetPrivacy returns the privacy section of the stored config, with defaults
@@ -34,24 +34,17 @@ func (s *Store) SetPrivacy(p config.PrivacyConfig) error {
 		return err
 	}
 
-	// node surgery (see customdns.go helpers): replace only `privacy:`, keep the
-	// hand-editable blob's comments/anchors/order intact.
-	doc, root, err := parseDocNode(raw)
-	if err != nil {
-		return err
+	root := map[string]any{}
+	if err := yaml.Unmarshal([]byte(raw), &root); err != nil {
+		return fmt.Errorf("can't parse stored config: %w", err)
 	}
 
-	node := &yaml3.Node{}
-	if err := node.Encode(p); err != nil {
+	root["privacy"] = p
+
+	merged, err := yaml.Marshal(root)
+	if err != nil {
 		return fmt.Errorf("can't marshal merged config: %w", err)
 	}
 
-	setMapEntry(root, "privacy", node)
-
-	merged, err := marshalDocNode(doc)
-	if err != nil {
-		return err
-	}
-
-	return s.setRawYAML(merged)
+	return s.setRawYAML(string(merged))
 }

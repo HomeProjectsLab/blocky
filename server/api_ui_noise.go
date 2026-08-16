@@ -60,13 +60,6 @@ func (s *statsAPI) noiseBuckets(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Clamp sub-hour steps to the stored hourly granularity (mirrors
-	// Reader.Buckets): DecoyBuckets only guards step<=0, so e.g. step=1 would
-	// build one bucket per second over the whole window and balloon memory.
-	if step < 3600 {
-		step = 3600
-	}
-
 	buckets, err := reader.DecoyBuckets(from, to, step)
 	if err != nil {
 		internalError(rw, err)

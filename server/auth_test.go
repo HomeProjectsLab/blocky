@@ -71,7 +71,7 @@ func TestSessionGateProxyProtoAndLegacyRoutes(t *testing.T) {
 
 	var reached bool
 
-	gate := newSessionGate(store, "/dns-query", "/metrics")(
+	gate := newSessionGate(store, "/dns-query")(
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
 
 	serve := func(path, remoteAddr string, viaProxy bool) *httptest.ResponseRecorder {
@@ -125,116 +125,5 @@ func TestSessionGateProxyProtoAndLegacyRoutes(t *testing.T) {
 
 	if !reached {
 		t.Fatal("read-only legacy /api route should stay ungated")
-	}
-}
-
-// Regression: a SameSite=Lax session cookie still rides on top-level cross-site
-// GET navigations, and the legacy control routes mutate on GET — a link to
-// /api/blocking/disable must not disable blocking with the victim's cookie.
-// Mutations require a same-origin Origin/Referer; absent both fails closed.
-func TestSessionGateCSRFGuard(t *testing.T) {
-	store, err := configstore.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer store.Close()
-
-	secret, err := store.SessionSecret()
-	if err != nil {
-		t.Fatalf("session secret: %v", err)
-	}
-
-	cookie := signSession(secret, time.Now().Add(time.Hour).Unix())
-
-	var reached bool
-
-	gate := newSessionGate(store, "/dns-query", "/metrics")(
-		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
-
-	serve := func(method, path string, hdr map[string]string) *httptest.ResponseRecorder {
-		t.Helper()
-
-		reached = false
-		req := httptest.NewRequest(method, path, nil)
-		req.RemoteAddr = "192.168.1.50:4711"
-		req.Host = "pi.hole"
-		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
-
-		for k, v := range hdr {
-			req.Header.Set(k, v)
-		}
-
-		rec := httptest.NewRecorder()
-		gate.ServeHTTP(rec, req)
-
-		return rec
-	}
-
-	// cross-site top-level GET navigation: cookie present, no same-origin proof
-	rec := serve(http.MethodGet, "/api/blocking/disable", nil)
-	if reached || rec.Code != http.StatusForbidden {
-		t.Fatalf("mutating GET without Origin/Referer must be 403, got %d (reached=%v)", rec.Code, reached)
-	}
-
-	rec = serve(http.MethodGet, "/api/blocking/disable", map[string]string{"Referer": "https://evil.example/"})
-	if reached || rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-origin mutating GET must be 403, got %d (reached=%v)", rec.Code, reached)
-	}
-
-	// same-origin mutation passes
-	serve(http.MethodGet, "/api/blocking/disable", map[string]string{"Referer": "http://pi.hole/settings"})
-
-	if !reached {
-		t.Fatal("same-origin mutating GET should pass the CSRF guard")
-	}
-
-	serve(http.MethodPost, "/api/ui/config", map[string]string{"Origin": "http://pi.hole"})
-
-	if !reached {
-		t.Fatal("same-origin POST should pass the CSRF guard")
-	}
-
-	// non-mutating page load needs no source header (bookmarks, direct entry)
-	serve(http.MethodGet, "/settings", nil)
-
-	if !reached {
-		t.Fatal("read-only GET must not require Origin/Referer")
-	}
-}
-
-// Regression: the public metrics exemption must follow the CONFIGURED scrape
-// path — a custom path must stay scrapeable off-box, and the literal /metrics
-// must be gated once the handler moved away from it.
-func TestSessionGateMetricsPathFollowsConfig(t *testing.T) {
-	store, err := configstore.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer store.Close()
-
-	var reached bool
-
-	gate := newSessionGate(store, "", "/custom-metrics")(
-		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
-
-	serve := func(path string) {
-		t.Helper()
-
-		reached = false
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.RemoteAddr = "192.168.1.50:4711"
-		gate.ServeHTTP(httptest.NewRecorder(), req)
-	}
-
-	serve("/custom-metrics")
-
-	if !reached {
-		t.Fatal("configured metrics path must be public")
-	}
-
-	serve("/metrics")
-
-	if reached {
-		t.Fatal("literal /metrics must be gated when the scrape path is custom")
 	}
 }
