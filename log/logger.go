@@ -59,6 +59,12 @@ func init() {
 
 	ConfigureLogger(newLogger, DefaultConfig())
 
+	// Capture every entry for the live log console. ConfigureLogger only
+	// SetLevel/SetFormatter/SetOutput (never ReplaceHooks), so this survives
+	// every hot-swap re-Configure. Silence() replaces the logger wholesale,
+	// dropping the hook — correct: tests want silence.
+	newLogger.AddHook(Console)
+
 	logger = newLogger
 }
 

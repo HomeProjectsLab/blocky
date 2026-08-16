@@ -322,6 +322,7 @@ var uiPages = []struct {
 	{"/privacy", "privacy", "Privacy"},
 	{"/settings", "settings", "Settings"},
 	{"/system", "system", "System"},
+	{"/logs", "logs", "Console"},
 	{"/login", "login", "Sign in"},
 }
 
