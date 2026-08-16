@@ -99,19 +99,44 @@ func (c *CustomDNSEntries) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 // IsEnabled implements `config.Configurable`.
+//
+// The JungleBlock Local-DNS UI writes records into `Zone` (and NXDOMAIN entries
+// into `NXDomains`), never `Mapping`. Counting only `Mapping` reported a working
+// zone-only config as disabled — so LogResolverConfig logged `custom_dns:
+// disabled` and LogConfig printed nothing while the resolver was actively
+// serving those records, which made local-DNS problems undebuggable from logs.
 func (c *CustomDNS) IsEnabled() bool {
-	return len(c.Mapping) != 0
+	return len(c.Mapping) != 0 || len(c.Zone.RRs) != 0 || len(c.NXDomains) != 0
 }
 
 // LogConfig implements `config.Configurable`.
 func (c *CustomDNS) LogConfig(logger *logrus.Entry) {
 	logger.Debugf("TTL = %s", c.CustomTTL)
-	logger.Debugf("filterUnmappedTypes = %t", c.FilterUnmappedTypes)
+	logger.Infof("filterUnmappedTypes = %t", c.FilterUnmappedTypes)
+
+	// With filterUnmappedTypes=false, a query TYPE not defined for a matched name
+	// (AAAA, and HTTPS/SVCB which browsers send) is forwarded UPSTREAM instead of
+	// answered empty — so an override leaks the real origin's records and the
+	// client still reaches the real server. Make that footgun visible.
+	if !c.FilterUnmappedTypes {
+		logger.Warn("filterUnmappedTypes=false: query types not defined for a custom/override " +
+			"domain (AAAA, HTTPS/SVCB, …) are forwarded upstream and can leak the real server")
+	}
 
 	logger.Info("mapping:")
 
 	for key, val := range c.Mapping {
 		logger.Infof("  %s = %s", key, val)
+	}
+
+	logger.Infof("zone records: %d", len(c.Zone.RRs))
+
+	for key, val := range c.Zone.RRs {
+		logger.Infof("  %s = %s", key, val)
+	}
+
+	if len(c.NXDomains) != 0 {
+		logger.Infof("nxdomain = %v", c.NXDomains)
 	}
 }
 

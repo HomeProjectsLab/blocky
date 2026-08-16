@@ -45,6 +45,27 @@ var _ = Describe("CustomDNSConfig", func() {
 			})
 		})
 
+		// Regression: the Local-DNS UI writes records into Zone / NXDomains, never
+		// Mapping. Counting only Mapping mis-reported these working configs as
+		// disabled (logs said "custom_dns: disabled" while they actively resolved).
+		When("only a zone is configured (as the Local-DNS UI writes it)", func() {
+			It("should be true", func() {
+				zoneOnly := CustomDNS{Zone: ZoneFileDNS{RRs: CustomDNSMapping{
+					"myhost.lan.": {&dns.A{A: net.ParseIP("10.130.0.5")}},
+				}}}
+
+				Expect(zoneOnly.IsEnabled()).Should(BeTrue())
+			})
+		})
+
+		When("only nxdomain entries are configured", func() {
+			It("should be true", func() {
+				nxOnly := CustomDNS{NXDomains: []string{"use-application-dns.net"}}
+
+				Expect(nxOnly.IsEnabled()).Should(BeTrue())
+			})
+		})
+
 		When("disabled", func() {
 			It("should be false", func() {
 				cfg := CustomDNS{}
