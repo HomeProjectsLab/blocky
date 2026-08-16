@@ -1257,18 +1257,6 @@ func (s *Server) Stop(ctx context.Context) error {
 		if err := server.ShutdownContext(ctx); err != nil {
 			stopErr = multierror.Append(stopErr, fmt.Errorf("stop %s listener failed: %w", server.Net, err))
 		}
-
-		// belt (mirrors the HTTP path above): ShutdownContext returns early
-		// without closing anything if the serve goroutine hasn't set `started`
-		// yet, leaking the pre-bound :53 socket — a same-port rebuild would then
-		// die with EADDRINUSE. Double-close errors are irrelevant here.
-		if server.Listener != nil {
-			_ = server.Listener.Close()
-		}
-
-		if server.PacketConn != nil {
-			_ = server.PacketConn.Close()
-		}
 	}
 
 	// listeners are down — flush the live bundle's query log buffers synchronously

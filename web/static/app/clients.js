@@ -1,7 +1,7 @@
 // clients.js — client list + drill-down with the fingerprint panel, plus the
 // device-class table (auto class + manual override).
 import { getJSON, send } from "./api.js";
-import { lineChart, cssTok } from "./chart.js";
+import { lineChart } from "./chart.js";
 import { fmtNum, fmtDateTime, fmtPct } from "./format.js";
 import { promptDialog, toast } from "./modal.js";
 
@@ -248,10 +248,9 @@ async function openDetail(name) {
         detail.append(chartEl);
         const xs = d.history.map((h) => h.ts);
         const ys = d.history.map((h) => (h.counts && h.counts.queries) || 0);
-        // defer so the element has a width. Canvas can't resolve CSS vars —
-        // resolve the token first. height matches the 120px .spark box.
+        // defer so the element has a width
         requestAnimationFrame(() => { detailChart = lineChart(chartEl, {
-            labels: ["queries"], colors: [cssTok("--c-resolved")], data: [xs, ys], height: 120, fmtVal: fmtNum,
+            labels: ["queries"], colors: ["var(--c-resolved)"], data: [xs, ys], fmtVal: fmtNum,
         }); });
     }
 

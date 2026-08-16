@@ -789,14 +789,10 @@ func (r *Reader) fingerprintClusters(d *ClientDetail, name string, from, to time
 			FpDetail     string `gorm:"column:fp_detail"`
 		}
 
-		// Most recent raw row IN THE WINDOW for this cluster carries the EDNS
-		// feature sample. The request_ts lower bound (the cluster came from this
-		// window, so a row exists) keeps a historical-window request from walking
-		// every newer row per cluster on idx_client_name_request_ts.
+		// most recent raw row for this cluster carries the EDNS feature sample
 		err := r.db.Raw(`SELECT transport, edns_udp_size, edns_opt_codes, doh_user_agent, fp_detail
-			FROM log_entries WHERE client_name = ? AND fp_hash = ? AND request_ts >= ?
-			ORDER BY request_ts DESC LIMIT 1`,
-			name, fp.Name, from.UTC()).Scan(&sample).Error
+			FROM log_entries WHERE client_name = ? AND fp_hash = ? ORDER BY request_ts DESC LIMIT 1`,
+			name, fp.Name).Scan(&sample).Error
 		if err != nil {
 			return err
 		}

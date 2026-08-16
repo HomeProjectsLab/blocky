@@ -61,9 +61,8 @@ func GetEdns0Option[T EDNS0Option](msg *dns.Msg) T {
 }
 
 // RemoveEdns0Option removes the option according to the given type from the OPT record
-// in the Extra section of the given message. The OPT record itself is kept even when
-// it becomes empty: it carries the DO bit, EDNS version and advertised UDP size, and
-// stripping it would drop DNSSEC material and fall back to 512-byte answers.
+// in the Extra section of the given message.
+// If there are no more options in the OPT record, the OPT record will be removed.
 // If the option is successfully removed, true will be returned.
 func RemoveEdns0Option[T EDNS0Option](msg *dns.Msg) bool {
 	if msg == nil {
@@ -87,6 +86,10 @@ func RemoveEdns0Option[T EDNS0Option](msg *dns.Msg) bool {
 
 			break
 		}
+	}
+
+	if len(opt.Option) == 0 {
+		RemoveEdns0Record(msg)
 	}
 
 	return res

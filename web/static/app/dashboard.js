@@ -1,19 +1,22 @@
 // dashboard.js — stat tiles, stacked QPS-by-outcome chart, latency tiles, top lists.
 import { getJSON } from "./api.js";
 import { fmtNum, fmtMs, fmtPct } from "./format.js";
-import { stackedArea, cssTok } from "./chart.js";
+import { stackedArea } from "./chart.js";
 
 const RANGES = { "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600, "7d": 7 * 24 * 3600 };
 const STEPS = { "1h": 60, "6h": 300, "24h": 900, "7d": 3600 };
 
-// Fixed series order + status color tokens — never cycled, never re-ranked.
-// Tokens are resolved at render time (cssTok) so a theme toggle isn't stale.
+// Fixed series order + status colors — never cycled, never re-ranked.
 const SERIES = [
-    { key: "RESOLVED", label: "resolved", tok: "--c-resolved" },
-    { key: "BLOCKED", label: "blocked", tok: "--c-blocked" },
-    { key: "CACHED", label: "cached", tok: "--c-cached" },
-    { key: "OTHER", label: "other", tok: "--c-other" },
+    { key: "RESOLVED", label: "resolved", color: cssTok("--c-resolved") },
+    { key: "BLOCKED", label: "blocked", color: cssTok("--c-blocked") },
+    { key: "CACHED", label: "cached", color: cssTok("--c-cached") },
+    { key: "OTHER", label: "other", color: cssTok("--c-other") },
 ];
+
+function cssTok(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 let range = "24h";
 let chart = null;
@@ -130,7 +133,7 @@ async function loadBuckets(token) {
 
     chart = stackedArea(el, {
         labels: SERIES.map((s) => s.label),
-        colors: SERIES.map((s) => cssTok(s.tok)),
+        colors: SERIES.map((s) => s.color),
         data: [xs, ...rows],
         xRange: [fromSec, toSec],
         fmtVal: fmtNum,
@@ -149,9 +152,7 @@ function renderTop(elID, items, device) {
     const max = Math.max(...items.map((i) => i.count), 1);
     ol.innerHTML = items.map((i) => {
         const guess = device && device[i.name];
-        // plain .chip: deviceGuess is an identity guess, not a device class —
-        // a cc-* class here would fake the cc-iot/server/workstation coupling.
-        const chip = guess ? ` <span class="chip" title="Device guess (best guess)">${esc(guess)}</span>` : "";
+        const chip = guess ? ` <span class="chip cc-iot" title="Device class (best guess)">${esc(guess)}</span>` : "";
         return `
         <li>
             <div class="bar-row"><span class="bar-name" title="${esc(i.name)}">${esc(i.name)}${chip}</span><span class="bar-count">${fmtNum(i.count)}</span></div>

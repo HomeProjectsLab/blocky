@@ -41,7 +41,6 @@ type Dashboard struct {
 
 	streamCount int64 // total SSE events seen (for live QPS)
 	lastCount   int64
-	lastSample  time.Time // when lastCount was taken; QPS divides by real elapsed
 	qps         float64
 	qpsHist     []float64 // rolling QPS samples, oldest first
 
@@ -169,19 +168,8 @@ func (d *Dashboard) refreshFast() {
 	defer d.mu.Unlock()
 
 	d.vitals = v
-
-	// divide by measured elapsed, not d.refresh: stalled API calls above can
-	// stretch a tick to ~20s and a fixed 1s divisor would report ~20x real QPS
-	now := timeNow()
-	elapsed := now.Sub(d.lastSample)
-
-	if d.lastSample.IsZero() || elapsed <= 0 {
-		elapsed = d.refresh
-	}
-
-	d.qps = float64(d.streamCount-d.lastCount) / elapsed.Seconds()
+	d.qps = float64(d.streamCount-d.lastCount) / d.refresh.Seconds()
 	d.lastCount = d.streamCount
-	d.lastSample = now
 
 	d.qpsHist = append(d.qpsHist, d.qps)
 	if len(d.qpsHist) > 120 {

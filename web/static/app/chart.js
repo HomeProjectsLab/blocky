@@ -1,16 +1,19 @@
 // chart.js — the ONE uPlot wrapper: theme tokens, crosshair, tooltip, resize.
 /* global uPlot */
 
-// Read tokens at CALL time, not module import: the theme toggle flips
-// data-theme without a reload, so cached values would paint stale-theme charts.
-export const cssTok = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const css = getComputedStyle(document.documentElement);
+const tok = (name) => css.getPropertyValue(name).trim();
+
+const INK2 = tok("--ink2");
+const GRID = tok("--grid");
+const MONO = tok("--font-mono") || "monospace";
 
 function axis(extra) {
     return Object.assign({
-        stroke: cssTok("--ink2"),
-        font: `11px ${cssTok("--font-mono") || "monospace"}`,
-        grid: { stroke: cssTok("--grid"), width: 1 },
-        ticks: { stroke: cssTok("--grid"), width: 1 },
+        stroke: INK2,
+        font: `11px ${MONO}`,
+        grid: { stroke: GRID, width: 1 },
+        ticks: { stroke: GRID, width: 1 },
     }, extra);
 }
 
@@ -46,9 +49,9 @@ function tooltipPlugin(labels, colors, rawSeries, fmtVal) {
     };
 }
 
-function observe(el, u, height) {
+function observe(el, u) {
     const ro = new ResizeObserver(() => {
-        u.setSize({ width: el.clientWidth, height });
+        u.setSize({ width: el.clientWidth, height: 260 });
     });
     ro.observe(el);
     // Disconnect when the chart is destroyed. Without this, every re-render
@@ -61,7 +64,7 @@ function observe(el, u, height) {
 // xRange (optional [minSec, maxSec]) pins the time axis to the selected window so
 // sparse data (a single hourly bucket on a fresh box) doesn't auto-range to a
 // nonsense multi-year span.
-export function stackedArea(el, { labels, colors, data, xRange, height = 260, fmtVal = (v) => String(v) }) {
+export function stackedArea(el, { labels, colors, data, xRange, fmtVal = (v) => String(v) }) {
     const xs = data[0];
     const raw = data.slice(1);
     // cumulative stack for drawing; tooltip shows raw values
@@ -81,7 +84,7 @@ export function stackedArea(el, { labels, colors, data, xRange, height = 260, fm
 
     const u = new uPlot({
         width: el.clientWidth || 600,
-        height,
+        height: 260,
         series,
         bands,
         axes: [axis({ grid: { show: false } }), axis({ size: 56 })],
@@ -94,12 +97,12 @@ export function stackedArea(el, { labels, colors, data, xRange, height = 260, fm
         plugins: [tooltipPlugin(labels, colors, raw, fmtVal)],
     }, [xs, ...stacked], el);
 
-    observe(el, u, height);
+    observe(el, u);
     return u;
 }
 
 // Plain multi-line time series (kept for later pages).
-export function lineChart(el, { labels, colors, data, height = 260, fmtVal = (v) => String(v) }) {
+export function lineChart(el, { labels, colors, data, fmtVal = (v) => String(v) }) {
     const series = [{}].concat(labels.map((label, i) => ({
         label,
         stroke: colors[i],
@@ -109,7 +112,7 @@ export function lineChart(el, { labels, colors, data, height = 260, fmtVal = (v)
 
     const u = new uPlot({
         width: el.clientWidth || 600,
-        height,
+        height: 260,
         series,
         axes: [axis({ grid: { show: false } }), axis({ size: 56 })],
         cursor: { drag: { setScale: false } },
@@ -117,6 +120,6 @@ export function lineChart(el, { labels, colors, data, height = 260, fmtVal = (v)
         plugins: [tooltipPlugin(labels, colors, null, fmtVal)],
     }, data, el);
 
-    observe(el, u, height);
+    observe(el, u);
     return u;
 }

@@ -45,6 +45,7 @@ package dnssec
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/0xERR0R/blocky/cache"
@@ -57,14 +58,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	ednsUDPSize = 4096 // EDNS UDP buffer size for DNSSEC queries
-
-	// nsec3HashCacheMaxSize bounds the NSEC3 hash cache. The key contains the qname
-	// (attacker-controlled via random-subdomain traffic), so the cache MUST be bounded
-	// or it grows without limit and OOMs a small device.
-	nsec3HashCacheMaxSize = 2048
-)
+const ednsUDPSize = 4096 // EDNS UDP buffer size for DNSSEC queries
 
 var (
 	errUnsupportedRSAExponent = errors.New("unsupported RSA exponent exceeds Go crypto limit")
@@ -105,7 +99,7 @@ type Validator struct {
 	logger                *logrus.Entry
 	upstream              Resolver // Used to query for DNSKEY and DS records
 	validationCache       cache.ExpiringCache[ValidationResult]
-	nsec3HashCache        cache.ExpiringCache[string] // Bounded LRU for NSEC3 hashes: key = "name:alg:salt:iterations"
+	nsec3HashCache        sync.Map // Cache for NSEC3 hash computations: key = "name:alg:salt:iterations"
 	cacheExpiration       time.Duration
 	maxChainDepth         uint // Maximum depth for chain of trust validation
 	maxNSEC3Iterations    uint // Maximum NSEC3 iterations (RFC 5155 §10.3)
@@ -197,11 +191,6 @@ func NewValidator(
 			CleanupInterval: time.Hour,
 			Shards:          cache.ShardCount(),
 		}),
-		nsec3HashCache: expirationcache.NewCache[string](ctx, expirationcache.Options{
-			CleanupInterval: time.Hour,
-			MaxSize:         nsec3HashCacheMaxSize,
-			Shards:          cache.ShardCount(),
-		}),
 		cacheExpiration:       time.Duration(cacheExpirationHours) * time.Hour,
 		maxChainDepth:         maxChainDepth,
 		maxNSEC3Iterations:    maxNSEC3Iterations,
@@ -243,7 +232,7 @@ func (v *Validator) ValidateResponse(
 	v.logger.Debugf("DNSSEC validation requested for %s", question.Name)
 
 	// Initialize query budget for this validation request (DoS protection)
-	ctx = withQueryBudget(ctx, int(v.maxUpstreamQueries))
+	ctx = context.WithValue(ctx, queryBudgetKey{}, int(v.maxUpstreamQueries))
 
 	var result ValidationResult
 

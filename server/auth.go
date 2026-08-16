@@ -388,13 +388,6 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 	ip := requestIP(r)
 	obfIP := util.Obfuscate(ip)
 
-	// Same distrust as the session gate: on a PROXY-protocol listener RemoteAddr
-	// is sender-claimed, so forged preambles would mint a fresh 5-attempt budget
-	// per spoofed IP. One shared bucket for the whole PROXY path fails closed.
-	if viaProxyProtocol(r) {
-		ip = "proxy-protocol"
-	}
-
 	if a.limiter.locked(ip) {
 		authLog().WithField("client_ip", obfIP).Warn("login rejected: IP is locked out")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})

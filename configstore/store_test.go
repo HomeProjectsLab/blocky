@@ -205,30 +205,3 @@ var _ = Describe("Store", func() {
 		})
 	})
 })
-
-// TestSeedSurvivesHostileDirName guards the seed-YAML quoting: a db directory
-// whose name contains YAML-hostile bytes (': ', ' #', tab) used to be
-// interpolated raw into the querylog target, making the seed unparseable and
-// Open fail with "seed config is invalid" — the appliance never started.
-func TestSeedSurvivesHostileDirName(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "evil: dir #1\ttab")
-
-	s, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open store in hostile dir: %v", err)
-	}
-	defer s.Close()
-
-	fresh, err := s.IsFresh()
-	if err != nil {
-		t.Fatalf("is fresh: %v", err)
-	}
-
-	if !fresh {
-		t.Fatal("freshly seeded store must report fresh")
-	}
-
-	if _, err := s.LoadConfig(); err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-}

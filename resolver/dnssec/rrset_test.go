@@ -455,7 +455,7 @@ var _ = Describe("RRset validation functions", func() {
 
 	Describe("queryAndMatchDNSKEY", func() {
 		It("should query and find matching DNSKEY", func() {
-			ctx := withQueryBudget(context.Background(), 10)
+			ctx := context.WithValue(context.Background(), queryBudgetKey{}, 10)
 
 			dnskey := &dns.DNSKEY{
 				Hdr: dns.RR_Header{
@@ -485,7 +485,7 @@ var _ = Describe("RRset validation functions", func() {
 		})
 
 		It("should fail when DNSKEY with matching key tag not found", func() {
-			ctx := withQueryBudget(context.Background(), 10)
+			ctx := context.WithValue(context.Background(), queryBudgetKey{}, 10)
 
 			dnskey := &dns.DNSKEY{
 				Hdr: dns.RR_Header{
@@ -514,7 +514,7 @@ var _ = Describe("RRset validation functions", func() {
 		})
 
 		It("should treat query failure as Bogus", func() {
-			ctx := withQueryBudget(context.Background(), 10)
+			ctx := context.WithValue(context.Background(), queryBudgetKey{}, 10)
 
 			mockUpstream.ResolveFn = func(ctx context.Context, req *model.Request) (*model.Response, error) {
 				return nil, errors.New("query failed")

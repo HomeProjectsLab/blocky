@@ -52,9 +52,7 @@ function openModal({ buildDialog }) {
         const { focusEl, cancel, submit } = buildDialog(dialog, close);
 
         function onKey(e) {
-            // stopPropagation: without it Escape bubbles on to the page's
-            // drawer-close listeners and closes the drawer behind the dialog.
-            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); return; }
+            if (e.key === "Escape") { e.preventDefault(); cancel(); return; }
             if (e.key === "Enter" && submit) {
                 // Enter confirms, except inside a textarea (allow newlines) or
                 // on a focused button — let that button's own click fire, so

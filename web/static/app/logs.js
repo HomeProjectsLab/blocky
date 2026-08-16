@@ -113,14 +113,11 @@ async function loadRecent() {
         const lines = await getJSON("/api/ui/logs/recent", { level: levelSel.value });
         pre.textContent = "";
         buffer.length = 0;
-        emptyMsg.textContent = "Waiting for log lines…"; // reset a prior error state
         for (const item of lines) addLine(item); // server returns oldest→newest
         if (pre.children.length === 0) emptyMsg.hidden = false;
         scrollBox.scrollTop = scrollBox.scrollHeight;
     } catch (err) {
-        // surface it — a silent failure looks like a healthy empty console
-        emptyMsg.textContent = "Could not load the log snapshot: " + err.message + " — change the level or reload to retry.";
-        emptyMsg.hidden = false;
+        console.error("log snapshot failed:", err);
     }
 }
 

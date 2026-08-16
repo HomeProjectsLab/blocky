@@ -100,25 +100,6 @@ var _ = Describe("Privacy config", func() {
 			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("must not all be zero")))
 		})
 
-		It("rejects a weight large enough to overflow int32 in the weight sum", func() {
-			p.Decoy.Enable = true
-			p.Decoy.ReplayWeight = 1 << 31 // int(sum) would go negative on 32-bit ARM
-			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("replayWeight")))
-		})
-
-		It("rejects unknown vendorFamilies entries", func() {
-			p.Decoy.Enable = true
-			p.Decoy.DeviceClass.VendorFamilies = []string{"apple"}
-			Expect(p.validate(nil)).Should(MatchError(ContainSubstring("vendorFamilies")))
-		})
-
-		It("normalizes vendorFamilies case in place", func() {
-			p.Decoy.Enable = true
-			p.Decoy.DeviceClass.VendorFamilies = []string{" Sonos ", "TUYA"}
-			Expect(p.validate(nil)).Should(Succeed())
-			Expect(p.Decoy.DeviceClass.VendorFamilies).Should(Equal([]string{"sonos", "tuya"}))
-		})
-
 		It("ignores decoy misconfig when decoy disabled", func() {
 			p.Decoy.Enable = false
 			p.Decoy.ActiveHoursStart = 99

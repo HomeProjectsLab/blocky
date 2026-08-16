@@ -40,15 +40,6 @@ const (
 	// must advance without a UI visit, so this is a real ticker, not a
 	// request-triggered throttle (mirrors the former clientClassRefreshInterval).
 	classScorerInterval = 5 * time.Minute
-	// heuristicsStaleAfter bounds the heuristics tables: keys silent this long are
-	// evicted. Without it the purge-immune tables grow forever — fp-less clients
-	// key on churning IPv6 privacy addresses, one dead key set per rotation. Real
-	// devices refresh last_seen on every flush and are never evicted.
-	heuristicsStaleAfter = 30 * 24 * time.Hour
-	// classScoreRecency bounds the scorer's read: only signals active in this
-	// window are re-scored (an idle accumulator can't change, and its class is
-	// already persisted in device_class/client_class).
-	classScoreRecency = 24 * time.Hour
 )
 
 // --- durable schema (GORM structs; composite-PK style of aggHourly) -----------
@@ -830,20 +821,12 @@ func (s *DecoySource) scoreDeviceClasses() error {
 	s.classMu.Lock()
 	defer s.classMu.Unlock()
 
-	now := time.Now()
-
-	if err := s.evictStaleHeuristics(now.Add(-heuristicsStaleAfter)); err != nil {
-		log.PrefixedLog("heuristics").WithError(err).Warn("stale-key eviction failed")
-	}
-
-	// Recency bound: idle accumulators can't have changed and their class is
-	// already persisted, so only re-score keys active in the window (avoids a
-	// full-table load every 5 min). last_ts IS NULL = never-cursored fresh key.
 	var sigs []deviceClassSignal
-	if err := s.db.Where("last_ts IS NULL OR last_ts >= ?", now.Add(-classScoreRecency)).
-		Find(&sigs).Error; err != nil {
+	if err := s.db.Find(&sigs).Error; err != nil {
 		return err
 	}
+
+	now := time.Now()
 
 	for i := range sigs {
 		class := sigs[i].toFeatures().classify()
@@ -883,37 +866,6 @@ func (s *DecoySource) scoreDeviceClasses() error {
 	s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 
 	return nil
-}
-
-// evictStaleHeuristics deletes every heuristics row for device keys silent since
-// cutoff (device_identity.last_seen, indexed). This is the growth bound for the
-// purge-immune tables: churned IPv6-privacy-address keys stop refreshing
-// last_seen and age out; active devices never do. Manual data is preserved:
-// persona_link is untouched and device_class rows with a manual override are
-// kept. Dependent tables are cleared BEFORE device_identity so the stale-key
-// subquery still sees the keys. Cheap when nothing is stale (indexed range scan
-// finds an empty set).
-func (s *DecoySource) evictStaleHeuristics(cutoff time.Time) error {
-	stale := `SELECT fp_hash FROM device_identity WHERE last_seen < ?`
-
-	deps := []string{
-		"fp_binding", "device_facet", "device_presence", "service_usage",
-		"category_usage", "device_class_signal", "device_class_domainset",
-	}
-	for _, t := range deps {
-		if err := s.db.Exec(
-			`DELETE FROM `+t+` WHERE fp_hash IN (`+stale+`)`, cutoff).Error; err != nil {
-			return err
-		}
-	}
-
-	if err := s.db.Exec(
-		`DELETE FROM device_class WHERE COALESCE(override,'') = '' AND fp_hash IN (`+stale+`)`,
-		cutoff).Error; err != nil {
-		return err
-	}
-
-	return s.db.Exec(`DELETE FROM device_identity WHERE last_seen < ?`, cutoff).Error
 }
 
 // --- small helpers ------------------------------------------------------------

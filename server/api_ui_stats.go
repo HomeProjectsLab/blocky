@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -177,16 +176,13 @@ func (s *statsAPI) readerOr503(rw http.ResponseWriter) *querylog.Reader {
 // parseTimeRange reads from/to (RFC3339) query params; defaults: to=now, from=now-24h.
 func parseTimeRange(req *http.Request) (from, to time.Time, err error) {
 	to = time.Now()
+	from = to.Add(-24 * time.Hour)
 
 	if v := req.URL.Query().Get("to"); v != "" {
 		if to, err = time.Parse(time.RFC3339, v); err != nil {
 			return from, to, err
 		}
 	}
-
-	// default from anchors on the PARSED to: with only to=<past> supplied,
-	// anchoring on now would yield an inverted window and silent zero rows.
-	from = to.Add(-24 * time.Hour)
 
 	if v := req.URL.Query().Get("from"); v != "" {
 		if from, err = time.Parse(time.RFC3339, v); err != nil {
@@ -303,26 +299,7 @@ func (s *statsAPI) buckets(rw http.ResponseWriter, req *http.Request) {
 const (
 	defaultTopN = 10
 	maxTopN     = 100
-	// maxTopCols bounds the comma-separated col list: each token is one SQLite
-	// GROUP BY, and only 5 columns exist — an unbounded list (150k tokens fit a
-	// 1MB header) would starve the query-log writer for minutes.
-	maxTopCols = 8
 )
-
-// dedupeCols removes duplicate tokens, preserving first-seen order.
-func dedupeCols(cols []string) []string {
-	seen := make(map[string]struct{}, len(cols))
-	out := cols[:0]
-
-	for _, c := range cols {
-		if _, ok := seen[c]; !ok {
-			seen[c] = struct{}{}
-			out = append(out, c)
-		}
-	}
-
-	return out
-}
 
 func topN(req *http.Request) int {
 	n := defaultTopN
@@ -366,13 +343,7 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 	// ({"columns": {col: [...]}}). The dashboard batches its four top-N panels
 	// into one request so a single page load stays under the browser's 6
 	// connections-per-origin cap (one SSE stream already holds a slot).
-	cols := dedupeCols(strings.Split(req.URL.Query().Get("col"), ","))
-	if len(cols) > maxTopCols {
-		badRequest(rw, fmt.Errorf("too many columns (max %d)", maxTopCols))
-
-		return
-	}
-
+	cols := strings.Split(req.URL.Query().Get("col"), ",")
 	if len(cols) > 1 {
 		out := make(map[string][]querylog.TopItem, len(cols))
 

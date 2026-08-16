@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"net/url"
 	"strings"
 
@@ -44,34 +43,6 @@ func (c *QueryLog) SetDefaults() {
 	// Since the default depends on the enum values, set it dynamically
 	// to avoid having to repeat the values in the annotation.
 	c.Fields = QueryLogFieldValues()
-}
-
-// validate rejects values that would panic or hang at boot instead of failing
-// as a config error: a non-positive flushInterval makes time.NewTicker panic in
-// the writer's unrecovered periodicFlush goroutine, and creationAttempts < 1
-// makes retry-go retry forever on the synchronous startup path (attempts==0
-// means retry-until-success; negatives wrap through uint the same way).
-func (c *QueryLog) validate() error {
-	switch c.Type {
-	case QueryLogTypeConsole, QueryLogTypeNone:
-		// Writer creation can't fail and nothing uses the flush ticker.
-		return nil
-	default:
-	}
-
-	if c.CreationAttempts < 1 {
-		return fmt.Errorf("queryLog.creationAttempts (%d) must be >= 1", c.CreationAttempts)
-	}
-
-	switch c.Type {
-	case QueryLogTypeMysql, QueryLogTypePostgresql, QueryLogTypeTimescale, QueryLogTypeSqlite, QueryLogTypeDnstap:
-		if c.FlushInterval.ToDuration() <= 0 {
-			return fmt.Errorf("queryLog.flushInterval (%s) must be > 0", c.FlushInterval)
-		}
-	default:
-	}
-
-	return nil
 }
 
 // IsEnabled implements `config.Configurable`.

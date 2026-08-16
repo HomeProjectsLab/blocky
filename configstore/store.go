@@ -9,8 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,9 +28,8 @@ const (
 )
 
 // seedYAMLTemplate is the starter config written on first launch. %s is the
-// querylog.db path inside the absolute db directory (YAML-escaped by seedYAML).
-// The default group resolves recursively from the root servers; the quad9
-// upstreams are its fallback tier.
+// absolute db directory. The default group resolves recursively from the root
+// servers; the quad9 upstreams are its fallback tier.
 const seedYAMLTemplate = `ports:
   http: 4000
 upstreams:
@@ -45,24 +42,8 @@ upstreams:
       strategy: recursive
 queryLog:
   type: sqlite
-  target: %s
+  target: %s/querylog.db
 `
-
-// plainYAMLPath matches paths safe as a plain (unquoted) YAML scalar.
-var plainYAMLPath = regexp.MustCompile(`^[0-9A-Za-z._~/-]+$`)
-
-// seedYAML renders the starter config for absDir. The querylog target stays
-// plain for ordinary paths (so IsFresh keeps matching blobs seeded before this
-// existed) and is double-quoted otherwise, so a directory name containing
-// ': ', ' #', a tab or a newline can't break the seed YAML and brick Open.
-func seedYAML(absDir string) string {
-	target := absDir + "/querylog.db"
-	if !plainYAMLPath.MatchString(target) {
-		target = strconv.Quote(target) // Go escapes are a subset of YAML double-quote escapes
-	}
-
-	return fmt.Sprintf(seedYAMLTemplate, target)
-}
 
 // configBlob is the single-row table holding the raw YAML config.
 type configBlob struct {
@@ -226,7 +207,7 @@ func (s *Store) IsFresh() (bool, error) {
 		return false, err
 	}
 
-	return raw == seedYAML(s.absDir), nil
+	return raw == fmt.Sprintf(seedYAMLTemplate, s.absDir), nil
 }
 
 // buildDSN mirrors querylog's DSN: URI mode with percent-encoded path, WAL and busy_timeout.
@@ -246,7 +227,7 @@ func seedIfEmpty(db *gorm.DB, absDir string) error {
 		return nil
 	}
 
-	seed := seedYAML(absDir)
+	seed := fmt.Sprintf(seedYAMLTemplate, absDir)
 
 	if _, err := config.LoadFromYAML([]byte(seed)); err != nil {
 		return fmt.Errorf("seed config is invalid: %w", err)
@@ -455,12 +436,6 @@ func (s *Store) Status() (dirty bool, lastApplied, updatedAt time.Time, err erro
 // VACUUM INTO is WAL-safe and checkpoints on its own; the whole file is copied
 // (not RawYAML) because the overlay tables carry config LoadConfig merges in.
 func (s *Store) SnapshotTo(path string) error {
-	// s.mu serializes against RestoreDB (handle close + file rename mid-copy)
-	// and a concurrent export's TRUNCATE checkpoint rewriting the main file,
-	// either of which would tear the byte-copy below.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if err := s.conn().Exec("VACUUM INTO ?", path).Error; err == nil {
 		return nil
 	}

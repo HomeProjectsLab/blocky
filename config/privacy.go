@@ -3,8 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -149,16 +147,6 @@ type DeviceClassConfig struct {
 	PhantomDevicesPct uint `default:"20" yaml:"phantomDevicesPct"`
 }
 
-// knownVendorFamilies mirrors the decoy engine's embedded vendorTelemetry map
-// keys (decoy/engine.go). Keep in sync: a family added to the engine must be
-// added here too, or configs naming it are rejected at validation.
-//
-//nolint:gochecknoglobals
-var knownVendorFamilies = []string{
-	"ecobee", "enphase", "fronius", "goodwe", "growatt", "hue", "huawei", "nest",
-	"ring", "shelly", "sma", "solaredge", "sonos", "tesla", "tuya", "victron",
-}
-
 // personaPreset is a (peak, trough) queries/min target curve.
 type personaPreset struct{ Peak, Trough float64 }
 
@@ -263,24 +251,6 @@ func (c *DecoyConfig) validate() error {
 		return errors.New("privacy.decoy: replayWeight, corpusWeight and listWeight must not all be zero when enabled")
 	}
 
-	// Bound each weight so the sum can never reach 2^31: the engine computes
-	// int(replay+corpus+list) for rand.Intn, and an overflowed (negative) sum
-	// passes the zero guard and panics on 32-bit ARM.
-	const maxDecoyWeight = 1_000_000
-
-	for _, w := range []struct {
-		name string
-		val  uint
-	}{
-		{"replayWeight", c.ReplayWeight},
-		{"corpusWeight", c.CorpusWeight},
-		{"listWeight", c.ListWeight},
-	} {
-		if w.val > maxDecoyWeight {
-			return fmt.Errorf("privacy.decoy: %s (%d) must be in [0, %d]", w.name, w.val, maxDecoyWeight)
-		}
-	}
-
 	if c.DualStackPct > 100 {
 		return fmt.Errorf("privacy.decoy: dualStackPct (%d) must be in [0, 100]", c.DualStackPct)
 	}
@@ -345,22 +315,6 @@ func (c *DecoyConfig) validate() error {
 	if c.DeviceClass.PhantomDevicesPct > 100 {
 		return fmt.Errorf("privacy.decoy: deviceClass.phantomDevicesPct (%d) must be in [0, 100]",
 			c.DeviceClass.PhantomDevicesPct)
-	}
-
-	// The decoy engine exact-matches lowercase vendorTelemetry keys and silently
-	// drops everything else — an all-unknown list would flip 100% of beacons to
-	// phantom mode. Reject unknowns here and normalize case in place so the
-	// engine's exact match behaves case-insensitively.
-	if c.DeviceClass.Enable && c.DeviceClass.VendorTelemetry {
-		for i, f := range c.DeviceClass.VendorFamilies {
-			name := strings.ToLower(strings.TrimSpace(f))
-			if !slices.Contains(knownVendorFamilies, name) {
-				return fmt.Errorf("privacy.decoy: deviceClass.vendorFamilies entry %q is unknown; known families: %s",
-					f, strings.Join(knownVendorFamilies, ", "))
-			}
-
-			c.DeviceClass.VendorFamilies[i] = name
-		}
 	}
 
 	// The prewarm interval becomes a time.Duration in hours. Zero makes
