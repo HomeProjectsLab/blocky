@@ -167,6 +167,13 @@ func newDatabaseWriter(ctx context.Context, target gorm.Dialector, logRetentionD
 	return w, nil
 }
 
+// heavyMaintenanceCeilingBytes gates ONLY the one-time VACUUM (see the SIZE GUARD
+// in buildDeferredIndexes). A var, not a const, purely so the plan test can lower
+// it to force the over-ceiling branch and assert the etldp index still builds.
+//
+//nolint:gochecknoglobals // test seam for the size guard
+var heavyMaintenanceCeilingBytes int64 = 256 << 20 // 256 MiB
+
 // buildDeferredIndexes runs the heavy one-time sqlite maintenance (INCREMENTAL
 // auto_vacuum apply + the etldp composite index) OFF the synchronous boot/apply
 // path, so NewServer returns and the box serves DNS + reads immediately. Queries
@@ -193,45 +200,46 @@ func (d *DatabaseWriter) buildDeferredIndexes(ctx context.Context) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
-	// SIZE GUARD: a full VACUUM (whole-file rewrite) or a big CREATE INDEX on a large
-	// query log can exceed a low-RAM box's memory/IO budget and never commit before
-	// the container is OOM-killed — which rolls the work back and re-runs it from
-	// scratch on every boot (a crash loop that pins the disk at write ceiling and
-	// leaves the box unresponsive under an exclusive lock). Above a size ceiling we
-	// skip this one-time maintenance entirely: the box stays responsive, just without
-	// the incremental-vacuum reclaim and the etldp sampler index (a slower decoy
-	// sampler, not a correctness loss). Trim the log below the ceiling to re-enable.
+	// SIZE GUARD: only the one-time VACUUM (a whole-file rewrite) is the OOM risk on a
+	// low-RAM box — it can never commit before the container is OOM-killed, rolling
+	// the work back and re-running it every boot (a crash loop that pins the disk at
+	// write ceiling under an exclusive lock). The etldp CREATE INDEX is NOT gated: its
+	// sort spills to disk, so peak RAM stays bounded (288ms on the 642MB backup with a
+	// 2MB cache), and it backs the decoy emit hot path — bundling it behind the VACUUM
+	// ceiling silently full-scanned the decoy=0 partition per emit on every big box.
 	var pageCount, pageSize int64
 
-	d.db.Raw("PRAGMA page_count").Scan(&pageCount)
-	d.db.Raw("PRAGMA page_size").Scan(&pageSize)
+	pcErr := d.db.Raw("PRAGMA page_count").Scan(&pageCount).Error
+	psErr := d.db.Raw("PRAGMA page_size").Scan(&pageSize).Error
 
-	const heavyMaintenanceCeilingBytes = 256 << 20 // 256 MiB
+	dbBytes := pageCount * pageSize
 
-	if dbBytes := pageCount * pageSize; dbBytes > heavyMaintenanceCeilingBytes {
-		logger.Warnf("query log is %d MiB (over the %d MiB ceiling) — skipping deferred VACUUM + index build to avoid a low-RAM stall/crash-loop; trim the log to re-enable",
+	// Fail CLOSED: if the size probe errored (dbBytes==0), treat as over the ceiling
+	// and skip the VACUUM — failing open re-ran the OOM VACUUM this guard exists to stop.
+	overCeiling := pcErr != nil || psErr != nil || dbBytes == 0 || dbBytes > heavyMaintenanceCeilingBytes
+
+	if overCeiling {
+		logger.Warnf("query log is %d MiB (over the %d MiB ceiling, or size unreadable) — skipping the one-time VACUUM to avoid a low-RAM stall/crash-loop; the etldp index is still built",
 			dbBytes>>20, heavyMaintenanceCeilingBytes>>20)
+	} else {
+		// One-time: apply INCREMENTAL auto_vacuum (the disk guardian's incremental_vacuum
+		// needs it). VACUUM rewrites the whole file; gated so every later boot is a cheap
+		// PRAGMA read once mode==2.
+		var mode int
 
-		return
-	}
+		d.db.Raw("PRAGMA auto_vacuum").Scan(&mode)
 
-	// One-time: apply INCREMENTAL auto_vacuum (the disk guardian's incremental_vacuum
-	// needs it). VACUUM rewrites the whole file; gated so every later boot is a cheap
-	// PRAGMA read once mode==2.
-	var mode int
+		if mode != 2 {
+			d.db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
 
-	d.db.Raw("PRAGMA auto_vacuum").Scan(&mode)
-
-	if mode != 2 {
-		d.db.Exec("PRAGMA auto_vacuum = INCREMENTAL")
-
-		if err := d.db.Exec("VACUUM").Error; err != nil {
-			logger.Errorf("deferred VACUUM failed: %v", err)
+			if err := d.db.Exec("VACUUM").Error; err != nil {
+				logger.Errorf("deferred VACUUM failed: %v", err)
+			}
 		}
 	}
 
-	// The heavy composite index. IF NOT EXISTS = idempotent/resumable across restarts
-	// (no HasIndex needed; a no-op once built).
+	// The heavy composite index, always built (see SIZE GUARD). IF NOT EXISTS =
+	// idempotent/resumable across restarts (no HasIndex needed; a no-op once built).
 	const stmt = "CREATE INDEX IF NOT EXISTS idx_log_entries_etldp_ts " +
 		"ON log_entries (effective_tldp, request_ts)"
 
@@ -419,8 +427,28 @@ func (d *DatabaseWriter) CloseDB() error {
 func (d *DatabaseWriter) CleanUp() {
 	deletionDate := time.Now().AddDate(0, 0, int(-d.logRetentionDays)) //nolint:gosec // G115: correct via two's complement
 
-	log.PrefixedLog("database_writer").Debugf("deleting log entries with request_ts < %s", deletionDate)
-	d.db.Where("request_ts < ?", deletionDate).Delete(&logEntry{})
+	logger := log.PrefixedLog("database_writer")
+	logger.Debugf("deleting log entries with request_ts < %s", deletionDate)
+
+	// Batch the retention delete via pruneOldest (takes d.lock, caps the txn size,
+	// pauses between steps) instead of one unbounded DELETE: a large backlog in a
+	// single txn holds the sole sqlite writer for seconds and spikes the WAL, which
+	// is the lock-contention that starves the flush. diskGuardMaxSteps bounds the
+	// work per call; the periodic cleanup resumes any remainder next tick.
+	for step := 0; step < diskGuardMaxSteps; step++ {
+		deleted, err := d.pruneOldest(deletionDate, diskGuardBatch)
+		if err != nil {
+			logger.Errorf("retention cleanup failed: %v", err)
+
+			return
+		}
+
+		if deleted == 0 {
+			return
+		}
+
+		time.Sleep(diskGuardStepPause)
+	}
 }
 
 func (d *DatabaseWriter) doDBWrite() error {
@@ -433,6 +461,8 @@ func (d *DatabaseWriter) doDBWrite() error {
 		log.Log().Tracef("%d entries to write", len(d.pendingEntries))
 
 		const bulkSize = 100
+
+		var failed []*logEntry
 
 		for i := 0; i < len(d.pendingEntries); i += bulkSize {
 			j := min(i+bulkSize, len(d.pendingEntries))
@@ -456,16 +486,29 @@ func (d *DatabaseWriter) doDBWrite() error {
 
 				return nil
 			})
-			err = multierror.Append(err, txErr)
+			if txErr != nil {
+				err = multierror.Append(err, txErr)
+				// The whole tx (raw rows + aggregate + corpus deltas) rolled back
+				// atomically, so keep this batch to retry next flush instead of
+				// dropping it. Retrying re-applies all three without double-counting
+				// the batches that DID commit.
+				failed = append(failed, batch...)
+			}
 		}
 
-		// LRU-cap the persistent noise corpus once per flush (sqlite-only).
+		// LRU-cap the persistent noise corpus once per flush (sqlite-only). Best-effort
+		// cap, not a data path — its failure never holds entries back for retry.
 		if d.aggregate {
 			err = multierror.Append(err, pruneNoiseCorpus(d.db))
 		}
 
-		// clear the slice with pending entries
-		d.pendingEntries = nil
+		// Retain only the failed batches (silent query-log loss otherwise: the old
+		// unconditional nil dropped the entire buffer on any SQLITE_BUSY under
+		// write-lock contention).
+		// ponytail: unbounded if every flush fails; the resolver's logChan already
+		// drops intake under backpressure (query_logging_resolver.go), so the buffer
+		// is bounded in practice — add an explicit cap only if a stuck writer is seen.
+		d.pendingEntries = failed
 
 		if multiErr := err.ErrorOrNil(); multiErr != nil {
 			return fmt.Errorf("failed to write querylog entries to database: %w", multiErr)

@@ -88,6 +88,9 @@ func (s *Store) SaveGroup(name string, categories []string) error {
 		return errors.New("group name is required")
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	b, err := s.loadBlockingRows()
 	if err != nil {
 		return err
@@ -117,7 +120,7 @@ func (s *Store) SaveGroup(name string, categories []string) error {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(&BlockingGroup{Name: name, Enabled: enabled}).Error; err != nil {
 			return fmt.Errorf("can't persist group: %w", err)
 		}
@@ -143,6 +146,9 @@ func (s *Store) SetGroupMembers(group string, clients []string) error {
 	if group == "" {
 		return errors.New("group name is required")
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	b, err := s.loadBlockingRows()
 	if err != nil {
@@ -170,7 +176,7 @@ func (s *Store) SetGroupMembers(group string, clients []string) error {
 		return err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("group_name = ?", group).Delete(&BlockingGroupMember{}).Error; err != nil {
 			return fmt.Errorf("can't clear group members: %w", err)
 		}
@@ -187,6 +193,9 @@ func (s *Store) SetGroupMembers(group string, clients []string) error {
 
 // SetGroupEnabled toggles one group. Validated before persist.
 func (s *Store) SetGroupEnabled(name string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	b, err := s.loadBlockingRows()
 	if err != nil {
 		return err
@@ -203,7 +212,7 @@ func (s *Store) SetGroupEnabled(name string, enabled bool) error {
 		return err
 	}
 
-	if err := s.db.Model(&BlockingGroup{}).Where("name = ?", name).Update("enabled", enabled).Error; err != nil {
+	if err := s.conn().Model(&BlockingGroup{}).Where("name = ?", name).Update("enabled", enabled).Error; err != nil {
 		return fmt.Errorf("can't persist group: %w", err)
 	}
 
@@ -212,7 +221,7 @@ func (s *Store) SetGroupEnabled(name string, enabled bool) error {
 
 // DeleteGroup removes a group with its categories and members.
 func (s *Store) DeleteGroup(name string) error {
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("group_name = ?", name).Delete(&BlockingGroupCategory{}).Error; err != nil {
 			return fmt.Errorf("can't delete group categories: %w", err)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,31 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
+
+// clientScopedRe matches a query that filters on a specific client (client_name =
+// '<literal>' / "<literal>"), as opposed to grouping by client_name or joining on
+// it. Such a query MUST ride idx_client_name_request_ts, never idx_decoy_request_ts.
+var clientScopedRe = regexp.MustCompile(`client_name\s*=\s*['"]`)
+
+// assertClientScopedRidesRightIndex is the #10 guard the bare-scan check above
+// misses: without an INDEXED BY hint the planner picks idx_decoy_request_ts
+// (decoy=0 prefix) for a client-scoped query and scans the whole decoy=0 partition
+// filtering client_name in memory — a SEARCH on the WRONG index, which passes the
+// "SCAN without USING" gate green (this is how finding #1 regressed uncaught).
+func assertClientScopedRidesRightIndex(t *testing.T, db *gorm.DB, sql string) {
+	t.Helper()
+
+	if !clientScopedRe.MatchString(strings.ToLower(sql)) {
+		return
+	}
+
+	for _, detail := range explainPlan(t, db, sql) {
+		if strings.Contains(detail, "idx_decoy_request_ts") {
+			t.Errorf("client-scoped query rides the WRONG index idx_decoy_request_ts "+
+				"(pin idx_client_name_request_ts with INDEXED BY):\n  plan: %s\n  sql:  %s", detail, sql)
+		}
+	}
+}
 
 // captureLogger records the fully-interpolated SQL of every statement the
 // reader executes, so the plan test can re-run each one under EXPLAIN QUERY
@@ -168,6 +194,8 @@ func TestUIQueriesAreIndexBacked(t *testing.T) {
 				t.Errorf("full table scan of a large table:\n  plan: %s\n  sql:  %s", detail, sql)
 			}
 		}
+
+		assertClientScopedRidesRightIndex(t, r.db, sql)
 	}
 
 	if checked == 0 {
@@ -291,10 +319,44 @@ func TestDecoySamplersAreIndexBacked(t *testing.T) {
 				t.Errorf("decoy sampler full-scans a large table:\n  plan: %s\n  sql:  %s", detail, sql)
 			}
 		}
+
+		// Covers SampleClientOfClass (decoy_source.go): both its per-client reads
+		// must pin idx_client_name_request_ts, not ride idx_decoy_request_ts.
+		assertClientScopedRidesRightIndex(t, src.ro, sql)
 	}
 
 	if checked == 0 {
 		t.Fatal("no captured decoy statement touched a large table — seeding or capture is wrong")
+	}
+}
+
+// TestDeferredVacuumGatedButIndexAlwaysBuilt is the #9 (H1) regression guard. The
+// etldp index build used to be bundled behind the VACUUM size ceiling, so on any
+// box over 256MiB the index was never built and the decoy emit hot path silently
+// full-scanned the decoy=0 partition. Force the over-ceiling branch with a tiny
+// ceiling and assert the index is STILL built while the VACUUM is skipped. The
+// existing waitForETLDPIndex assertion only runs on a small temp DB where the guard
+// never trips, so it cannot catch this.
+func TestDeferredVacuumGatedButIndexAlwaysBuilt(t *testing.T) {
+	orig := heavyMaintenanceCeilingBytes
+	heavyMaintenanceCeilingBytes = 1 // any real DB is "over" 1 byte → over-ceiling branch
+	t.Cleanup(func() { heavyMaintenanceCeilingBytes = orig })
+
+	// Construction spawns buildDeferredIndexes, which now reads the tiny ceiling.
+	w, _ := writerReaderOnTemp(t)
+
+	// #9: the etldp index must be built even over the ceiling (fails if re-bundled).
+	waitForETLDPIndex(t, w)
+
+	// Prove the decouple: the size guard skipped the VACUUM, so auto_vacuum was never
+	// switched to INCREMENTAL(2) — it stays at the fresh-DB default NONE(0).
+	var mode int
+	if err := w.db.Raw("PRAGMA auto_vacuum").Scan(&mode).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if mode == 2 {
+		t.Fatal("VACUUM ran under the over-ceiling branch: the size guard must gate ONLY the VACUUM, not the index")
 	}
 }
 

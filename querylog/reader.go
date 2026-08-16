@@ -626,8 +626,13 @@ func (r *Reader) ClientDetail(name string, from, to time.Time) (*ClientDetail, e
 		return nil, err
 	}
 
+	// INDEXED BY: without the hint the planner picks idx_decoy_request_ts (decoy=0
+	// prefix) and scans the whole decoy=0 partition filtering client_name in memory
+	// (~30ms/query on the Pi3 even for a 5-row client vs ~0ms seeking the client's
+	// rows). No sqlite_stat1 on the box, so the hint is the fix (verified same rows).
 	err = r.db.Raw(`SELECT COALESCE(NULLIF(effective_tldp,''), question_name) AS name, COUNT(*) AS c
-		FROM log_entries WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0
+		FROM log_entries INDEXED BY idx_client_name_request_ts
+		WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0
 		GROUP BY name ORDER BY c DESC LIMIT 10`,
 		name, from, to).Scan(&d.TopDomains).Error
 	if err != nil {
@@ -722,13 +727,21 @@ func (r *Reader) DecoyBuckets(from, to time.Time, step int64) ([]Bucket, error) 
 		step = 3600
 	}
 
+	// Bucket + count in SQL, not by streaming every decoy=1 row into Go: on a
+	// bloated corpus the old path pulled the whole decoy partition (165k rows in
+	// the 322k-row backup) into memory on the 1GB box. GROUP BY the truncated unix
+	// second returns one row per (bucket, source) instead — verified identical
+	// buckets. (CAST/step matches Go's TS.Unix()/step*step: both floor to seconds.)
 	var rows []struct {
-		TS     time.Time `gorm:"column:request_ts"`
-		Source string    `gorm:"column:decoy_source"`
+		TS     int64  `gorm:"column:ts"`
+		Source string `gorm:"column:decoy_source"`
+		Count  int64  `gorm:"column:c"`
 	}
 
-	err := r.db.Raw(`SELECT request_ts, decoy_source FROM log_entries
-		WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?`, from, to).Scan(&rows).Error
+	err := r.db.Raw(`SELECT (CAST(strftime('%s', request_ts) AS INTEGER) / ?) * ? AS ts,
+		decoy_source, COUNT(*) AS c FROM log_entries
+		WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?
+		GROUP BY ts, decoy_source`, step, step, from, to).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -736,12 +749,11 @@ func (r *Reader) DecoyBuckets(from, to time.Time, step int64) ([]Bucket, error) 
 	byTS := map[int64]map[string]int64{}
 
 	for _, row := range rows {
-		ts := row.TS.Unix() / step * step
-		if byTS[ts] == nil {
-			byTS[ts] = map[string]int64{}
+		if byTS[row.TS] == nil {
+			byTS[row.TS] = map[string]int64{}
 		}
 
-		byTS[ts][row.Source]++
+		byTS[row.TS][row.Source] += row.Count
 	}
 
 	buckets := make([]Bucket, 0, len(byTS))

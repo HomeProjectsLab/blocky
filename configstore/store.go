@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
@@ -55,7 +56,10 @@ func (configBlob) TableName() string { return "config_blob" }
 
 // Store is a SQLite-backed configuration store.
 type Store struct {
-	db     *gorm.DB
+	// db is an atomic handle: RestoreDB.reopen() swaps it while config readers
+	// (blob/LoadConfig/list accessors) run lock-free — the swap must be atomic
+	// or those reads race the pointer. Access only via conn().
+	db     atomic.Pointer[gorm.DB]
 	absDir string
 
 	mu          sync.Mutex
@@ -93,12 +97,18 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{
-		db:      db,
+	s := &Store{
 		absDir:  absDir,
 		applyCh: make(chan struct{}, 1),
-	}, nil
+	}
+	s.db.Store(db)
+
+	return s, nil
 }
+
+// conn returns the current database handle. It is swapped atomically by reopen()
+// during an import, so every reader must fetch it through here.
+func (s *Store) conn() *gorm.DB { return s.db.Load() }
 
 // openGorm opens (creating if absent) config.db inside absDir and pins the pool
 // to one connection (single local file, serialized like the querylog writer).
@@ -185,7 +195,7 @@ func seedIfEmpty(db *gorm.DB, absDir string) error {
 
 func (s *Store) blob() (*configBlob, error) {
 	var b configBlob
-	if err := s.db.First(&b, 1).Error; err != nil {
+	if err := s.conn().First(&b, 1).Error; err != nil {
 		return nil, fmt.Errorf("can't read config blob: %w", err)
 	}
 
@@ -280,7 +290,7 @@ func (s *Store) setRawYAML(data string) error {
 		return err
 	}
 
-	res := s.db.Model(&configBlob{}).Where("id = 1").
+	res := s.conn().Model(&configBlob{}).Where("id = 1").
 		Updates(map[string]any{"yaml": data, "updated_at": time.Now()})
 	if res.Error != nil {
 		return fmt.Errorf("can't persist config blob: %w", res.Error)
@@ -344,14 +354,14 @@ func (s *Store) Status() (dirty bool, lastApplied, updatedAt time.Time, err erro
 // VACUUM INTO is WAL-safe and checkpoints on its own; the whole file is copied
 // (not RawYAML) because the overlay tables carry config LoadConfig merges in.
 func (s *Store) SnapshotTo(path string) error {
-	if err := s.db.Exec("VACUUM INTO ?", path).Error; err == nil {
+	if err := s.conn().Exec("VACUUM INTO ?", path).Error; err == nil {
 		return nil
 	}
 
 	// ponytail: fallback for a driver that rejects VACUUM INTO (glebarez/modernc
 	// quirk). Checkpoint the WAL into the main file, then byte-copy. Upgrade path:
 	// drop this once the driver is confirmed to support VACUUM INTO everywhere.
-	if err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
+	if err := s.conn().Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
 		return fmt.Errorf("can't checkpoint config database: %w", err)
 	}
 
@@ -359,9 +369,10 @@ func (s *Store) SnapshotTo(path string) error {
 }
 
 // RestoreDB atomically swaps the live config.db for the file at newPath, which
-// the caller MUST have validated already. It holds s.mu (blocking config reads,
-// not DNS) while it closes the handle, backs the current file up to .bak, moves
-// the new file in and reopens. Any failure rolls back from the .bak.
+// the caller MUST have validated already. It holds s.mu (serializing against the
+// section/overlay writers, not against lock-free config reads — those ride the
+// atomic conn() handle) while it closes the handle, backs the current file up to
+// .bak, moves the new file in and reopens. Any failure rolls back from the .bak.
 func (s *Store) RestoreDB(newPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -369,7 +380,7 @@ func (s *Store) RestoreDB(newPath string) error {
 	dbPath := s.DBPath()
 	bakPath := dbPath + ".bak"
 
-	sqlDB, err := s.db.DB()
+	sqlDB, err := s.conn().DB()
 	if err != nil {
 		return err
 	}
@@ -424,7 +435,7 @@ func (s *Store) reopen() error {
 		return err
 	}
 
-	s.db = db
+	s.db.Store(db)
 
 	return nil
 }
@@ -452,7 +463,7 @@ func copyFile(src, dst string) error {
 
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
-	sqlDB, err := s.db.DB()
+	sqlDB, err := s.conn().DB()
 	if err != nil {
 		return err
 	}
