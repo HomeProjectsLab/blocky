@@ -48,6 +48,8 @@ func registerStatsUIEndpoints(
 
 	router.Get("/api/ui/queries", s.queries)
 	router.Get("/api/ui/stream", s.stream)
+	router.Get("/api/ui/logs", s.logsStream)        // live application log SSE
+	router.Get("/api/ui/logs/recent", s.logsRecent) // ring snapshot, optional ?level=
 	router.Get("/api/ui/system", s.system)
 	router.Get("/api/ui/clients", s.clients)
 	router.Get("/api/ui/clients/classes", s.clientClasses)

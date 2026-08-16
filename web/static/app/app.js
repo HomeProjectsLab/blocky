@@ -39,6 +39,7 @@ const pageModules = {
     privacy: "./privacy.js",
     settings: "./settings.js",
     system: "./system.js",
+    logs: "./logs.js",
     login: "./login.js",
 };
 

@@ -241,6 +241,26 @@ tr[data-band="error"] .rt { color: var(--c-error); }
 
 .live-controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 
+/* ---------- console (live log) ---------- */
+.console-scroll { overflow: auto; max-height: calc(100vh - 260px); }
+.console {
+    margin: 0; padding: 0.5rem 0.75rem;
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+    color: var(--ink);
+}
+.log-line { display: block; white-space: pre-wrap; word-break: break-word; }
+.log-line .prefix { color: var(--c-resolved); }
+.log-line .field { color: var(--muted); }
+.log-line[data-level="error"],
+.log-line[data-level="fatal"],
+.log-line[data-level="panic"]   { color: var(--c-error); }
+.log-line[data-level="warning"] { color: var(--c-blocked); }
+.log-line[data-level="info"]    { color: var(--ink); }
+.log-line[data-level="debug"],
+.log-line[data-level="trace"]   { color: var(--muted); }
+.log-line[data-level="debug"] .prefix,
+.log-line[data-level="trace"] .prefix { color: var(--ink2); }
+
 /* ---------- decoy / chaff rows ---------- */
 /* masked look: dimmed, dashed hairlines, hatched rail so fake queries read as
    fake at a glance while keeping every real column at full precision. */

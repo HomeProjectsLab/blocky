@@ -41,6 +41,7 @@
             <a href="/privacy" {{if eq .Page "privacy"}}aria-current="page"{{end}}>Privacy</a>
             <a href="/settings" {{if eq .Page "settings"}}aria-current="page"{{end}}>Settings</a>
             <a href="/system" {{if eq .Page "system"}}aria-current="page"{{end}}>System</a>
+            <a href="/logs" {{if eq .Page "logs"}}aria-current="page"{{end}}>Console</a>
         </nav>
         <button class="logout-btn" id="theme-btn" title="Toggle dark / light theme" aria-label="Toggle theme">◐</button>
         <button class="logout-btn" id="logout-btn" title="Sign out">Sign out</button>
@@ -395,6 +396,26 @@
             <button id="sys-cache-flush">Flush DNS cache</button>
             <span id="sys-msg" class="empty"></span>
         </div>
+    </section>
+{{else if eq .Page "logs"}}
+    <div class="page-head">
+        <h1>Console</h1>
+        <div class="live-controls">
+            <select id="log-level" aria-label="Minimum level">
+                <option value="trace">trace+</option>
+                <option value="debug">debug+</option>
+                <option value="info" selected>info+</option>
+                <option value="warning">warn+</option>
+                <option value="error">error+</option>
+            </select>
+            <input type="search" id="log-filter" placeholder="filter text" autocomplete="off">
+            <button id="log-pause" aria-pressed="false">Pause</button>
+            <button id="log-clear" class="btn-sub">Clear</button>
+        </div>
+    </div>
+    <section class="panel panel-flush">
+        <div class="console-scroll"><pre class="console" id="log-console"></pre></div>
+        <p class="empty" id="log-empty">Waiting for log lines…</p>
     </section>
 {{end}}
 </main>
