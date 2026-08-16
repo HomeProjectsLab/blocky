@@ -81,7 +81,9 @@ type DatabaseWriter struct {
 	dbPath string
 	// checkpointBusy counts flush TRUNCATE checkpoints that returned BUSY or left
 	// WAL frames uncheckpointed (a reader held a mark) — the WAL-starvation signal.
-	checkpointBusy uint64
+	// atomic.Uint64 self-aligns on 32-bit ARM/386 (a plain uint64 field here is
+	// misaligned and atomic ops on it panic).
+	checkpointBusy atomic.Uint64
 }
 
 func NewDatabaseWriter(ctx context.Context, dbType config.QueryLogType, target string, logRetentionDays uint64,
@@ -627,7 +629,7 @@ func (d *DatabaseWriter) checkpointWAL() {
 	}
 
 	if res.Busy != 0 || res.Log != res.Checkpointed {
-		n := atomic.AddUint64(&d.checkpointBusy, 1)
+		n := d.checkpointBusy.Add(1)
 		log.PrefixedLog("database_writer").
 			WithField("busy", res.Busy).
 			WithField("wal_frames", res.Log).

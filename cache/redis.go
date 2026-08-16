@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/0xERR0R/blocky/log"
@@ -24,6 +25,7 @@ const (
 	defaultSendBufSize   = 1000
 	redisScanCount       = 100
 	drainTimeout         = 5 * time.Second
+	dropWarnIntervalSec  = 60
 )
 
 //nolint:gochecknoglobals
@@ -87,6 +89,8 @@ type RedisExpiringCache[T any] struct {
 	instanceID string
 	sendBuf    chan sendBufferEntry[T]
 	logger     *logrus.Entry
+
+	lastDropWarn atomic.Int64 // unix seconds of last buffer-full warning (rate limit)
 }
 
 // NewRedisExpiringByteCache creates a RedisExpiringCache for []byte values,
@@ -197,7 +201,13 @@ func (c *RedisExpiringCache[T]) enqueueSend(key string, val *T, expiration time.
 	case c.sendBuf <- entry:
 	default:
 		redisBufferDrops.Inc()
-		c.logger.Warn("redis send buffer full, dropping cache entry")
+		// hot path: when Redis is down every cacheable answer lands here — warn at
+		// most once a minute, the drops counter carries the per-entry count
+		now := time.Now().Unix()
+		if last := c.lastDropWarn.Load(); now-last >= dropWarnIntervalSec &&
+			c.lastDropWarn.CompareAndSwap(last, now) {
+			c.logger.Warn("redis send buffer full, dropping cache entries (rate-limited, see drops counter)")
+		}
 	}
 }
 

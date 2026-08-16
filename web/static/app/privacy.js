@@ -1,5 +1,6 @@
 // privacy.js — decoy / TTL-jitter / EDNS-padding config, edited via /api/ui/privacy.
 import { getJSON, send } from "./api.js";
+import { confirmDialog } from "./modal.js";
 
 const form = document.getElementById("pv-form");
 const statusEl = document.getElementById("pv-status");
@@ -131,7 +132,9 @@ function purgeControl() {
     btn.className = "btn-sub";
     btn.textContent = "Purge presence data now";
     btn.addEventListener("click", async () => {
-        if (!confirm("Delete all stored presence data? This cannot be undone.")) return;
+        // confirmDialog, not native confirm: suppressed native dialogs would
+        // silently no-op a destructive action (matches every other page).
+        if (!(await confirmDialog("Delete all stored presence data? This cannot be undone.", { title: "Purge presence data", danger: true, okText: "Purge" }))) return;
         try {
             await send("DELETE", "/api/ui/clients/profiles");
             flash("Presence data purged.");

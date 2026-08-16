@@ -140,6 +140,7 @@ func runSupervisor(store *configstore.Store) error {
 	}
 
 	lastGood := cfg
+	rolledBack := false // cfg is lastGood, not the (broken) stored config
 
 	slog := log.PrefixedLog("supervisor")
 	slog.WithField("version", util.Version).Info("supervisor starting")
@@ -164,6 +165,7 @@ func runSupervisor(store *configstore.Store) error {
 
 			slog.WithField("error", err.Error()).Warn("can't apply new config, rolling back to last applied config")
 			cfg = lastGood
+			rolledBack = true
 
 			continue
 		}
@@ -172,7 +174,14 @@ func runSupervisor(store *configstore.Store) error {
 
 		errChan := make(chan error, errChanSize)
 		srv.Start(serverCtx, errChan)
-		store.MarkApplied()
+
+		// after a rollback the STORED config is still the broken one that never
+		// built — marking it applied would report it clean and brick the next boot
+		if !rolledBack {
+			store.MarkApplied()
+		}
+
+		rolledBack = false
 		evt.Bus().Publish(evt.ApplicationStarted, util.Version, util.BuildTime)
 		slog.Info("server started, listeners bound")
 
@@ -245,7 +254,7 @@ func serve(
 
 			*lastGood = newCfg
 			store.MarkApplied()
-			slog.Info("config applied via zero-downtime hot-swap")
+			slog.Info("config applied via zero-downtime hot-swap without dropping listeners")
 		}
 	}
 }

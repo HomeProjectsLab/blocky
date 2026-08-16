@@ -181,7 +181,9 @@ function renderKPIs() {
         { k: "Devices", v: rows.length, d: "of " + CLIENTS.length + " total", dim: null },
         { k: "Recognized", v: pct(rec, rows.length) + "%", d: shr + " shared/NAT", dim: "identity", val: "recognized" },
         { k: "Queries", v: fmtNum(q), d: S.range + " window", dim: null },
-        { k: "Blocked", v: pct(b, q) + "%", d: fmtNum(b) + " queries", dim: null },
+        // blocked counts have no per-hour histogram: keep numerator and
+        // denominator on the same full-window slice or the % can pass 100.
+        { k: "Blocked", v: pct(b, sum(rows.map((c) => Number(c.queries)))) + "%", d: fmtNum(b) + " queries", dim: null },
         { k: "Active now", v: S.active.size, d: "last 5 min", dim: null, live: true },
     ];
     box.innerHTML = "";
@@ -196,6 +198,7 @@ function renderKPIs() {
 function renderDonut(mount) {
     const d = derive();
     const groups = [...d.groups.entries()].map(([k, rows]) => ({ k, q: sum(rows.map(hourQ)) })).filter((g) => g.q > 0).sort((a, b) => b.q - a.q);
+    if (!groups.length) { mount.innerHTML = '<div class="pd-empty-note">no queries recorded in this window</div>'; return; }
     const total = sum(groups.map((g) => g.q)) || 1;
     const R = 64, cx = 80, cy = 80, C = 2 * Math.PI * R; let off = 0;
     const dim = filterDim();
@@ -374,6 +377,9 @@ function buildBoard() {
 
 /* ============ master render ============ */
 function render() {
+    // a cross-filter click re-renders (destroys) the hovered node before its
+    // pointerleave fires — reset the tooltip here or it sticks at opacity 1.
+    if (tip) tip.style.opacity = 0;
     renderKPIs(); renderChips();
     CHARTS.forEach((c) => { try { c.fn(c.body); } catch (e) { c.body.innerHTML = '<div class="pd-empty-note">—</div>'; console.error(e); } });
 }
@@ -391,14 +397,21 @@ function showLocked() {
 }
 
 /* ============ data load ============ */
+// loadSeq: an explicit-range load can hit the live windowed scan path and take
+// seconds on a Pi3 — show a loading state and drop stale responses when the
+// range is flipped again mid-flight.
+let loadSeq = 0;
 async function load() {
+    const token = ++loadSeq;
     const status = document.getElementById("pd-status");
     let data;
     const params = RANGES[S.range] ? { from: new Date(Date.now() - RANGES[S.range] * 1000).toISOString(), to: new Date().toISOString() } : undefined;
+    status.hidden = false; status.textContent = "Loading " + S.range + " window…";
     try { data = await getJSON("/api/ui/personas", params); }
-    catch (err) { status.hidden = false; status.textContent = "Could not load personas: " + err.message; return; }
+    catch (err) { if (token === loadSeq) { status.hidden = false; status.textContent = "Could not load personas: " + err.message; } return; }
+    if (token !== loadSeq) return; // a newer range is already loading
 
-    if (!data.enabled) { showLocked(); return; }
+    if (!data.enabled) { status.hidden = true; showLocked(); return; }
 
     status.hidden = true;
     DATA = data;
@@ -442,12 +455,24 @@ document.getElementById("pd-purge").onclick = async () => {
 };
 
 /* ============ live SSE — active-now (KPI tile + roster dots) ============ */
-onQuery((item) => { if (DATA && DATA.enabled) S.active.set(item.client, Date.now()); });
+// Roster keys on client NAME; SSE item.client is the IP — match on clientNames
+// (falling back to the IP for unnamed clients), like live.js does.
+onQuery((item) => {
+    if (!DATA || !DATA.enabled) return;
+    const names = (item.clientNames && item.clientNames.length) ? item.clientNames : [item.client];
+    const now = Date.now();
+    for (const n of names) S.active.set(n, now);
+});
+let lastActiveKey = null;
 setInterval(() => {
     if (!DATA || !DATA.enabled) return;
     const now = Date.now();
     for (const [k, t] of S.active) if (now - t > 5 * 60 * 1000) S.active.delete(k);
-    // cheap live repaint: KPI active-now tile + roster dots, no full re-render
+    // repaint only when the active set actually changed: a 1s innerHTML rebuild
+    // of all six KPI tiles would eat clicks landing mid-rebuild and flicker hover.
+    const key = [...S.active.keys()].sort().join("\n");
+    if (key === lastActiveKey) return;
+    lastActiveKey = key;
     renderKPIs();
     document.querySelectorAll(".pd-rtable tr.rrow").forEach((tr) => {
         const dot = tr.querySelector(".pd-dot"); if (dot) dot.classList.toggle("on", S.active.has(tr.dataset.name));

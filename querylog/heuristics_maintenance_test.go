@@ -240,3 +240,71 @@ func TestHeuristicsRowCapsAreBounded(t *testing.T) {
 		t.Fatalf("domainset for one fp = %d, exceeds %d", dsBig, classIoTMaxDomains+1)
 	}
 }
+
+// TestEvictStaleHeuristics pins the growth bound: keys silent past the cutoff are
+// evicted from every auto table, while fresh keys and manual device_class
+// overrides survive.
+func TestEvictStaleHeuristics(t *testing.T) {
+	db := openHeuristicsDB(t)
+	s := &DecoySource{db: db}
+
+	now := time.Now().UTC()
+	old := now.Add(-2 * heuristicsStaleAfter)
+
+	for key, seen := range map[string]time.Time{"stale": old, "fresh": now} {
+		if err := db.Create(&deviceIdentity{FpHash: key, FirstSeen: seen, LastSeen: seen}).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		if err := db.Create(&deviceClassSignal{FpHash: key, N: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		if err := db.Create(&fpBinding{ClientName: "c-" + key, FpHash: key, FirstSeen: seen, LastSeen: seen}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// stale key carries a manual override: the class row must be preserved
+	if err := db.Create(&deviceClass{FpHash: "stale", Class: "camera", Override: "server", UpdatedAt: old}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.evictStaleHeuristics(now.Add(-heuristicsStaleAfter)); err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(q string, args ...any) (n int64) {
+		t.Helper()
+
+		if err := db.Raw(q, args...).Scan(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		return n
+	}
+
+	if n := count(`SELECT COUNT(*) FROM device_identity WHERE fp_hash = 'stale'`); n != 0 {
+		t.Fatalf("stale device_identity rows = %d, want 0", n)
+	}
+
+	if n := count(`SELECT COUNT(*) FROM device_class_signal WHERE fp_hash = 'stale'`); n != 0 {
+		t.Fatalf("stale device_class_signal rows = %d, want 0", n)
+	}
+
+	if n := count(`SELECT COUNT(*) FROM fp_binding WHERE fp_hash = 'stale'`); n != 0 {
+		t.Fatalf("stale fp_binding rows = %d, want 0", n)
+	}
+
+	if n := count(`SELECT COUNT(*) FROM device_class WHERE fp_hash = 'stale' AND override = 'server'`); n != 1 {
+		t.Fatalf("manual override rows = %d, want 1 (must survive eviction)", n)
+	}
+
+	if n := count(`SELECT COUNT(*) FROM device_identity WHERE fp_hash = 'fresh'`); n != 1 {
+		t.Fatalf("fresh device_identity rows = %d, want 1", n)
+	}
+
+	if n := count(`SELECT COUNT(*) FROM device_class_signal WHERE fp_hash = 'fresh'`); n != 1 {
+		t.Fatalf("fresh device_class_signal rows = %d, want 1", n)
+	}
+}

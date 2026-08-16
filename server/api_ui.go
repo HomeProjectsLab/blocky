@@ -42,6 +42,11 @@ type uiAPI struct {
 	swapper upstreamSwapper
 }
 
+// maxRawConfigBytes caps a raw-YAML body (putRaw/validate). Real configs are
+// KBs; loopback is auth-exempt, so an unbounded ReadAll would let one request
+// OOM the resolver on the 1GB Pi.
+const maxRawConfigBytes = 1 << 20 // 1 MiB
+
 func writeJSON(rw http.ResponseWriter, status int, body any) {
 	rw.Header().Set(contentTypeHeader, jsonContentType)
 	rw.WriteHeader(status)
@@ -85,6 +90,8 @@ func (u *uiAPI) putRaw(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	req.Body = http.MaxBytesReader(rw, req.Body, maxRawConfigBytes)
+
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -105,6 +112,8 @@ func (u *uiAPI) validate(rw http.ResponseWriter, req *http.Request) {
 	if u.storeUnavailable(rw) {
 		return
 	}
+
+	req.Body = http.MaxBytesReader(rw, req.Body, maxRawConfigBytes)
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {

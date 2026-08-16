@@ -39,6 +39,12 @@ const sessionGap = 30 * time.Minute
 // without merging the next navigation.
 const cohortWindow = 2 * time.Second
 
+// cohortMaxMembers caps how many members a sampled cohort may carry: emitCohort
+// replays every member upstream, so an uncapped recorded storm would replay as a
+// recurring decoy burst (Pi3 CPU + upstream traffic). A real page load is
+// typically well under this.
+const cohortMaxMembers = 48
+
 // revisitMinGap collapses a domain's queries that are closer than this into one
 // "visit": a page load fires many queries at the same eTLD+1 within
 // milliseconds, and those intra-load repeats are not revisits. Consecutive
@@ -81,6 +87,17 @@ const maxDecoyReaders = 8 + uiReadHeadroom
 // (busy_timeout only bounds in-DB lock waits, not Go pool-acquisition, which uses
 // context.Background() by default — no deadline). Emit samplers keep no UI deadline.
 const uiReadTimeout = 5 * time.Second
+
+// fpRefreshTimeout is the budget for the OFF-request overlay recompute
+// (dominantFPByName): the windowed GROUP BY can exceed uiReadTimeout on a large
+// log, and every caller is a background refresher (boot warm, 5-min tick, kick,
+// post-write) — never a UI request — so it gets a generous budget instead of the
+// request fail-fast one.
+const fpRefreshTimeout = 2 * time.Minute
+
+// fpKickBackoff is how long cold-read kicks stay suppressed after a failed
+// overlay recompute, so failure doesn't self-kick a doomed scan per request.
+const fpKickBackoff = time.Minute
 
 // leRowidTTL bounds how long the cached MIN/MAX log_entries rowid bounds are
 // reused before a refresh. Short, because the disk guardian prunes the oldest
@@ -155,7 +172,9 @@ type DecoySource struct {
 
 	// lastSampleWarn is the unix-nano of the last emitted sampler-error WARN,
 	// used by warnSampleErr to rate-limit (atomic; no lock-order coupling with mu).
-	lastSampleWarn int64
+	// atomic.Int64 self-aligns on 32-bit ARM/386 (a plain int64 field here is
+	// misaligned and atomic ops on it panic).
+	lastSampleWarn atomic.Int64
 
 	// fpRefreshing single-flights the off-path overlay recompute: a burst of cold
 	// reads (the tiny boot window before the startup warm lands, or after a transient
@@ -163,6 +182,10 @@ type DecoySource struct {
 	// per request that would pile the windowed GROUP BY onto the RO pool. Atomic; no
 	// lock-order coupling with mu.
 	fpRefreshing atomic.Bool
+
+	// fpRetryAt (unix-nano) backs off cold-read kicks after a failed overlay scan:
+	// without it every cold read re-kicks a doomed recompute in a tight loop.
+	fpRetryAt atomic.Int64
 }
 
 // sampleWarnEvery rate-limits the sampler-error WARN: a persistent DB fault
@@ -181,8 +204,8 @@ func (s *DecoySource) warnSampleErr(op string, err error) error {
 
 	now := time.Now().UnixNano()
 
-	last := atomic.LoadInt64(&s.lastSampleWarn)
-	if now-last >= int64(sampleWarnEvery) && atomic.CompareAndSwapInt64(&s.lastSampleWarn, last, now) {
+	last := s.lastSampleWarn.Load()
+	if now-last >= int64(sampleWarnEvery) && s.lastSampleWarn.CompareAndSwap(last, now) {
 		log.PrefixedLog("decoy_source").WithField("op", op).WithError(err).
 			Warn("decoy sampler DB error (rate-limited)")
 	}
@@ -1039,11 +1062,14 @@ func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
 
 	var rows []cohortRow
 
+	// LIMIT caps the burst: a recorded query storm would otherwise replay upstream
+	// as a recurring unbounded decoy burst (every member is re-emitted).
 	err = s.ro.Raw(`SELECT question_name, question_type, response_type, request_ts FROM log_entries
 		WHERE decoy = 0 AND question_name <> '' AND client_name = ?
 		AND request_ts BETWEEN ? AND ?
-		ORDER BY request_ts ASC`,
-		seed.ClientName, seed.RequestTS.Add(-cohortWindow), seed.RequestTS.Add(cohortWindow)).Scan(&rows).Error
+		ORDER BY request_ts ASC LIMIT ?`,
+		seed.ClientName, seed.RequestTS.Add(-cohortWindow), seed.RequestTS.Add(cohortWindow),
+		cohortMaxMembers).Scan(&rows).Error
 	if err != nil {
 		return nil, s.warnSampleErr("sampleCohort", err)
 	}
@@ -1570,6 +1596,10 @@ func (s *DecoySource) dominantFPByNameCached() map[string]string {
 // the windowed GROUP BY onto the RO pool). Self-heals a boot-warm scan error without
 // waiting for the 5-min class tick, and never blocks the caller.
 func (s *DecoySource) kickDominantFP() {
+	if time.Now().UnixNano() < s.fpRetryAt.Load() {
+		return // recent recompute failure: back off instead of re-kicking a doomed scan
+	}
+
 	if s.fpRefreshing.CompareAndSwap(false, true) {
 		go func() {
 			defer s.fpRefreshing.Store(false)
@@ -1587,8 +1617,12 @@ func (s *DecoySource) refreshDominantFP() map[string]string {
 
 	m := s.dominantFPByName(since)
 	if m == nil {
+		s.fpRetryAt.Store(time.Now().Add(fpKickBackoff).UnixNano())
+
 		return nil
 	}
+
+	s.fpRetryAt.Store(0)
 
 	s.mu.Lock()
 	s.fpByName, s.fpByNameValid = m, true
@@ -1613,14 +1647,19 @@ func (s *DecoySource) dominantFPByName(since time.Time) map[string]string {
 		Cnt  int64  `gorm:"column:cnt"`
 	}
 
-	ro, cancel := s.roUI()
+	// Background budget, NOT roUI: every caller is an off-request refresher, and
+	// the 5s request budget makes a large-log recompute permanently fail (raw
+	// hashes in the UI forever, legacy-key migration no-oping).
+	ctx, cancel := context.WithTimeout(context.Background(), fpRefreshTimeout)
 	defer cancel()
 
-	err := ro.Raw(`SELECT client_name, fp_hash, COUNT(*) AS cnt
+	err := s.ro.WithContext(ctx).Raw(`SELECT client_name, fp_hash, COUNT(*) AS cnt
 		FROM log_entries
 		WHERE decoy = 0 AND client_name <> '' AND request_ts >= ?
 		GROUP BY client_name, fp_hash`, since).Scan(&rows).Error
 	if err != nil {
+		log.PrefixedLog("decoy_source").WithError(err).Warn("client_name→device_key overlay scan failed")
+
 		return nil
 	}
 
@@ -1697,26 +1736,56 @@ func (s *DecoySource) migrateLegacyKeys(since time.Time) {
 
 		// Move the name-keyed manual rows onto the fp key without clobbering a row
 		// already stored there (INSERT OR IGNORE new key, then drop the old name row).
-		s.db.Exec(`INSERT OR IGNORE INTO client_identity (client, name, updated_at)
-			SELECT ?, name, updated_at FROM client_identity WHERE client = ?`, key, name)
-		s.db.Exec(`DELETE FROM client_identity WHERE client = ?`, name)
+		// Each copy+delete pair runs in ONE transaction with errors propagated: a
+		// SQLITE_BUSY on the copy must roll the DELETE back too, or the manual row
+		// is permanently lost. A failed pair is retried on the next refresh tick.
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(`INSERT OR IGNORE INTO client_identity (client, name, updated_at)
+				SELECT ?, name, updated_at FROM client_identity WHERE client = ?`, key, name).Error; err != nil {
+				return err
+			}
 
-		s.db.Exec(`INSERT OR IGNORE INTO client_person (client, person, updated_at)
-			SELECT ?, person, updated_at FROM client_person WHERE client = ?`, key, name)
-		s.db.Exec(`DELETE FROM client_person WHERE client = ?`, name)
+			return tx.Exec(`DELETE FROM client_identity WHERE client = ?`, name).Error
+		})
+		if err == nil {
+			err = s.db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Exec(`INSERT OR IGNORE INTO client_person (client, person, updated_at)
+					SELECT ?, person, updated_at FROM client_person WHERE client = ?`, key, name).Error; err != nil {
+					return err
+				}
 
-		// class override: the fp-keyed row already exists (RefreshClientClasses ran
-		// first with its auto class), so INSERT OR IGNORE alone can't carry the
-		// override. Adopt the legacy override onto the fp row only when that row has
-		// none of its own (never clobber a newer manual choice), then drop the stale
-		// name-keyed row so it can't shadow-revert on the next read.
-		s.db.Exec(`INSERT OR IGNORE INTO client_class (client, class, override, updated_at)
-			SELECT ?, class, override, updated_at FROM client_class WHERE client = ?`, key, name)
-		s.db.Exec(`UPDATE client_class
-			SET override = (SELECT override FROM client_class WHERE client = ?)
-			WHERE client = ? AND COALESCE(override,'') = ''
-			  AND COALESCE((SELECT override FROM client_class WHERE client = ?),'') <> ''`, name, key, name)
-		s.db.Exec(`DELETE FROM client_class WHERE client = ?`, name)
+				return tx.Exec(`DELETE FROM client_person WHERE client = ?`, name).Error
+			})
+		}
+
+		if err == nil {
+			// class override: the fp-keyed row already exists (RefreshClientClasses ran
+			// first with its auto class), so INSERT OR IGNORE alone can't carry the
+			// override. Adopt the legacy override onto the fp row only when that row has
+			// none of its own (never clobber a newer manual choice), then drop the stale
+			// name-keyed row so it can't shadow-revert on the next read.
+			err = s.db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Exec(`INSERT OR IGNORE INTO client_class (client, class, override, updated_at)
+					SELECT ?, class, override, updated_at FROM client_class WHERE client = ?`, key, name).Error; err != nil {
+					return err
+				}
+
+				if err := tx.Exec(`UPDATE client_class
+					SET override = (SELECT override FROM client_class WHERE client = ?)
+					WHERE client = ? AND COALESCE(override,'') = ''
+					  AND COALESCE((SELECT override FROM client_class WHERE client = ?),'') <> ''`,
+					name, key, name).Error; err != nil {
+					return err
+				}
+
+				return tx.Exec(`DELETE FROM client_class WHERE client = ?`, name).Error
+			})
+		}
+
+		if err != nil {
+			log.PrefixedLog("decoy_source").WithField("name", name).WithError(err).
+				Warn("legacy-key migration deferred (will retry next refresh)")
+		}
 	}
 }
 
@@ -1817,10 +1886,23 @@ func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 
 	// device_key → a representative current client_name, so the UI shows a name
 	// (not a raw fp hash). The name still round-trips: a PUT with it re-resolves to
-	// the same key. Keys with no current traffic keep the raw key.
+	// the same key. Keys with no current traffic keep the raw key. Names are
+	// sorted before first-wins: a Go map range is randomly ordered, so two names
+	// sharing a key would otherwise flap the representative (and the downstream
+	// classOf[row.Name] persona join) between passes.
+	overlay := s.dominantFPByNameCached()
+
+	names := make([]string, 0, len(overlay))
+	for name := range overlay {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
+
 	keyToName := map[string]string{}
 
-	for name, key := range s.dominantFPByNameCached() {
+	for _, name := range names {
+		key := overlay[name]
 		if _, ok := keyToName[key]; !ok {
 			keyToName[key] = name
 		}

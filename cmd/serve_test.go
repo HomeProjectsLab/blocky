@@ -208,6 +208,12 @@ var _ = Describe("Serve command", func() {
 				Consistently(errChan, "200ms").ShouldNot(Receive())
 			})
 
+			By("the never-applied stored config still reports dirty", func() {
+				dirty, _, _, err := store.Status()
+				Expect(err).Should(Succeed())
+				Expect(dirty).Should(BeTrue(), "rollback must not MarkApplied the broken stored config")
+			})
+
 			By("terminate with signal", func() {
 				signals <- syscall.SIGINT
 
