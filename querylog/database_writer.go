@@ -25,7 +25,7 @@ import (
 )
 
 type logEntry struct {
-	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2;index:idx_decoy_request_ts,priority:2"`
+	RequestTS     time.Time `gorm:"not null;index;index:idx_client_name_request_ts,priority:2;index:idx_decoy_request_ts,priority:2;index:idx_log_entries_etldp_ts,priority:2"`
 	ClientIP      string
 	ClientName    string `gorm:"index;index:idx_client_name_request_ts,priority:1"`
 	DurationMs    int64
@@ -33,7 +33,7 @@ type logEntry struct {
 	ResponseType  string `gorm:"index"`
 	QuestionType  string
 	QuestionName  string `gorm:"index"`
-	EffectiveTLDP string
+	EffectiveTLDP string `gorm:"index:idx_log_entries_etldp_ts,priority:1"`
 	Answer        string
 	ResponseCode  string
 	Hostname      string

@@ -64,17 +64,49 @@ var noiseCorpusCap int64 = 100_000
 // return "" rather than ever emitting a domain the box would itself block.
 const blockResampleTries = 8
 
+// maxDecoyReaders sizes the read-only sampling pool. It equals the decoy engine's
+// maxConcurrentEmits (decoy/engine.go) so each emit worker gets its own reader
+// with no in-process queueing; more is never used, fewer re-introduces the queue.
+// WAL gives one-writer/many-readers, so these coexist with the pinned-1 writer.
+const maxDecoyReaders = 8
+
+// leRowidTTL bounds how long the cached MIN/MAX log_entries rowid bounds are
+// reused before a refresh. Short, because the disk guardian prunes the oldest
+// rows (moving the floor up) on a few-minute cadence — a longer TTL would make
+// below-floor draws (wasted resamples) common.
+const leRowidTTL = 30 * time.Second
+
+// rowidSeekTries bounds how many random-rowid draws a sampler makes before it
+// falls back to a forward scan from the floor. A draw can land in an all-filtered
+// tail (only decoy=1 rows, or below the request_ts window) and match nothing; a
+// few fresh draws almost always hit, and the floor fallback guarantees an
+// existing row is never missed.
+const rowidSeekTries = 4
+
 // DecoySource is a read-write handle on the query-log sqlite database used by
-// the decoy engine. It co-locates two noise sources on one connection: the
-// static Tranco list (decoy_domains, seeded once) sampled by random rowid, and
-// the real-query replay pool (recent non-decoy log_entries rows).
+// the decoy engine. It co-locates two noise sources: the static Tranco list
+// (decoy_domains, seeded once) sampled by random rowid, and the real-query replay
+// pool (recent non-decoy log_entries rows).
+//
+// It holds TWO connection pools: db is pinned to a single connection and is the
+// sole WRITER (seeding, corpus upserts, class/profile/identity writes, blocklist
+// refresh); ro is a bounded mode=ro READER pool (maxDecoyReaders conns) that
+// carries every Sample*/read on the emit hot path, so sampling is not serialized
+// behind the one writer connection.
 type DecoySource struct {
-	db *gorm.DB
+	db *gorm.DB // pinned-1 writer
+	ro *gorm.DB // read-only sampling pool (mode=ro)
 
 	mu         sync.Mutex
 	rnd        *rand.Rand
 	maxRowid   int64 // cached after seeding; decoy_domains is insert-only read-only
 	blMaxRowid int64 // cached max rowid of blocklist_domains for random-rowid sampling
+
+	// cached MIN/MAX rowid of log_entries for indexed random-rowid sampling of the
+	// real-query replay pool, refreshed on leRowidTTL (all guarded by mu).
+	leMinRowid int64
+	leMaxRowid int64
+	leRowidAt  time.Time
 }
 
 // decoyDomain is the gorm model for the seeded Tranco list. rowid is SQLite's
@@ -129,11 +161,19 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	sqlDB.SetMaxOpenConns(1)
 
 	if err := db.AutoMigrate(&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{},
-		&clientIdentity{}, &clientPerson{}, &clientProfile{}); err != nil {
+		&clientIdentity{}, &clientPerson{}, &clientProfile{}, &decoyTransition{}, &decoySessionSeed{}); err != nil {
 		return nil, fmt.Errorf("can't create list tables: %w", err)
 	}
 
-	s := &DecoySource{db: db, rnd: rand.New(rand.NewSource(time.Now().UnixNano()))} //nolint:gosec // noise timing, not crypto
+	// Open the read-only sampling pool AFTER AutoMigrate: mode=ro cannot create
+	// tables, so every table a sampler reads (log_entries via the writer, plus the
+	// decoy/corpus/class/session tables above) must already exist.
+	ro, err := openReadOnlyPool(sqlitePath, maxDecoyReaders)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &DecoySource{db: db, ro: ro, rnd: rand.New(rand.NewSource(time.Now().UnixNano()))} //nolint:gosec // noise timing, not crypto
 
 	if err := s.loadMaxRowid(); err != nil {
 		return nil, err
@@ -147,12 +187,97 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 }
 
 func (s *DecoySource) Close() error {
+	if s.ro != nil {
+		if roDB, err := s.ro.DB(); err == nil {
+			_ = roDB.Close()
+		}
+	}
+
 	sqlDB, err := s.db.DB()
 	if err != nil {
 		return err
 	}
 
 	return sqlDB.Close()
+}
+
+// leRowidBounds returns the cached [min,max] rowid range of log_entries for
+// indexed random-rowid sampling, refreshing it on leRowidTTL. ok=false when the
+// table is empty (cold start). The MIN/MAX probes run on the RO pool and are
+// index-backed on the integer primary key.
+func (s *DecoySource) leRowidBounds() (minRowid, maxRowid int64, ok bool, err error) {
+	s.mu.Lock()
+	if !s.leRowidAt.IsZero() && time.Since(s.leRowidAt) < leRowidTTL {
+		minRowid, maxRowid = s.leMinRowid, s.leMaxRowid
+		s.mu.Unlock()
+
+		return minRowid, maxRowid, maxRowid > 0, nil
+	}
+	s.mu.Unlock()
+
+	// Two single-aggregate probes: sqlite optimizes MIN(rowid)/MAX(rowid) to a
+	// b-tree edge lookup each (a combined SELECT MIN,MAX can full-scan instead).
+	if err := s.ro.Raw("SELECT COALESCE(MIN(rowid),0) FROM log_entries").Scan(&minRowid).Error; err != nil {
+		return 0, 0, false, err
+	}
+
+	if err := s.ro.Raw("SELECT COALESCE(MAX(rowid),0) FROM log_entries").Scan(&maxRowid).Error; err != nil {
+		return 0, 0, false, err
+	}
+
+	s.mu.Lock()
+	s.leMinRowid, s.leMaxRowid, s.leRowidAt = minRowid, maxRowid, time.Now()
+	s.mu.Unlock()
+
+	return minRowid, maxRowid, maxRowid > 0, nil
+}
+
+// randRowid draws a uniform rowid in [minRowid,maxRowid].
+func (s *DecoySource) randRowid(minRowid, maxRowid int64) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if maxRowid <= minRowid {
+		return minRowid
+	}
+
+	return minRowid + s.rnd.Int63n(maxRowid-minRowid+1)
+}
+
+// seekRandomReal runs one gap-tolerant random-rowid sample over log_entries. seek
+// must be a `... WHERE rowid >= ? AND <preds> ORDER BY rowid LIMIT 1` statement
+// whose FIRST bind is the rowid floor; args supplies the remaining binds. It
+// draws a uniform floor and takes the first matching row at or after it (walking
+// past pruned gaps and interleaved decoy=1 rows), resampling a few times when a
+// draw lands in an all-filtered tail, then scanning once from the floor so an
+// existing row is never missed. found reports whether any row matched; dest is a
+// gorm scan target (populated only when found).
+func (s *DecoySource) seekRandomReal(seek string, args []any, dest any) (found bool, err error) {
+	minRowid, maxRowid, ok, err := s.leRowidBounds()
+	if err != nil || !ok {
+		return false, err
+	}
+
+	for range rowidSeekTries {
+		k := s.randRowid(minRowid, maxRowid)
+
+		res := s.ro.Raw(seek, append([]any{k}, args...)...).Scan(dest)
+		if res.Error != nil {
+			return false, res.Error
+		}
+
+		if res.RowsAffected > 0 {
+			return true, nil
+		}
+	}
+
+	// All draws landed in filtered tails; scan forward from the floor once.
+	res := s.ro.Raw(seek, append([]any{minRowid}, args...)...).Scan(dest)
+	if res.Error != nil {
+		return false, res.Error
+	}
+
+	return res.RowsAffected > 0, nil
 }
 
 func (s *DecoySource) loadMaxRowid() error {
@@ -260,7 +385,7 @@ func (s *DecoySource) sampleListOnce() (string, error) {
 	}
 
 	var domain string
-	err := s.db.Raw("SELECT domain FROM decoy_domains WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&domain).Error
+	err := s.ro.Raw("SELECT domain FROM decoy_domains WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&domain).Error
 
 	return domain, err
 }
@@ -297,7 +422,7 @@ func (s *DecoySource) IsBlockedDomain(domain string) (bool, error) {
 
 	var one int
 
-	err := s.db.Raw("SELECT 1 FROM blocklist_domains WHERE domain = ? LIMIT 1", domain).Scan(&one).Error
+	err := s.ro.Raw("SELECT 1 FROM blocklist_domains WHERE domain = ? LIMIT 1", domain).Scan(&one).Error
 	if err != nil {
 		return false, err
 	}
@@ -320,7 +445,7 @@ func (s *DecoySource) HourlyRealCounts() ([24]int64, error) {
 		Cnt  int64     `gorm:"column:cnt"`
 	}
 
-	if err := s.db.Raw(`SELECT hour, cnt FROM agg_hourly WHERE hour >= ?`, since.UTC()).Scan(&rows).Error; err != nil {
+	if err := s.ro.Raw(`SELECT hour, cnt FROM agg_hourly WHERE hour >= ?`, since.UTC()).Scan(&rows).Error; err != nil {
 		return counts, err
 	}
 
@@ -393,9 +518,11 @@ func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
 
 	var row fpRow
 
-	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
-		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
-		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
+	// Uniform-over-rows sampling via an indexed random-rowid seek (rowid is
+	// monotonic with request_ts), replacing an ORDER BY RANDOM() full scan.
+	_, err := s.seekRandomReal(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+		WHERE rowid >= ? AND decoy = 0 AND question_name <> '' AND request_ts >= ?
+		ORDER BY rowid LIMIT 1`, []any{since}, &row)
 	if err != nil {
 		return FpSample{}, err
 	}
@@ -418,7 +545,9 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 
 	var row fpRow
 
-	err := s.db.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+	// idx_log_entries_etldp_ts (effective_tldp, request_ts) makes this an indexed
+	// lookup + reverse-ordered LIMIT 1 instead of a full effective_tldp scan.
+	err := s.ro.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
 		WHERE decoy = 0 AND effective_tldp = ?
 		ORDER BY request_ts DESC LIMIT 1`, etldp).Scan(&row).Error
 	if err != nil {
@@ -454,9 +583,9 @@ func (s *DecoySource) SampleClient() (ClientPersona, error) {
 		ClientIP string `gorm:"column:client_ip"`
 	}
 
-	err := s.db.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
-		WHERE decoy = 0 AND client_ip <> '' AND request_ts >= ?
-		ORDER BY RANDOM() LIMIT 1`, since).Scan(&row).Error
+	_, err := s.seekRandomReal(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+		WHERE rowid >= ? AND decoy = 0 AND client_ip <> '' AND request_ts >= ?
+		ORDER BY rowid LIMIT 1`, []any{since}, &row)
 	if err != nil {
 		return ClientPersona{}, err
 	}
@@ -500,13 +629,32 @@ func parseOptCodes(s string) []uint16 {
 func (s *DecoySource) SampleRecentReal(limit int) ([]RealQuery, error) {
 	since := time.Now().Add(-decoyReplayWindow)
 
-	var out []RealQuery
-	err := s.db.Raw(`SELECT question_name, question_type FROM log_entries
-		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
+	// limit independent indexed random-rowid draws, each keeping the
+	// never-emit-blocked anti-join in its WHERE (per-row, so no resample loop is
+	// needed for blocking). Independent draws are at least as uniform as one
+	// scan+sort; a draw that finds nothing (cold start / all-filtered) is skipped.
+	out := make([]RealQuery, 0, limit)
+	seek := `SELECT question_name, question_type FROM log_entries
+		WHERE rowid >= ? AND decoy = 0 AND question_name <> '' AND request_ts >= ?
 		AND NOT EXISTS (SELECT 1 FROM blocklist_domains b WHERE b.domain = log_entries.question_name)
-		ORDER BY RANDOM() LIMIT ?`, since, limit).Scan(&out).Error
+		ORDER BY rowid LIMIT 1`
 
-	return out, err
+	for range limit {
+		var q RealQuery
+
+		found, err := s.seekRandomReal(seek, []any{since}, &q)
+		if err != nil {
+			return out, err
+		}
+
+		if !found {
+			break // cold start / nothing matches; further draws won't either
+		}
+
+		out = append(out, q)
+	}
+
+	return out, nil
 }
 
 // --- persistent visited-domains noise corpus (T3) ---------------------------
@@ -628,7 +776,7 @@ func (s *DecoySource) SampleCorpus() (string, error) {
 
 func (s *DecoySource) sampleCorpusOnce() (string, error) {
 	var max int64
-	if err := s.db.Raw("SELECT COALESCE(MAX(rowid),0) FROM noise_corpus").Scan(&max).Error; err != nil {
+	if err := s.ro.Raw("SELECT COALESCE(MAX(rowid),0) FROM noise_corpus").Scan(&max).Error; err != nil {
 		return "", err
 	}
 
@@ -665,7 +813,7 @@ func (s *DecoySource) corpusRowAt(max int64) (string, int64, error) {
 		Hits   int64  `gorm:"column:hits"`
 	}
 
-	err := s.db.Raw("SELECT domain, hits FROM noise_corpus WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&row).Error
+	err := s.ro.Raw("SELECT domain, hits FROM noise_corpus WHERE rowid >= ? ORDER BY rowid LIMIT 1", k).Scan(&row).Error
 
 	return row.Domain, row.Hits, err
 }
@@ -736,23 +884,24 @@ func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
 	var seed struct {
 		ClientName string    `gorm:"column:client_name"`
 		RequestTS  time.Time `gorm:"column:request_ts"`
-		Found      bool      `gorm:"column:found"`
 	}
 
-	err := s.db.Raw(`SELECT client_name, request_ts, 1 AS found FROM log_entries
-		WHERE decoy = 0 AND question_name <> '' AND request_ts >= ?
-		ORDER BY RANDOM() LIMIT 1`, since).Scan(&seed).Error
+	// Seed on an indexed random-rowid real row (was ORDER BY RANDOM()); the gather
+	// below still rides idx_client_name_request_ts, so the ±window burst is identical.
+	found, err := s.seekRandomReal(`SELECT client_name, request_ts FROM log_entries
+		WHERE rowid >= ? AND decoy = 0 AND question_name <> '' AND request_ts >= ?
+		ORDER BY rowid LIMIT 1`, []any{since}, &seed)
 	if err != nil {
 		return nil, err
 	}
 
-	if !seed.Found {
+	if !found {
 		return nil, nil // cold start
 	}
 
 	var rows []cohortRow
 
-	err = s.db.Raw(`SELECT question_name, question_type, response_type, request_ts FROM log_entries
+	err = s.ro.Raw(`SELECT question_name, question_type, response_type, request_ts FROM log_entries
 		WHERE decoy = 0 AND question_name <> '' AND client_name = ?
 		AND request_ts BETWEEN ? AND ?
 		ORDER BY request_ts ASC`,
@@ -780,6 +929,27 @@ func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
 	return out, nil
 }
 
+// decoyTransition is a materialized Markov transition cur→nxt (eTLD+1) with its
+// count over the recent window, rebuilt by refreshSessionModels on the class
+// refresh timer so NextInSession is a cheap keyed table read instead of a
+// per-emit windowed full scan of log_entries.
+type decoyTransition struct {
+	Cur string `gorm:"column:cur;primaryKey"`
+	Nxt string `gorm:"column:nxt;primaryKey"`
+	Cnt int64  `gorm:"column:cnt"`
+}
+
+func (decoyTransition) TableName() string { return "decoy_transitions" }
+
+// decoySessionSeed is a materialized session-starting primary (eTLD+1) with its
+// count, rebuilt alongside decoyTransition. SessionSeed reads this small table.
+type decoySessionSeed struct {
+	Cur string `gorm:"column:cur;primaryKey"`
+	Cnt int64  `gorm:"column:cnt"`
+}
+
+func (decoySessionSeed) TableName() string { return "decoy_session_seeds" }
+
 // NextInSession returns a plausible next primary (eTLD+1) to follow
 // primaryDomain, drawn from real same-session transitions observed on this box.
 //
@@ -790,32 +960,22 @@ func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
 // successor (cold start or a leaf domain) so the engine falls back to a fresh
 // source pick.
 //
-// ponytail: one windowed full scan of log_entries per call (LEAD over the
-// timeline; effective_tldp is unindexed). Fine at noise cadence over a 7-day
-// window; materialize a transitions table if it shows up hot.
+// The transition counts are precomputed into decoy_transitions by
+// refreshSessionModels (on the class-refresh timer); this read is a keyed
+// primary-key lookup + an in-Go weighted draw. Distribution is identical to the
+// former per-emit windowed scan; only freshness moves from live to minutes-stale
+// (fine for noise).
 func (s *DecoySource) NextInSession(primaryDomain string) (string, error) {
 	if primaryDomain == "" {
 		return "", nil
 	}
 
-	since := time.Now().Add(-decoyReplayWindow)
-	gapSecs := sessionGap.Seconds()
-
 	var rows []struct {
-		Domain string `gorm:"column:d"`
-		Cnt    int64  `gorm:"column:c"`
+		Domain string `gorm:"column:nxt"`
+		Cnt    int64  `gorm:"column:cnt"`
 	}
 
-	err := s.db.Raw(`SELECT nxt AS d, COUNT(*) AS c FROM (
-		SELECT effective_tldp AS cur,
-		       LEAD(effective_tldp) OVER w AS nxt,
-		       (julianday(LEAD(request_ts) OVER w) - julianday(request_ts))*86400 AS gap
-		FROM log_entries
-		WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
-		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
-	)
-	WHERE cur = ? AND nxt IS NOT NULL AND nxt <> cur AND gap >= 0 AND gap <= ?
-	GROUP BY nxt`, since, primaryDomain, gapSecs).Scan(&rows).Error
+	err := s.ro.Raw(`SELECT nxt, cnt FROM decoy_transitions WHERE cur = ?`, primaryDomain).Scan(&rows).Error
 	if err != nil {
 		return "", err
 	}
@@ -846,25 +1006,15 @@ func (s *DecoySource) NextInSession(primaryDomain string) (string, error) {
 // SessionSeed returns a plausible session-STARTING primary (eTLD+1): a domain
 // that historically begins sessions (its client's first real query, or the
 // first after a > sessionGap idle), weighted by how often it does so. "" at
-// cold start. Same windowed-scan cost profile as NextInSession.
+// cold start. Reads the precomputed decoy_session_seeds table (rebuilt by
+// refreshSessionModels), not a per-emit windowed scan.
 func (s *DecoySource) SessionSeed() (string, error) {
-	since := time.Now().Add(-decoyReplayWindow)
-	gapSecs := sessionGap.Seconds()
-
 	var rows []struct {
-		Domain string `gorm:"column:d"`
-		Cnt    int64  `gorm:"column:c"`
+		Domain string `gorm:"column:cur"`
+		Cnt    int64  `gorm:"column:cnt"`
 	}
 
-	err := s.db.Raw(`SELECT cur AS d, COUNT(*) AS c FROM (
-		SELECT effective_tldp AS cur,
-		       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
-		FROM log_entries
-		WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
-		WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
-	)
-	WHERE gap IS NULL OR gap > ?
-	GROUP BY cur`, since, gapSecs).Scan(&rows).Error
+	err := s.ro.Raw(`SELECT cur, cnt FROM decoy_session_seeds`).Scan(&rows).Error
 	if err != nil {
 		return "", err
 	}
@@ -915,7 +1065,9 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 
 	var ts []time.Time
 
-	err := s.db.Raw(`SELECT request_ts FROM log_entries
+	// idx_log_entries_etldp_ts (effective_tldp, request_ts) serves both the
+	// effective_tldp match and the request_ts range+order, so this no longer scans.
+	err := s.ro.Raw(`SELECT request_ts FROM log_entries
 		WHERE decoy = 0 AND effective_tldp = ? AND request_ts >= ?
 		ORDER BY request_ts ASC`, etldp, since).Scan(&ts).Error
 	if err != nil || len(ts) < 2 {
@@ -1131,7 +1283,61 @@ func (s *DecoySource) RefreshClientClasses() error {
 		}
 	}
 
-	return nil
+	// Same timer, same recent window: rematerialize the Markov session models so
+	// NextInSession/SessionSeed read cheap tables instead of scanning per emit.
+	return s.refreshSessionModels(since)
+}
+
+// refreshSessionModels rebuilds the decoy_transitions and decoy_session_seeds
+// tables from the same recent window RefreshClientClasses scans, lifting the
+// per-emit windowed scans out of NextInSession/SessionSeed (Cat IV). Runs on the
+// class-refresh timer (off the emit hot path), on the pinned-1 writer handle.
+//
+// ponytail: two extra windowed scans of log_entries on the refresh timer rather
+// than folding all three aggregates into one pass (they GROUP BY different keys,
+// so a single SELECT can't express them and a shared temp table isn't worth the
+// machinery). The timer is throttled and off-request; the emit path is what this
+// fix unblocks.
+func (s *DecoySource) refreshSessionModels(since time.Time) error {
+	gapSecs := sessionGap.Seconds()
+
+	// Transitions: cur→nxt same-session hop counts (mirrors the former
+	// NextInSession subquery, minus the per-call cur=? filter).
+	if err := s.db.Exec(`DELETE FROM decoy_transitions`).Error; err != nil {
+		return err
+	}
+
+	err := s.db.Exec(`INSERT INTO decoy_transitions (cur, nxt, cnt)
+		SELECT cur, nxt, COUNT(*) AS cnt FROM (
+			SELECT effective_tldp AS cur,
+			       LEAD(effective_tldp) OVER w AS nxt,
+			       (julianday(LEAD(request_ts) OVER w) - julianday(request_ts))*86400 AS gap
+			FROM log_entries
+			WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
+			WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+		)
+		WHERE nxt IS NOT NULL AND nxt <> cur AND gap >= 0 AND gap <= ?
+		GROUP BY cur, nxt`, since, gapSecs).Error
+	if err != nil {
+		return err
+	}
+
+	// Session seeds: first-of-session primary counts (mirrors the former
+	// SessionSeed subquery).
+	if err := s.db.Exec(`DELETE FROM decoy_session_seeds`).Error; err != nil {
+		return err
+	}
+
+	return s.db.Exec(`INSERT INTO decoy_session_seeds (cur, cnt)
+		SELECT cur, COUNT(*) AS cnt FROM (
+			SELECT effective_tldp AS cur,
+			       (julianday(request_ts) - julianday(LAG(request_ts) OVER w))*86400 AS gap
+			FROM log_entries
+			WHERE decoy = 0 AND effective_tldp <> '' AND request_ts >= ?
+			WINDOW w AS (PARTITION BY client_name ORDER BY request_ts)
+		)
+		WHERE gap IS NULL OR gap > ?
+		GROUP BY cur`, since, gapSecs).Error
 }
 
 // ClientClass returns the cached effective class for client (override if set,
@@ -1140,7 +1346,7 @@ func (s *DecoySource) RefreshClientClasses() error {
 func (s *DecoySource) ClientClass(client string) (string, error) {
 	var row clientClass
 
-	err := s.db.Raw("SELECT class, override FROM client_class WHERE client = ? LIMIT 1", client).Scan(&row).Error
+	err := s.ro.Raw("SELECT class, override FROM client_class WHERE client = ? LIMIT 1", client).Scan(&row).Error
 	if err != nil {
 		return ClassUnknown, err
 	}
@@ -1160,7 +1366,7 @@ func (s *DecoySource) ClientClass(client string) (string, error) {
 // resolved effective), for the management UI.
 func (s *DecoySource) ListClientClasses() ([]ClientClassInfo, error) {
 	var rows []clientClass
-	if err := s.db.Raw("SELECT client, class, override, updated_at FROM client_class ORDER BY client").Scan(&rows).Error; err != nil {
+	if err := s.ro.Raw("SELECT client, class, override, updated_at FROM client_class ORDER BY client").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -1215,7 +1421,8 @@ func (s *DecoySource) SetClientClassOverride(client, class string) error {
 func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 	var name string
 
-	err := s.db.Raw(`SELECT client FROM client_class
+	// ~110-row client_class table: ORDER BY RANDOM() is negligible, left as-is.
+	err := s.ro.Raw(`SELECT client FROM client_class
 		WHERE CASE WHEN override <> '' THEN override ELSE class END = ?
 		ORDER BY RANDOM() LIMIT 1`, class).Scan(&name).Error
 	if err != nil {
@@ -1228,15 +1435,35 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 
 	since := time.Now().Add(-decoyReplayWindow)
 
+	// A random real row FOR THIS ONE CLIENT: a rowid seek would jump across
+	// clients, so instead count this client's matching rows and take a random
+	// offset — both ride idx_client_name_request_ts (client_name prefix), no scan.
+	var cnt int64
+
+	err = s.ro.Raw(`SELECT COUNT(*) FROM log_entries
+		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?`,
+		name, since).Scan(&cnt).Error
+	if err != nil {
+		return ClientPersona{}, err
+	}
+
+	if cnt == 0 {
+		return ClientPersona{}, nil
+	}
+
+	s.mu.Lock()
+	off := s.rnd.Int63n(cnt)
+	s.mu.Unlock()
+
 	var row struct {
 		fpRow
 
 		ClientIP string `gorm:"column:client_ip"`
 	}
 
-	err = s.db.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+	err = s.ro.Raw(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
 		WHERE decoy = 0 AND client_name = ? AND client_ip <> '' AND request_ts >= ?
-		ORDER BY RANDOM() LIMIT 1`, name, since).Scan(&row).Error
+		ORDER BY request_ts LIMIT 1 OFFSET ?`, name, since, off).Scan(&row).Error
 	if err != nil {
 		return ClientPersona{}, err
 	}
@@ -1395,7 +1622,7 @@ func (s *DecoySource) RefreshClientProfiles() error {
 // ClientProfileInfo when the client has no profile row yet.
 func (s *DecoySource) ClientProfile(client string) (ClientProfileInfo, error) {
 	var row clientProfile
-	if err := s.db.Raw(
+	if err := s.ro.Raw(
 		"SELECT client, hour_hist_utc, first_seen, last_seen, updated_at FROM client_profile WHERE client = ? LIMIT 1",
 		client).Scan(&row).Error; err != nil {
 		return ClientProfileInfo{}, err
@@ -1440,7 +1667,7 @@ func sanitizeDisplayName(s string) string {
 func (s *DecoySource) ClientName(client string) (string, error) {
 	var name string
 
-	err := s.db.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", client).Scan(&name).Error
+	err := s.ro.Raw("SELECT name FROM client_identity WHERE client = ? LIMIT 1", client).Scan(&name).Error
 
 	return name, err
 }
@@ -1449,7 +1676,7 @@ func (s *DecoySource) ClientName(client string) (string, error) {
 // the clients list can layer names in one query instead of one lookup per row.
 func (s *DecoySource) ClientNames() (map[string]string, error) {
 	var rows []clientIdentity
-	if err := s.db.Raw("SELECT client, name FROM client_identity WHERE name <> ''").Scan(&rows).Error; err != nil {
+	if err := s.ro.Raw("SELECT client, name FROM client_identity WHERE name <> ''").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -1485,7 +1712,7 @@ func (s *DecoySource) SetClientName(client, name string) error {
 func (s *DecoySource) ClientPerson(client string) (string, error) {
 	var person string
 
-	err := s.db.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", client).Scan(&person).Error
+	err := s.ro.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", client).Scan(&person).Error
 
 	return person, err
 }
@@ -1495,7 +1722,7 @@ func (s *DecoySource) ClientPerson(client string) (string, error) {
 // ClientNames.
 func (s *DecoySource) ClientPersons() (map[string]string, error) {
 	var rows []clientPerson
-	if err := s.db.Raw("SELECT client, person FROM client_person WHERE person <> ''").Scan(&rows).Error; err != nil {
+	if err := s.ro.Raw("SELECT client, person FROM client_person WHERE person <> ''").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
