@@ -107,6 +107,20 @@ var _ = Describe("BlockingResolver shadow-blocked queries", func() {
 		Consistently(func() int { return len(receivedNames()) }, "300ms", "50ms").Should(Equal(1))
 	})
 
+	It("drops the shadow (never queues) when too many are already in flight", func() {
+		newSUT(true)
+
+		// Fill the semaphore so the next shadow has no slot.
+		for range cap(sut.shadowSem) {
+			sut.shadowSem <- struct{}{}
+		}
+
+		Expect(sut.Resolve(ctx, newRequestWithClient("domain1.com.", A, "192.168.0.1", "client1"))).
+			Should(HaveResponseType(ResponseTypeBLOCKED))
+
+		Consistently(receivedNames, "300ms", "50ms").Should(BeEmpty())
+	})
+
 	It("does not shadow the same name twice within the suppress window", func() {
 		newSUT(true)
 

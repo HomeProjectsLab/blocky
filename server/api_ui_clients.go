@@ -169,7 +169,20 @@ func perDeviceGateWindow(req *http.Request) (from, to time.Time) {
 func (s *statsAPI) allowPerDevice(rw http.ResponseWriter, req *http.Request, client string) bool {
 	reader, err := s.getReader()
 	if err != nil || reader == nil {
-		return true
+		// Only the explicit "not sqlite" sentinel skips the gate (no query log =
+		// no shared-client concept). Any other open error (boot window, transient
+		// SSD) must fail CLOSED, not bypass the shared/NAT enforcement.
+		if errors.Is(err, errNotSqlite) {
+			return true
+		}
+
+		if err == nil {
+			err = errors.New("query log reader unavailable")
+		}
+
+		internalError(rw, err)
+
+		return false
 	}
 
 	from, to := perDeviceGateWindow(req)

@@ -155,6 +155,7 @@ h2 {
 .panel-flush { padding: 0; overflow: hidden; }
 .panel.off { opacity: 0.55; filter: grayscale(0.5); }
 .panel-flush .empty { padding: 1rem; }
+.panel-flush > h2 { padding: 1rem 1rem 0; }
 .empty { color: var(--muted); margin: 0.5rem 0; }
 
 /* ---------- buttons + inputs ---------- */
@@ -690,7 +691,8 @@ select.cc-override { font-size: 12px; padding: 0.15rem 0.3rem; }
 /* tooltip */
 .pd-tip { position: fixed; z-index: 400; background: var(--ink); color: var(--bg0);
     padding: 0.3rem 0.5rem; border-radius: 6px; font-size: 12px; font-weight: 550;
-    pointer-events: none; opacity: 0; transition: opacity 0.12s; white-space: nowrap;
+    pointer-events: none; opacity: 0; transition: opacity 0.12s;
+    overflow-wrap: break-word; /* wrap long group keys/domains instead of painting past the bubble */
     max-width: 240px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); }
 .pd-tip b { color: var(--bg1); }
 

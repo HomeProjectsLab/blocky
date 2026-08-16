@@ -655,6 +655,13 @@ bootstrapDns:
 				Expect(*l).Should(HaveLen(2))
 				Expect(*l).Should(ContainElements(":55", ":56"))
 			})
+
+			It("should drop empty entries so a trailing comma doesn't bind an ephemeral port", func() {
+				l := &ListenConfig{}
+				err := l.UnmarshalText([]byte("53,"))
+				Expect(err).Should(Succeed())
+				Expect(*l).Should(Equal(ListenConfig{":53"}))
+			})
 		})
 	})
 
@@ -1683,6 +1690,15 @@ var _ = Describe("IPVersion", func() {
 
 var _ = Describe("BytesSource", func() {
 	suiteBeforeEach()
+
+	Describe("UnmarshalText", func() {
+		It("treats an http-prefixed path without scheme separator as a file", func() {
+			Expect(newBytesSource("httpdocs/ads.txt")).
+				Should(Equal(BytesSource{Type: BytesSourceTypeFile, From: "httpdocs/ads.txt"}))
+			Expect(newBytesSource("https://example.com/list.txt")).
+				Should(Equal(BytesSource{Type: BytesSourceTypeHttp, From: "https://example.com/list.txt"}))
+		})
+	})
 
 	Describe("String", func() {
 		It("should return URL for HTTP source", func() {

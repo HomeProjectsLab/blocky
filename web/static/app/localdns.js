@@ -110,7 +110,7 @@ function collect() {
         rows.push({
             name: f.name.value.trim(),
             type: f.type.value,
-            ttl: parseInt(f.ttl.value.trim() || "3600", 10),
+            ttl: parseInt(f.ttl.value.trim() || "0", 10), // cleared field = 0, same as checkRow
             value: f.value.value.trim(),
         });
     }

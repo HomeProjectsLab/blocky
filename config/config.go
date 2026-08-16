@@ -192,9 +192,15 @@ type ListenConfig []string
 
 // UnmarshalText implements `encoding.TextUnmarshaler`.
 func (l *ListenConfig) UnmarshalText(data []byte) error {
-	addresses := string(data)
+	// Drop empty entries: a trailing comma ("53,") would otherwise yield "",
+	// prefixed to ":", which binds an OS-chosen ephemeral port.
+	*l = (*l)[:0]
 
-	*l = strings.Split(addresses, ",")
+	for _, addr := range strings.Split(string(data), ",") {
+		if addr = strings.TrimSpace(addr); addr != "" {
+			*l = append(*l, addr)
+		}
+	}
 
 	l.prefixPorts()
 

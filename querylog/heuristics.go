@@ -620,27 +620,45 @@ func applyClassSignal(tx *gorm.DB, cls map[string]*clsAccum) error {
 
 	// prior cursor state (empty for brand-new keys)
 	type cursor struct {
-		FpHash  string
-		LastTs  *time.Time
-		Domains int64
+		FpHash string
+		LastTs *time.Time
 	}
 
 	var prev []cursor
 	if err := tx.Raw(
-		"SELECT fp_hash, last_ts, domains FROM device_class_signal WHERE fp_hash IN ?", keys,
+		"SELECT fp_hash, last_ts FROM device_class_signal WHERE fp_hash IN ?", keys,
 	).Scan(&prev).Error; err != nil {
 		return err
 	}
 
 	priorTs := map[string]time.Time{}
-	priorDomains := map[string]int64{}
 
 	for _, p := range prev {
 		if p.LastTs != nil {
 			priorTs[p.FpHash] = *p.LastTs
 		}
+	}
 
-		priorDomains[p.FpHash] = p.Domains
+	// Stored domainset membership for this batch's keys (≤ classIoTMaxDomains+1
+	// rows per key, so tiny): the cap quota below must be spent ONLY on genuinely
+	// novel eTLD+1s — an already-member domain burning a slot would starve a novel
+	// one later in the batch and freeze the count below the true distinct set.
+	var storedDS []deviceClassDomainset
+	if err := tx.Raw(
+		"SELECT fp_hash, etldp FROM device_class_domainset WHERE fp_hash IN ?", keys,
+	).Scan(&storedDS).Error; err != nil {
+		return err
+	}
+
+	dsMember := map[string]map[string]bool{}
+	for _, r := range storedDS {
+		m := dsMember[r.FpHash]
+		if m == nil {
+			m = map[string]bool{}
+			dsMember[r.FpHash] = m
+		}
+
+		m[r.Etldp] = true
 	}
 
 	var dsRows []*deviceClassDomainset
@@ -671,18 +689,23 @@ func applyClassSignal(tx *gorm.DB, cls map[string]*clsAccum) error {
 			hasPrev = true
 		}
 
-		// capped distinct-eTLD+1 domainset: queue up to (cap − stored) first-seen
-		// candidates so the table can never exceed classIoTMaxDomains+1 rows/fp
-		// (once >8, the IoT-domain test is decided forever). Duplicates are absorbed
-		// by the DoNothing insert; the domains COLUMN is recounted from the table
-		// below (never stored+inserted, which would double-count repeat eTLDs).
-		allowed := int64(classIoTMaxDomains+1) - priorDomains[key]
-		for i, etldp := range a.etldps {
-			if int64(i) >= allowed {
+		// capped distinct-eTLD+1 domainset: spend the remaining quota — computed
+		// from the TRUE stored set size, not the possibly-stale domains column —
+		// only on eTLD+1s not already members, first-seen order, so the table can
+		// never exceed classIoTMaxDomains+1 rows/fp (once >8, the IoT-domain test
+		// is decided forever). The domains COLUMN is recounted from the table below.
+		allowed := int64(classIoTMaxDomains+1) - int64(len(dsMember[key]))
+		for _, etldp := range a.etldps {
+			if allowed <= 0 {
 				break
 			}
 
+			if dsMember[key][etldp] {
+				continue // already a member: novelty only, don't burn a slot
+			}
+
 			dsRows = append(dsRows, &deviceClassDomainset{FpHash: key, Etldp: etldp})
+			allowed--
 		}
 
 		// Gap cursor = the batch's TRUE last request ts over ALL rows, decoupled
@@ -828,14 +851,13 @@ func (s *DecoySource) classScorerLoop() {
 // legacy-key migration + session-model rematerialization), not just the scorer:
 // refreshSessionModels/migrateLegacyKeys used to run only from the UI-triggered
 // RefreshClientClasses, so a headless box served stale/empty session models
-// forever. Also re-warms the client_name→device_key overlay (single-flighted)
-// so /clients, /people and /clients/classes keep serving it off the request path.
+// forever. RefreshClientClasses also re-warms the client_name→device_key overlay
+// inline (one shared GROUP BY per tick — no separate kick, which would run the
+// identical scan a second time).
 func (s *DecoySource) classScorerPass() {
 	if err := s.RefreshClientClasses(); err != nil {
 		log.PrefixedLog("heuristics").WithError(err).Warn("class scorer pass failed")
 	}
-
-	s.kickDominantFP()
 }
 
 // scoreDeviceClasses classifies every device from the durable accumulator and
@@ -848,7 +870,10 @@ func (s *DecoySource) scoreDeviceClasses() error {
 	s.classMu.Lock()
 	defer s.classMu.Unlock()
 
-	now := time.Now()
+	// UTC throughout: last_ts / last_seen / updated_at are stored as UTC TEXT and
+	// compared lexically by glebarez — a local-zone bind shifts every comparison
+	// and updated_at write by the UTC offset.
+	now := time.Now().UTC()
 
 	if err := s.evictStaleHeuristics(now.Add(-heuristicsStaleAfter)); err != nil {
 		log.PrefixedLog("heuristics").WithError(err).Warn("stale-key eviction failed")

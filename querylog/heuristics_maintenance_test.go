@@ -350,3 +350,41 @@ func TestEvictStaleHeuristics(t *testing.T) {
 		t.Fatalf("fresh binding rows = %d, want 1", n)
 	}
 }
+
+// TestDomainsetNoveltyQuota pins the cap-quota fix: eTLD+1s that are ALREADY
+// domainset members must not burn slots of the per-batch quota — otherwise a
+// batch leading with repeat domains starves the genuinely novel ones behind
+// them and the distinct count freezes below the true set (mis-gating the IoT
+// test). Batch 2 leads with 2 repeats then adds exactly enough novel eTLD+1s
+// to reach the cap; the stored count must reach the cap.
+func TestDomainsetNoveltyQuota(t *testing.T) {
+	db := openHeuristicsDB(t)
+	base := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+
+	mk := func(off int, etld string) *logEntry {
+		return &logEntry{
+			RequestTS: base.Add(time.Duration(off) * time.Second), ClientName: "d", FpHash: "nov",
+			QuestionName: etld, QuestionType: "A", EffectiveTLDP: etld,
+		}
+	}
+
+	// Batch 1: two distinct eTLD+1s become members.
+	if err := upsertHeuristics(db, []*logEntry{mk(0, "a0.example"), mk(60, "a1.example")}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Batch 2: the SAME two first, then (cap−2) novel ones.
+	batch := []*logEntry{mk(120, "a0.example"), mk(180, "a1.example")}
+	for i := range classIoTMaxDomains + 1 - 2 {
+		batch = append(batch, mk(240+60*i, "b"+strconv.Itoa(i)+".example"))
+	}
+
+	if err := upsertHeuristics(db, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	s := sigOf(t, db, "nov")
+	if want := int64(classIoTMaxDomains + 1); s.Domains != want {
+		t.Fatalf("domains = %d, want %d (repeat eTLD+1s burned the novelty quota)", s.Domains, want)
+	}
+}

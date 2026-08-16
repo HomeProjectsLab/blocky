@@ -98,6 +98,15 @@ func (d *Dashboard) RunOn(screen tcell.Screen) error {
 
 	d.draw(screen)
 
+	// Coalesce poke-driven redraws to ~10 fps: sustained QPS otherwise turns
+	// every SSE event into a full-screen Clear()+repaint, pinning a Pi3 core.
+	const minRedraw = 100 * time.Millisecond
+
+	frame := time.NewTicker(minRedraw)
+	defer frame.Stop()
+
+	dirty := false
+
 	for {
 		select {
 		case ev := <-events:
@@ -118,9 +127,18 @@ func (d *Dashboard) RunOn(screen tcell.Screen) error {
 				screen.Sync()
 			}
 
+			// user input: draw immediately for responsiveness
 			d.draw(screen)
+
+			dirty = false
 		case <-d.redrawCh:
-			d.draw(screen)
+			dirty = true
+		case <-frame.C:
+			if dirty {
+				d.draw(screen)
+
+				dirty = false
+			}
 		}
 	}
 }
@@ -243,15 +261,20 @@ func (d *Dashboard) streamLoop() {
 		_ = d.api.Stream(func(q QueryItem) {
 			d.mu.Lock()
 			d.streamCount++
+			paused := d.paused
 
-			if !d.paused {
+			if !paused {
 				d.rows = append(d.rows, q)
 				if len(d.rows) > d.maxRows {
 					d.rows = d.rows[len(d.rows)-d.maxRows:]
 				}
 			}
 			d.mu.Unlock()
-			d.poke()
+
+			// while paused the visible rows don't change; skip the redraw poke
+			if !paused {
+				d.poke()
+			}
 		})
 
 		time.Sleep(time.Second) // backoff before reconnect

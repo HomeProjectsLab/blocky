@@ -253,6 +253,7 @@ function entryList(kind, items) {
             try { await put(e.enabled, cmt.trim()); } catch (err) { flash(err.message, true); }
         });
         rm.addEventListener("click", async () => {
+            if (!(await confirmDialog(`Remove ${kind} entry "${e.domain}"?`, { danger: true }))) return;
             try {
                 const r = await send("DELETE", `/api/ui/blocking/${kind}/${e.id}`);
                 if (r.needsApply) showApply(true);

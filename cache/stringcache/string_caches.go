@@ -238,9 +238,14 @@ func (r *wildcardCacheFactory) addEntry(entry string) bool {
 		return true // invalid but handled
 	}
 
-	entry = normalizeWildcard(entry)
+	normalized := normalizeWildcard(entry)
+	if normalized == "" {
+		log.Log().Warnf("unsupported wildcard '%s': no domain remains after normalization", entry)
 
-	r.trie.Insert(entry)
+		return true // invalid but handled
+	}
+
+	r.trie.Insert(normalized)
 
 	r.cnt++
 

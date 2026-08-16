@@ -51,6 +51,11 @@ const cohortMaxMembers = 48
 // visits are what feed RevisitInterval's cadence median.
 const revisitMinGap = 5 * time.Minute
 
+// revisitSampleCap bounds how many request_ts rows RevisitInterval loads per
+// emission: the median over the most recent N visits is cadence-accurate, and a
+// heavy hitter (tens of thousands of in-window rows) must not allocate them all.
+const revisitSampleCap = 512
+
 // decoyReplayWindow bounds the replay pool to recent real queries: sampling
 // from a rolling window keeps replays plausible (an observer subtracting an
 // old, no-longer-visited domain would stand out) and keeps ORDER BY RANDOM()
@@ -267,6 +272,27 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 
 	sqlDB.SetMaxOpenConns(1)
 
+	// Close both handles on ANY construction error below: a config-apply retry
+	// loop against a busy DB must not strand 1 writer + maxDecoyReaders RO FDs
+	// per failed attempt. No goroutine is started until construction succeeds.
+	var ro *gorm.DB
+
+	constructed := false
+
+	defer func() {
+		if constructed {
+			return
+		}
+
+		_ = sqlDB.Close()
+
+		if ro != nil {
+			if roDB, roErr := ro.DB(); roErr == nil {
+				_ = roDB.Close()
+			}
+		}
+	}()
+
 	migrate := []any{&decoyDomain{}, &blocklistDomain{}, &listMeta{}, &noiseCorpus{}, &clientClass{},
 		&clientIdentity{}, &clientPerson{}, &clientProfile{}, &decoyTransition{}, &decoySessionSeed{}}
 	migrate = append(migrate, heuristicsTables...) // durable heuristics (also migrated by the writer)
@@ -277,7 +303,7 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	// Open the read-only sampling pool AFTER AutoMigrate: mode=ro cannot create
 	// tables, so every table a sampler reads (log_entries via the writer, plus the
 	// decoy/corpus/class/session tables above) must already exist.
-	ro, err := openReadOnlyPool(sqlitePath, maxDecoyReaders)
+	ro, err = openReadOnlyPool(sqlitePath, maxDecoyReaders)
 	if err != nil {
 		return nil, err
 	}
@@ -301,16 +327,18 @@ func NewDecoySource(sqlitePath string) (*DecoySource, error) {
 	go s.blCatsWarmLoop()
 	s.signalBlWarm()
 
-	// Warm the client_name→device_key overlay off the request path so the first
-	// /clients, /people or /clients/classes visit after boot serves from cache and
-	// never runs the windowed log_entries GROUP BY inline. Re-warmed on the class
-	// tick and after a name/person write. Via kickDominantFP: EVERY refresh rides
-	// the single-flight CAS + failure backoff, never a bare goroutine.
+	// Warm the client_name→device_key overlay off the boot path via a DEDICATED,
+	// single-flighted kick so the first /clients, /people or /clients/classes visit
+	// after boot resolves names (not raw fp keys) immediately. The class scorer's
+	// boot pass also refreshes it, but only AFTER the heavier scoreDeviceClasses
+	// step — too late for that first request, so the kick lands the overlay first.
 	s.kickDominantFP()
 
 	// Class scorer: advance durable device classes from the accumulator on a timer,
 	// independent of any UI visit (heuristics.go).
 	go s.classScorerLoop()
+
+	constructed = true
 
 	return s, nil
 }
@@ -346,26 +374,38 @@ func (s *DecoySource) Close() error {
 	return sqlDB.Close()
 }
 
-// leRowidBounds returns the cached [min,max] rowid range of log_entries for
-// indexed random-rowid sampling, refreshing it on leRowidTTL. ok=false when the
-// table is empty (cold start). The MIN/MAX probes run on the RO pool and are
-// index-backed on the integer primary key.
+// leRowidBounds returns the cached [min,max] rowid range of the REPLAY-WINDOW
+// slice of log_entries for indexed random-rowid sampling, refreshing it on
+// leRowidTTL. ok=false when the window is empty (cold start / stale log). The
+// range MUST match the samplers' `request_ts >= since` filter: an unwindowed
+// floor made every pre-window draw PK-scan weeks of old rows up to the window
+// boundary AND collapse the distribution onto the first in-window row.
 func (s *DecoySource) leRowidBounds() (minRowid, maxRowid int64, ok bool, err error) {
 	s.mu.Lock()
 	if !s.leRowidAt.IsZero() && time.Since(s.leRowidAt) < leRowidTTL {
 		minRowid, maxRowid = s.leMinRowid, s.leMaxRowid
 		s.mu.Unlock()
 
-		return minRowid, maxRowid, maxRowid > 0, nil
+		return minRowid, maxRowid, minRowid > 0, nil
 	}
 	s.mu.Unlock()
 
-	// Two single-aggregate probes: sqlite optimizes MIN(rowid)/MAX(rowid) to a
-	// b-tree edge lookup each (a combined SELECT MIN,MAX can full-scan instead).
-	if err := s.ro.Raw("SELECT COALESCE(MIN(rowid),0) FROM log_entries").Scan(&minRowid).Error; err != nil {
-		return 0, 0, false, err
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts stored UTC, compared lexically
+
+	// First in-window rowid: rowid is monotonic with request_ts, so one
+	// idx_log_entries_request_ts seek yields the window floor. 0 rows = empty window.
+	res := s.ro.Raw(`SELECT rowid FROM log_entries WHERE request_ts >= ?
+		ORDER BY request_ts ASC LIMIT 1`, since).Scan(&minRowid)
+	if res.Error != nil {
+		return 0, 0, false, res.Error
 	}
 
+	if res.RowsAffected == 0 {
+		minRowid = 0
+	}
+
+	// MAX(rowid) is a PK b-tree edge lookup; the newest row is in-window whenever
+	// the window is non-empty (same monotonicity).
 	if err := s.ro.Raw("SELECT COALESCE(MAX(rowid),0) FROM log_entries").Scan(&maxRowid).Error; err != nil {
 		return 0, 0, false, err
 	}
@@ -374,7 +414,7 @@ func (s *DecoySource) leRowidBounds() (minRowid, maxRowid int64, ok bool, err er
 	s.leMinRowid, s.leMaxRowid, s.leRowidAt = minRowid, maxRowid, time.Now()
 	s.mu.Unlock()
 
-	return minRowid, maxRowid, maxRowid > 0, nil
+	return minRowid, maxRowid, minRowid > 0, nil
 }
 
 // randRowid draws a uniform rowid in [minRowid,maxRowid].
@@ -695,9 +735,9 @@ func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
 // for name's eTLD+1, so a given decoy domain presents a STABLE, plausible OPT
 // shape across re-emissions — a domain whose OPT shape flickers between
 // appearances is itself a tell. Falls back to SampleRealFingerprint (a random
-// recent real fp) when this box has never resolved that eTLD+1, e.g. a Tranco or
-// corpus domain that was never a real query here. No time window: a stable shape
-// for a domain visited months ago still beats an unrelated random one.
+// recent real fp) when this box has never resolved that eTLD+1 recently, e.g. a
+// Tranco or corpus domain that was never a real query here. Replay-window
+// bounded so the reverse index walk stays capped (see below).
 func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 	etldp := effectiveTLDP(name)
 	if etldp == "" {
@@ -706,11 +746,16 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 
 	var row fpRow
 
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts stored UTC, compared lexically
+
 	// idx_log_entries_etldp_ts (effective_tldp, request_ts) makes this an indexed
-	// lookup + reverse-ordered LIMIT 1 instead of a full effective_tldp scan.
+	// lookup + reverse-ordered LIMIT 1 instead of a full effective_tldp scan. The
+	// replay-window lower bound caps the reverse walk: a name whose recent rows are
+	// all decoys must not walk months of index entries hunting a real one — the
+	// empty result falls back to SampleRealFingerprint below.
 	err := s.ro.Raw(`SELECT question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
-		WHERE decoy = 0 AND effective_tldp = ?
-		ORDER BY request_ts DESC LIMIT 1`, etldp).Scan(&row).Error
+		WHERE decoy = 0 AND effective_tldp = ? AND request_ts >= ?
+		ORDER BY request_ts DESC LIMIT 1`, etldp, since).Scan(&row).Error
 	if err != nil {
 		return FpSample{}, s.warnSampleErr("sampleFingerprintForName", err)
 	}
@@ -1242,9 +1287,13 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 
 	// idx_log_entries_etldp_ts (effective_tldp, request_ts) serves both the
 	// effective_tldp match and the request_ts range+order, so this no longer scans.
-	err := s.ro.Raw(`SELECT request_ts FROM log_entries
-		WHERE decoy = 0 AND effective_tldp = ? AND request_ts >= ?
-		ORDER BY request_ts ASC`, etldp, since).Scan(&ts).Error
+	// The inner DESC LIMIT caps the load at the most recent revisitSampleCap rows
+	// (re-ordered ASC for the delta walk) so a heavy hitter stays bounded.
+	err := s.ro.Raw(`SELECT request_ts FROM (
+			SELECT request_ts FROM log_entries
+			WHERE decoy = 0 AND effective_tldp = ? AND request_ts >= ?
+			ORDER BY request_ts DESC LIMIT ?
+		) ORDER BY request_ts ASC`, etldp, since, revisitSampleCap).Scan(&ts).Error
 	if err != nil || len(ts) < 2 {
 		return 0, false
 	}
@@ -1564,8 +1613,10 @@ func (s *DecoySource) RefreshClientClasses() error {
 	// itself under the new key, but the manual `override` column does not — nor do
 	// the identity/person tables — so they must be migrated explicitly (best-effort,
 	// idempotent, off the request path — see migrateLegacyKeys). Runs on this
-	// throttled timer, never at boot.
-	s.migrateLegacyKeys(since)
+	// throttled timer, never at boot. refreshDominantFP publishes the overlay cache
+	// AND returns the same map, so the windowed 7-day GROUP BY runs ONCE per tick
+	// (it used to run twice: once for the overlay warm, once for the migration).
+	s.migrateLegacyKeys(s.refreshDominantFP())
 
 	// Same timer, same recent window: rematerialize the Markov session models so
 	// NextInSession/SessionSeed read cheap tables instead of scanning per emit.
@@ -1736,10 +1787,10 @@ func (s *DecoySource) deviceKey(name string) string {
 // Pi3-safe: bounded to the ~fleet-size set of names with a fp, plain indexed
 // upsert/delete on the writer handle, on the throttled refresh timer — NEVER a
 // blocking boot op. Idempotent: once a row is fp-keyed its key is no longer a
-// name in nameToKey, so it is skipped.
-func (s *DecoySource) migrateLegacyKeys(since time.Time) {
-	nameToKey := s.dominantFPByName(since)
-
+// name in nameToKey, so it is skipped. nameToKey is the caller-supplied
+// dominantFPByName result (shared with the overlay refresh so the windowed
+// GROUP BY runs once per tick); nil (scan failed) is a no-op — retried next tick.
+func (s *DecoySource) migrateLegacyKeys(nameToKey map[string]string) {
 	for name, key := range nameToKey {
 		if key == name { // fp-less name: nothing stable to re-key onto
 			continue

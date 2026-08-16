@@ -15,6 +15,12 @@ var _ = Describe("ParseIPFromArpaAddr", func() {
 			Expect(ip).Should(Equal(net.ParseIP("1.2.3.4")))
 		})
 
+		It("parses a 0x20-randomized mixed-case name", func() {
+			ip, err := ParseIPFromArpaAddr("4.3.2.1.In-AdDr.ARPA.")
+			Expect(err).Should(Succeed())
+			Expect(ip).Should(Equal(net.ParseIP("1.2.3.4")))
+		})
+
 		It("requires the arpa domain", func() {
 			_, err := ParseIPFromArpaAddr("4.3.2.1.in-addr.arpa.fail.")
 			Expect(err).Should(HaveOccurred())
@@ -54,6 +60,12 @@ var _ = Describe("ParseIPFromArpaAddr", func() {
 	Describe("IPv6", func() {
 		It("parses an IP correctly", func() {
 			ip, err := ParseIPFromArpaAddr("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.0.0.0.0.0.f.7.2.0.0.2.ip6.arpa.")
+			Expect(err).Should(Succeed())
+			Expect(ip).Should(Equal(net.ParseIP("2002:7f00:1::1")))
+		})
+
+		It("parses a 0x20-randomized mixed-case name", func() {
+			ip, err := ParseIPFromArpaAddr("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.0.0.0.0.0.F.7.2.0.0.2.Ip6.ArPa.")
 			Expect(err).Should(Succeed())
 			Expect(ip).Should(Equal(net.ParseIP("2002:7f00:1::1")))
 		})

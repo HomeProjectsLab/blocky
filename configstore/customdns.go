@@ -61,7 +61,12 @@ func (s *Store) SetLocalDNSZone(zoneText string) error {
 	}
 
 	zone := &yaml3.Node{}
-	if err := zone.Encode(zoneText); err != nil {
+	if zoneText != "" && strings.TrimSpace(zoneText) == "" {
+		// A whitespace-only zone can't survive YAML block-scalar chomping
+		// (all-newline content collapses on read); store it as an escaped
+		// double-quoted scalar so it round-trips verbatim.
+		zone.Kind, zone.Tag, zone.Value, zone.Style = yaml3.ScalarNode, "!!str", zoneText, yaml3.DoubleQuotedStyle
+	} else if err := zone.Encode(zoneText); err != nil {
 		return fmt.Errorf("can't marshal merged config: %w", err)
 	}
 
