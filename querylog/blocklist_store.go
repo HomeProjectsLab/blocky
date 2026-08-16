@@ -205,7 +205,12 @@ func (s *DecoySource) BlocklistCount(category string) (int64, error) {
 // materializing the whole (up to millions of rows) list. Stops and returns
 // fn's error if it returns one. This is the ad-blocker's blocking-source read.
 func (s *DecoySource) ForEachBlocklistDomain(category string, fn func(domain string) error) error {
-	rows, err := s.db.Raw("SELECT domain FROM blocklist_domains WHERE category = ?", category).Rows()
+	// Read from the RO pool, NOT the pinned-1 writer: boot streams every
+	// blocklist:<category> in parallel (one call per group×source), and on the
+	// writer those all serialize on the single connection and monopolize it during
+	// the boot IO storm. The RO pool (maxDecoyReaders) lets them stream in parallel
+	// and off the writer entirely. WAL gives readers the last committed rows.
+	rows, err := s.ro.Raw("SELECT domain FROM blocklist_domains WHERE category = ?", category).Rows()
 	if err != nil {
 		return err
 	}

@@ -40,6 +40,11 @@ const (
 	// must advance without a UI visit, so this is a real ticker, not a
 	// request-triggered throttle (mirrors the former clientClassRefreshInterval).
 	classScorerInterval = 5 * time.Minute
+	// classScorerBootDelay defers the scorer's first (heavy) pass off the boot
+	// critical path: at boot the writer connection and the SD card are saturated by
+	// the synchronous blocklist streaming, and running scoreDeviceClasses there
+	// piles onto the storm. A short delay lets boot IO settle; classStop cancels it.
+	classScorerBootDelay = 30 * time.Second
 	// heuristicsStaleAfter bounds the heuristics tables: keys silent this long are
 	// evicted. Without it the purge-immune tables grow forever — fp-less clients
 	// key on churning IPv6 privacy addresses, one dead key set per rotation. Real
@@ -829,9 +834,18 @@ func categoryFor(qn string) string {
 func (s *DecoySource) classScorerLoop() {
 	defer close(s.classDone)
 
-	// Boot pass: a headless box (no UI visit ever) still needs session models,
-	// legacy-key migration and classes without waiting a full tick. Runs in this
-	// goroutine — off the boot critical path.
+	// Boot pass, DEFERRED: a headless box (no UI visit ever) still needs session
+	// models, legacy-key migration and classes without waiting a full tick — but
+	// running it AT boot has it competing with the synchronous blocklist streaming
+	// for the writer connection during the SD-card IO storm. Wait out a short
+	// settle window first; classStop still cancels (Close/tests halt the scorer
+	// before it ever runs, so this never blocks shutdown).
+	select {
+	case <-s.classStop:
+		return
+	case <-time.After(classScorerBootDelay):
+	}
+
 	s.classScorerPass()
 
 	ticker := time.NewTicker(classScorerInterval)

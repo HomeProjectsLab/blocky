@@ -92,6 +92,11 @@ func TestSessionSecretFailsClosed(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
+	// Open now warms the cache, so a closed store would otherwise serve the cached
+	// secret lock-free (the intended resilience). Clear it to exercise the path
+	// this test guards: a cache-miss that hits the DB and gets a read error.
+	store.sessionSecret.Store(nil)
+
 	secret, err := store.SessionSecret()
 	if err == nil {
 		t.Fatal("SessionSecret on a closed store should error")

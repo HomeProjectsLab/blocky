@@ -27,6 +27,14 @@ const (
 	dbFileName    = "config.db"
 	busyTimeoutMs = 5000
 	dirPermission = 0o750
+
+	// configDBMaxConns is the config.db pool size. NOT pinned-1: every management
+	// read (auth, LoadConfig, GetPrivacy, Status) must stay responsive even while
+	// the querylog decoy storm saturates the SD card — with one connection a single
+	// slow read serializes all of them, and the operator can't even reach the UI to
+	// toggle decoy off. WAL gives many-readers/one-writer; all writers are already
+	// serialized app-side by s.mu, so extra connections never contend as writers.
+	configDBMaxConns = 4
 )
 
 // seedYAMLTemplate is the starter config written on first launch. %s is the
@@ -140,6 +148,14 @@ func Open(dir string) (*Store, error) {
 
 	s.db.Store(db)
 
+	// Cold-boot warm: populate the session-secret atomic cache NOW, while config.db
+	// is uncontended (decoy hasn't started), so the very first authenticated request
+	// after boot serves from the lock-free cache and never takes s.mu across a
+	// config.db read — closing the one-shot cold-boot auth stall window.
+	if _, err := s.SessionSecret(); err != nil {
+		return nil, fmt.Errorf("can't warm session secret: %w", err)
+	}
+
 	log.PrefixedLog("configstore").WithField("path", s.DBPath()).Info("config store opened (schema migrated, seed ensured)")
 
 	return s, nil
@@ -149,8 +165,9 @@ func Open(dir string) (*Store, error) {
 // during an import, so every reader must fetch it through here.
 func (s *Store) conn() *gorm.DB { return s.db.Load() }
 
-// openGorm opens (creating if absent) config.db inside absDir and pins the pool
-// to one connection (single local file, serialized like the querylog writer).
+// openGorm opens (creating if absent) config.db inside absDir with a small read
+// pool (configDBMaxConns) so management reads never serialize on one connection
+// behind a slow read while querylog saturates the SD card.
 func openGorm(absDir string) (*gorm.DB, error) {
 	db, err := gorm.Open(sqlite.Open(buildDSN(filepath.Join(absDir, dbFileName))), &gorm.Config{
 		Logger: logger.New(
@@ -171,7 +188,7 @@ func openGorm(absDir string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("can't access config database connection pool: %w", err)
 	}
 
-	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxOpenConns(configDBMaxConns)
 
 	return db, nil
 }

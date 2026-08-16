@@ -93,6 +93,15 @@ const maxDecoyReaders = 8 + uiReadHeadroom
 // context.Background() by default — no deadline). Emit samplers keep no UI deadline.
 const uiReadTimeout = 5 * time.Second
 
+// emitReadTimeout bounds the decoy emit hot-path RO reads (the random-rowid
+// samplers). Without a deadline a saturated RO pool makes each emit's read hang
+// on pool acquisition (context.Background() = no deadline), piling up sem-held
+// emit workers that each keep an in-flight read — the boot IO storm turned into a
+// self-sustaining stall. A blown deadline surfaces as an error the sampler skips
+// on (fall back to Poisson / no emit), so decoy fails-open under load instead of
+// monopolizing connections. Generous vs a healthy indexed read (sub-second on Pi3).
+const emitReadTimeout = 3 * time.Second
+
 // fpRefreshTimeout is the budget for the OFF-request overlay recompute
 // (dominantFPByName): the windowed GROUP BY can exceed uiReadTimeout on a large
 // log, and every caller is a background refresher (boot warm, 5-min tick, kick,
@@ -392,9 +401,13 @@ func (s *DecoySource) leRowidBounds() (minRowid, maxRowid int64, ok bool, err er
 
 	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts stored UTC, compared lexically
 
+	// Emit-path read: bound it so a saturated pool fails fast (see roEmit).
+	db, cancel := s.roEmit()
+	defer cancel()
+
 	// First in-window rowid: rowid is monotonic with request_ts, so one
 	// idx_log_entries_request_ts seek yields the window floor. 0 rows = empty window.
-	res := s.ro.Raw(`SELECT rowid FROM log_entries WHERE request_ts >= ?
+	res := db.Raw(`SELECT rowid FROM log_entries WHERE request_ts >= ?
 		ORDER BY request_ts ASC LIMIT 1`, since).Scan(&minRowid)
 	if res.Error != nil {
 		return 0, 0, false, res.Error
@@ -406,7 +419,7 @@ func (s *DecoySource) leRowidBounds() (minRowid, maxRowid int64, ok bool, err er
 
 	// MAX(rowid) is a PK b-tree edge lookup; the newest row is in-window whenever
 	// the window is non-empty (same monotonicity).
-	if err := s.ro.Raw("SELECT COALESCE(MAX(rowid),0) FROM log_entries").Scan(&maxRowid).Error; err != nil {
+	if err := db.Raw("SELECT COALESCE(MAX(rowid),0) FROM log_entries").Scan(&maxRowid).Error; err != nil {
 		return 0, 0, false, err
 	}
 
@@ -443,10 +456,15 @@ func (s *DecoySource) seekRandomReal(seek string, args []any, dest any) (found b
 		return false, err
 	}
 
+	// Bound the whole sample to emitReadTimeout so a saturated pool fails fast
+	// instead of hanging on connection acquisition (see roEmit).
+	db, cancel := s.roEmit()
+	defer cancel()
+
 	for range rowidSeekTries {
 		k := s.randRowid(minRowid, maxRowid)
 
-		res := s.ro.Raw(seek, append([]any{k}, args...)...).Scan(dest)
+		res := db.Raw(seek, append([]any{k}, args...)...).Scan(dest)
 		if res.Error != nil {
 			return false, s.warnSampleErr("seekRandomReal", res.Error)
 		}
@@ -457,7 +475,7 @@ func (s *DecoySource) seekRandomReal(seek string, args []any, dest any) (found b
 	}
 
 	// All draws landed in filtered tails; scan forward from the floor once.
-	res := s.ro.Raw(seek, append([]any{minRowid}, args...)...).Scan(dest)
+	res := db.Raw(seek, append([]any{minRowid}, args...)...).Scan(dest)
 	if res.Error != nil {
 		return false, s.warnSampleErr("seekRandomReal", res.Error)
 	}
@@ -1289,7 +1307,12 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 	// effective_tldp match and the request_ts range+order, so this no longer scans.
 	// The inner DESC LIMIT caps the load at the most recent revisitSampleCap rows
 	// (re-ordered ASC for the delta walk) so a heavy hitter stays bounded.
-	err := s.ro.Raw(`SELECT request_ts FROM (
+	// Emit-path read: bound it so a saturated pool fails fast (see roEmit); on a
+	// blown deadline the engine falls back to flat Poisson cadence.
+	db, cancel := s.roEmit()
+	defer cancel()
+
+	err := db.Raw(`SELECT request_ts FROM (
 			SELECT request_ts FROM log_entries
 			WHERE decoy = 0 AND effective_tldp = ? AND request_ts >= ?
 			ORDER BY request_ts DESC LIMIT ?
@@ -1629,6 +1652,20 @@ func (s *DecoySource) RefreshClientClasses() error {
 // samplers do NOT use this — they keep context.Background() on their dedicated conns.
 func (s *DecoySource) roUI() (*gorm.DB, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), uiReadTimeout)
+
+	return s.ro.WithContext(ctx), cancel
+}
+
+// roEmit is roUI's emit-path twin: the RO handle bound to emitReadTimeout so an
+// emit sampler fails fast (and the emit skips) instead of hanging on a saturated
+// pool. The caller MUST defer the returned cancel.
+//
+// ponytail: applied to the highest-frequency emit reads (the random-rowid seek
+// funnel + RevisitInterval) — the ones that run on essentially every emit. The
+// lower-frequency samplers (cohort/list/corpus/session) still ride
+// context.Background(); wrap them the same way if they ever show up as the pileup.
+func (s *DecoySource) roEmit() (*gorm.DB, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), emitReadTimeout)
 
 	return s.ro.WithContext(ctx), cancel
 }
