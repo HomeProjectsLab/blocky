@@ -187,10 +187,16 @@ func (r httpMsgWriter) WriteMsg(msg *dns.Msg) error {
 }
 
 func getSmallestTTLFromAnswer(msg *dns.Msg) uint32 {
-	var ttl uint32 = 0
+	// plain minimum: TTL 0 is a real, uncacheable value, not "unset" — the old
+	// sentinel let a co-occurring larger TTL win and shared DoH caches over-cache.
+	var ttl uint32
+
+	found := false
+
 	for _, a := range msg.Answer {
-		if a.Header().Ttl < ttl || ttl == 0 {
+		if !found || a.Header().Ttl < ttl {
 			ttl = a.Header().Ttl
+			found = true
 		}
 	}
 

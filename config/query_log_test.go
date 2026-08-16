@@ -114,6 +114,18 @@ var _ = Describe("QueryLogConfig", func() {
 			Expect(cfg.censoredTarget()).ShouldNot(ContainSubstring("secretpw"))
 			Expect(cfg.censoredTarget()).Should(ContainSubstring(secretObfuscator))
 		})
+
+		It("censors a percent-encoded password", func() {
+			cfg := QueryLog{Type: QueryLogTypePostgresql, Target: "postgresql://u:p%40ssw0rd@host/db"}
+			censored := cfg.censoredTarget()
+			Expect(censored).ShouldNot(ContainSubstring("ssw0rd"))
+			Expect(censored).Should(ContainSubstring(secretObfuscator))
+		})
+
+		It("handles an empty password without garbling the DSN", func() {
+			cfg := QueryLog{Type: QueryLogTypePostgresql, Target: "postgresql://u:@host/db"}
+			Expect(cfg.censoredTarget()).Should(ContainSubstring("host/db"))
+		})
 	})
 
 	Describe("QueryLogType enum", func() {

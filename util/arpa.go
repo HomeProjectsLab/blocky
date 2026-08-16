@@ -73,12 +73,12 @@ func parseIPv6FromArpaAddr(arpa string) (net.IP, error) {
 
 	// Parse and add each byte, in reverse, to the buffer
 	for i := len(parts) - 1; i >= 0; i -= 2 {
-		msNibble, err := strconv.ParseUint(parts[i], base16, byteBits)
+		msNibble, err := strconv.ParseUint(parts[i], base16, nibbleBits)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse IPv6 nibble '%s' in arpa address '%s': %w", parts[i], arpa, err)
 		}
 
-		lsNibble, err := strconv.ParseUint(parts[i-1], base16, byteBits)
+		lsNibble, err := strconv.ParseUint(parts[i-1], base16, nibbleBits)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse IPv6 nibble '%s' in arpa address '%s': %w", parts[i-1], arpa, err)
 		}

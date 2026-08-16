@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -11,6 +12,14 @@ import (
 	"github.com/0xERR0R/blocky/querylog"
 
 	"github.com/go-chi/chi/v5"
+)
+
+// maxPasteBytes / maxPasteTokens bound a pasted allow/deny list: every token is
+// one fsynced SQLite commit on the USB SSD, so an uncapped 50k-domain paste
+// writes for minutes (and an unbounded body OOMs the 1GB Pi).
+const (
+	maxPasteBytes  = 256 << 10 // 256 KiB body
+	maxPasteTokens = 1000      // domains per request
 )
 
 // blocklistStatser supplies per-category domain counts from the query-log
@@ -179,7 +188,7 @@ func (b *blockingAPI) putCategory(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := b.store.SetCategoryEnabled(chi.URLParam(req, "name"), body.Enable); err != nil {
+	if err := b.store.SetCategoryEnabled(pathParam(req, "name"), body.Enable); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -204,7 +213,7 @@ func (b *blockingAPI) putSegment(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := b.store.SetClientSegment(chi.URLParam(req, "client"), body.Categories); err != nil {
+	if err := b.store.SetClientSegment(pathParam(req, "client"), body.Categories); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -219,6 +228,10 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 			return
 		}
 
+		// bound the paste: an unbounded body OOMs the 1GB Pi, and each token
+		// below is one fsynced SQLite commit on the USB SSD.
+		req.Body = http.MaxBytesReader(rw, req.Body, maxPasteBytes)
+
 		var body struct {
 			Group   string `json:"group"`
 			Domain  string `json:"domain"`
@@ -226,6 +239,14 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				writeJSON(rw, http.StatusRequestEntityTooLarge,
+					map[string]string{"error": fmt.Sprintf("paste too large (max %d bytes)", maxPasteBytes)})
+
+				return
+			}
+
 			badRequest(rw, err)
 
 			return
@@ -239,12 +260,24 @@ func (b *blockingAPI) addEntry(isAllow bool) http.HandlerFunc {
 		// Accept a whole pasted list, not just one domain: split on any
 		// whitespace or comma and strip a trailing URL path, then add each. So
 		// the box takes "a.com" or "a.com b.com, c.com/x" equally.
+		toks := strings.FieldsFunc(body.Domain, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ','
+		})
+
+		if len(toks) > maxPasteTokens {
+			writeJSON(rw, http.StatusRequestEntityTooLarge,
+				map[string]string{"error": fmt.Sprintf("too many domains in one paste: %d (max %d)", len(toks), maxPasteTokens)})
+
+			return
+		}
+
 		ids := make([]uint, 0)
 		skipped := make([]string, 0)
 
-		for _, tok := range strings.FieldsFunc(body.Domain, func(r rune) bool {
-			return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ','
-		}) {
+		// ponytail: one commit per token (configstore has no exported bulk/Tx
+		// API to call from here). Bounded by maxPasteTokens; batch into a single
+		// transaction in configstore if bigger pastes ever matter.
+		for _, tok := range toks {
 			if i := strings.IndexByte(tok, '/'); i >= 0 {
 				tok = tok[:i] // a domain, not a URL
 			}
@@ -459,7 +492,7 @@ func (b *blockingAPI) putGroup(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := b.store.SaveGroup(chi.URLParam(req, "name"), body.Categories); err != nil {
+	if err := b.store.SaveGroup(pathParam(req, "name"), body.Categories); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -483,7 +516,7 @@ func (b *blockingAPI) putGroupMembers(rw http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	if err := b.store.SetGroupMembers(chi.URLParam(req, "name"), body.Members); err != nil {
+	if err := b.store.SetGroupMembers(pathParam(req, "name"), body.Members); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -507,7 +540,7 @@ func (b *blockingAPI) putGroupEnabled(rw http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	if err := b.store.SetGroupEnabled(chi.URLParam(req, "name"), body.Enable); err != nil {
+	if err := b.store.SetGroupEnabled(pathParam(req, "name"), body.Enable); err != nil {
 		badRequest(rw, err)
 
 		return
@@ -521,7 +554,7 @@ func (b *blockingAPI) deleteGroup(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := b.store.DeleteGroup(chi.URLParam(req, "name")); err != nil {
+	if err := b.store.DeleteGroup(pathParam(req, "name")); err != nil {
 		internalError(rw, err)
 
 		return

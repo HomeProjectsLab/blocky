@@ -318,14 +318,30 @@ func (s *DecoySource) seekRandomReal(seek string, args []any, dest any) (found b
 }
 
 func (s *DecoySource) loadMaxRowid() error {
-	return s.db.Raw("SELECT COALESCE(MAX(rowid),0) FROM decoy_domains").Scan(&s.maxRowid).Error
+	// Scan into a local, assign under s.mu (mirrors loadBlMaxRowid): the emit
+	// workers read maxRowid under the lock, and an unlocked int64 store tears on
+	// 32-bit ARM.
+	var max int64
+	if err := s.db.Raw("SELECT COALESCE(MAX(rowid),0) FROM decoy_domains").Scan(&max).Error; err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.maxRowid = max
+	s.mu.Unlock()
+
+	return nil
 }
 
 // SeedIfEmpty streams normalized domains (one per line, already decompressed)
 // into decoy_domains, but only when the table is empty. Blank lines are
 // skipped. Returns the number of rows inserted (0 when already seeded).
 func (s *DecoySource) SeedIfEmpty(r io.Reader) (int, error) {
-	if s.maxRowid > 0 {
+	s.mu.Lock()
+	seeded := s.maxRowid > 0
+	s.mu.Unlock()
+
+	if seeded {
 		return 0, nil
 	}
 
@@ -475,7 +491,7 @@ func (s *DecoySource) IsBlockedDomain(domain string) (bool, error) {
 func (s *DecoySource) HourlyRealCounts() ([24]int64, error) {
 	var counts [24]int64
 
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	var rows []struct {
 		Hour time.Time `gorm:"column:hour"`
@@ -551,7 +567,7 @@ func (r fpRow) toFpSample() FpSample {
 // Use this for list/corpus domains that have no real history of their own; use
 // SampleFingerprintForName when replaying a name the box has actually resolved.
 func (s *DecoySource) SampleRealFingerprint() (FpSample, error) {
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	var row fpRow
 
@@ -604,30 +620,33 @@ func (s *DecoySource) SampleFingerprintForName(name string) (FpSample, error) {
 // clients and each client's wire profile stays consistent under noise. A real
 // stub's OPT shape is stable across its queries, so one sampled row is enough.
 type ClientPersona struct {
-	IP string
-	Fp FpSample
+	IP   string
+	Name string // client_name of the sampled row — the key client_class is stored under
+	Fp   FpSample
 }
 
 // SampleClient returns a random recent real client (its IP + the fingerprint of
 // one of its rows). Empty IP at cold start (no real rows yet). One indexed random
 // row read — same cost profile as SampleRealFingerprint.
 func (s *DecoySource) SampleClient() (ClientPersona, error) {
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	var row struct {
 		fpRow
 
-		ClientIP string `gorm:"column:client_ip"`
+		ClientIP   string `gorm:"column:client_ip"`
+		ClientName string `gorm:"column:client_name"`
 	}
 
-	_, err := s.seekRandomReal(`SELECT client_ip, question_type, edns_udp_size, edns_opt_codes, fp_detail FROM log_entries
+	_, err := s.seekRandomReal(`SELECT client_ip, client_name, question_type, edns_udp_size, edns_opt_codes, fp_detail
+		FROM log_entries
 		WHERE rowid >= ? AND decoy = 0 AND client_ip <> '' AND request_ts >= ?
 		ORDER BY rowid LIMIT 1`, []any{since}, &row)
 	if err != nil {
 		return ClientPersona{}, err
 	}
 
-	return ClientPersona{IP: row.ClientIP, Fp: row.toFpSample()}, nil
+	return ClientPersona{IP: row.ClientIP, Name: row.ClientName, Fp: row.toFpSample()}, nil
 }
 
 // effectiveTLDP returns name's registrable domain (eTLD+1), or "" if it has none.
@@ -664,7 +683,7 @@ func parseOptCodes(s string) []uint16 {
 // (set-based NOT EXISTS against blocklist_domains, so no resample loop is needed).
 // Empty slice at cold start (no history yet).
 func (s *DecoySource) SampleRecentReal(limit int) ([]RealQuery, error) {
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	// limit independent indexed random-rowid draws, each keeping the
 	// never-emit-blocked anti-join in its WHERE (per-row, so no resample loop is
@@ -865,7 +884,7 @@ func (s *DecoySource) AddToCorpus(domain string) error {
 		return nil
 	}
 
-	now := time.Now()
+	now := time.Now().UTC() // UTC: last_seen is MAX()'d lexically against the writer's UTC RequestTS
 
 	return s.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "domain"}},
@@ -916,7 +935,7 @@ type cohortRow struct {
 // one cohort; harmless for noise. Materialize a cohort table if this ever gets
 // heavy or the merge matters.
 func (s *DecoySource) SampleCohort() ([]CohortMember, error) {
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	var seed struct {
 		ClientName string    `gorm:"column:client_name"`
@@ -1098,7 +1117,7 @@ func (s *DecoySource) RevisitInterval(domain string) (time.Duration, bool) {
 		return 0, false
 	}
 
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	var ts []time.Time
 
@@ -1275,7 +1294,7 @@ func serverHitExpr() string {
 // timeline; effective_tldp/question_name unindexed). Fine at refresh cadence over
 // the 7-day window; materialize incrementally only if refresh latency shows up.
 func (s *DecoySource) RefreshClientClasses() error {
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	query := `WITH gaps AS (
 		SELECT client_name AS c,
@@ -1470,7 +1489,7 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 		return ClientPersona{}, nil
 	}
 
-	since := time.Now().Add(-decoyReplayWindow)
+	since := time.Now().Add(-decoyReplayWindow).UTC() // UTC bind: request_ts is stored UTC, compared lexically
 
 	// A random real row FOR THIS ONE CLIENT: a rowid seek would jump across
 	// clients, so instead count this client's matching rows and take a random
@@ -1508,7 +1527,7 @@ func (s *DecoySource) SampleClientOfClass(class string) (ClientPersona, error) {
 		return ClientPersona{}, err
 	}
 
-	return ClientPersona{IP: row.ClientIP, Fp: row.toFpSample()}, nil
+	return ClientPersona{IP: row.ClientIP, Name: name, Fp: row.toFpSample()}, nil
 }
 
 // --- manual client display-name override (Phase 2) --------------------------

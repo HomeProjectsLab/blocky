@@ -54,8 +54,11 @@ function openModal({ buildDialog }) {
         function onKey(e) {
             if (e.key === "Escape") { e.preventDefault(); cancel(); return; }
             if (e.key === "Enter" && submit) {
-                // Enter confirms, except inside a textarea (allow newlines).
+                // Enter confirms, except inside a textarea (allow newlines) or
+                // on a focused button — let that button's own click fire, so
+                // Tab→Enter on Cancel cancels instead of running the OK path.
                 if (e.target.tagName === "TEXTAREA") return;
+                if (e.target.tagName === "BUTTON") return;
                 e.preventDefault(); submit(); return;
             }
             if (e.key !== "Tab") return;

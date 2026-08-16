@@ -337,7 +337,8 @@ func TestPruneOldestProperty(t *testing.T) {
 
 		aggBefore := countAggHourly(w.db)
 
-		floor := now.Add(-time.Duration(rng.Intn(48)) * time.Hour)
+		// UTC binds in the probes: request_ts is stored UTC and compared lexically.
+		floor := now.Add(-time.Duration(rng.Intn(48)) * time.Hour).UTC()
 
 		var atOrAfterBefore int64
 		w.db.Model(&logEntry{}).Where("request_ts >= ?", floor).Count(&atOrAfterBefore)

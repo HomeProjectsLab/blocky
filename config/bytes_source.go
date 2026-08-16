@@ -41,8 +41,8 @@ func (s BytesSource) String() string {
 	truncated := false
 
 	if idx := strings.IndexRune(text, '\n'); idx != -1 {
-		text = text[:idx]           // first line only
-		truncated = idx < len(text) // don't count removing last char
+		truncated = idx < len(text)-1 // content after the first line's newline
+		text = text[:idx]             // first line only
 	}
 
 	if len(text) > maxTextSourceDisplayLen { // truncate
@@ -51,7 +51,7 @@ func (s BytesSource) String() string {
 	}
 
 	if truncated {
-		return text[:maxTextSourceDisplayLen] + "..."
+		return text + "..."
 	}
 
 	return text

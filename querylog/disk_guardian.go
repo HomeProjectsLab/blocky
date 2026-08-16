@@ -153,7 +153,7 @@ func (d *DatabaseWriter) pruneOldest(floor time.Time, limit int) (int64, error) 
 	res := d.db.Exec(
 		"DELETE FROM log_entries WHERE rowid IN "+
 			"(SELECT rowid FROM log_entries WHERE request_ts < ? ORDER BY request_ts ASC LIMIT ?)",
-		floor, limit)
+		floor.UTC(), limit)
 
 	return res.RowsAffected, res.Error
 }

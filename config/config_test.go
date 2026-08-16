@@ -1710,7 +1710,7 @@ var _ = Describe("BytesSource", func() {
 		It("should truncate to first line for multiline text sources", func() {
 			s := BytesSource{Type: BytesSourceTypeText, From: "first line\nsecond line\nthird line"}
 			result := s.String()
-			Expect(result).Should(Equal("first line"))
+			Expect(result).Should(Equal("first line..."))
 		})
 
 		It("should truncate long first line in multiline text sources", func() {

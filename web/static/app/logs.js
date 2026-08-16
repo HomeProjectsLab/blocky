@@ -125,6 +125,7 @@ async function loadRecent() {
 // ponytail: own EventSource, not the shared api.js singleton — different stream.
 let source = null;
 let reconnectDelay = 1000;
+let everConnected = false;
 
 function connect() {
     source = new EventSource("/api/ui/logs");
@@ -135,7 +136,13 @@ function connect() {
         if (buffer.length > MAX_LINES) buffer.shift();
         scheduleFlush();
     });
-    source.addEventListener("open", () => { reconnectDelay = 1000; });
+    source.addEventListener("open", () => {
+        reconnectDelay = 1000;
+        // on a RECONNECT (not the first connect), replay the ring buffer so
+        // lines emitted while the stream was down aren't silently lost.
+        if (everConnected) loadRecent();
+        everConnected = true;
+    });
     // EventSource auto-reconnects on transient drops only; on an HTTP error it
     // goes CLOSED and stays dead. Re-open ourselves on a capped backoff.
     source.addEventListener("error", () => {

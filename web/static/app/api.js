@@ -27,7 +27,7 @@ export async function send(method, path, body) {
         opts.headers = { "Content-Type": "application/json" };
         opts.body = JSON.stringify(body);
     }
-    const res = await fetch(path, opts);
+    const res = guard(await fetch(path, opts));
     const text = await res.text();
     let data = {};
     if (text) { try { data = JSON.parse(text); } catch { data = { raw: text }; } }
@@ -37,14 +37,14 @@ export async function send(method, path, body) {
 
 // GET a text/plain (or yaml) body.
 export async function getText(path) {
-    const res = await fetch(path);
+    const res = guard(await fetch(path));
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
     return res.text();
 }
 
 // PUT a raw text body; returns null on success or the server error string.
 export async function putText(path, text) {
-    const res = await fetch(path, { method: "PUT", body: text });
+    const res = guard(await fetch(path, { method: "PUT", body: text }));
     if (res.ok) return null;
     let msg = `HTTP ${res.status}`;
     try { const j = JSON.parse(await res.text()); if (j.error) msg = j.error; } catch { /* keep */ }
@@ -58,7 +58,7 @@ export async function action(method, path, params) {
     if (params) for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
     }
-    const res = await fetch(url, { method });
+    const res = guard(await fetch(url, { method }));
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
     return res.text();
 }

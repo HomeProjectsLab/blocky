@@ -90,11 +90,11 @@ var _ = Describe("HostsFileResolver", func() {
 			})
 			It("should not parse any hosts", func() {
 				Expect(sut.cfg.Sources).ShouldNot(BeEmpty())
-				Expect(sut.hosts.v4.hosts).Should(BeEmpty())
-				Expect(sut.hosts.v6.hosts).Should(BeEmpty())
-				Expect(sut.hosts.v4.aliases).Should(BeEmpty())
-				Expect(sut.hosts.v6.aliases).Should(BeEmpty())
-				Expect(sut.hosts.isEmpty()).Should(BeTrue())
+				Expect(sut.hosts.Load().v4.hosts).Should(BeEmpty())
+				Expect(sut.hosts.Load().v6.hosts).Should(BeEmpty())
+				Expect(sut.hosts.Load().v4.aliases).Should(BeEmpty())
+				Expect(sut.hosts.Load().v6.aliases).Should(BeEmpty())
+				Expect(sut.hosts.Load().isEmpty()).Should(BeTrue())
 			})
 			It("should go to next resolver on query", func() {
 				Expect(sut.Resolve(ctx, newRequest("example.com.", A))).
@@ -130,10 +130,10 @@ var _ = Describe("HostsFileResolver", func() {
 		When("Hosts file can be located", func() {
 			It("should parse it successfully", func() {
 				Expect(sut).ShouldNot(BeNil())
-				Expect(sut.hosts.v4.hosts).Should(HaveLen(5))
-				Expect(sut.hosts.v6.hosts).Should(HaveLen(2))
-				Expect(sut.hosts.v4.aliases).Should(HaveLen(4))
-				Expect(sut.hosts.v6.aliases).Should(HaveLen(2))
+				Expect(sut.hosts.Load().v4.hosts).Should(HaveLen(5))
+				Expect(sut.hosts.Load().v6.hosts).Should(HaveLen(2))
+				Expect(sut.hosts.Load().v4.aliases).Should(HaveLen(4))
+				Expect(sut.hosts.Load().v6.aliases).Should(HaveLen(2))
 			})
 
 			When("filterLoopback is false", func() {
@@ -143,10 +143,10 @@ var _ = Describe("HostsFileResolver", func() {
 
 				It("should parse it successfully", func() {
 					Expect(sut).ShouldNot(BeNil())
-					Expect(sut.hosts.v4.hosts).Should(HaveLen(7))
-					Expect(sut.hosts.v6.hosts).Should(HaveLen(3))
-					Expect(sut.hosts.v4.aliases).Should(HaveLen(5))
-					Expect(sut.hosts.v6.aliases).Should(HaveLen(2))
+					Expect(sut.hosts.Load().v4.hosts).Should(HaveLen(7))
+					Expect(sut.hosts.Load().v6.hosts).Should(HaveLen(3))
+					Expect(sut.hosts.Load().v4.aliases).Should(HaveLen(5))
+					Expect(sut.hosts.Load().v6.aliases).Should(HaveLen(2))
 				})
 			})
 		})
@@ -169,10 +169,10 @@ var _ = Describe("HostsFileResolver", func() {
 			It("should not be used", func() {
 				Expect(sut).ShouldNot(BeNil())
 				Expect(sut.cfg.Sources).ShouldNot(BeEmpty())
-				Expect(sut.hosts.v4.hosts).Should(BeEmpty())
-				Expect(sut.hosts.v6.hosts).Should(BeEmpty())
-				Expect(sut.hosts.v4.aliases).Should(BeEmpty())
-				Expect(sut.hosts.v6.aliases).Should(BeEmpty())
+				Expect(sut.hosts.Load().v4.hosts).Should(BeEmpty())
+				Expect(sut.hosts.Load().v6.hosts).Should(BeEmpty())
+				Expect(sut.hosts.Load().v4.aliases).Should(BeEmpty())
+				Expect(sut.hosts.Load().v6.aliases).Should(BeEmpty())
 			})
 		})
 

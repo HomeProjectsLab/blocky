@@ -166,7 +166,8 @@ async function sendCond(body) {
         const r = await send("PUT", "/api/ui/upstreams/conditional", body);
         if (r.needsApply) showApply(true);
         loadCond();
-    } catch (err) { flash(err.message, true); }
+        return true;
+    } catch (err) { flash(err.message, true); return false; }
 }
 
 async function putCond(domain, currentUpstreams) {
@@ -208,10 +209,12 @@ async function routerHelper() {
     if (!ip) return;
     const local = (await promptDialog("Local domain for LAN hostnames", { value: "fritz.box" }))?.trim();
     if (!local) return;
+    let ok = true;
     for (const dom of ["in-addr.arpa", "ip6.arpa", local]) {
-        await sendCond({ domain: dom, upstreams: [ip] });
+        ok = (await sendCond({ domain: dom, upstreams: [ip] })) && ok;
     }
-    flash(`Reverse DNS + "${local}" now forward to ${ip}.`);
+    // only claim success when all three PUTs landed; sendCond flashed the error otherwise
+    if (ok) flash(`Reverse DNS + "${local}" now forward to ${ip}.`);
 }
 
 loadCond();

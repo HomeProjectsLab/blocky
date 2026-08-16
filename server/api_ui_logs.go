@@ -23,11 +23,17 @@ func (s *statsAPI) logsStream(rw http.ResponseWriter, req *http.Request) {
 	rw.Header().Set(cacheControlHeader, "no-cache")
 	rw.WriteHeader(http.StatusOK)
 
-	// the HTTP server sets a global WriteTimeout (see newHTTPServer); lift it
-	// for this long-lived response. Errors ignored: httptest recorders don't
-	// support deadlines and a failed clear only means an eventual reconnect.
+	// the HTTP server sets a global WriteTimeout (see newHTTPServer); replace
+	// it with a finite rolling deadline refreshed before each write (mirrors
+	// stream()), so a half-open peer fails fast instead of leaking the
+	// goroutine + subscription. Errors ignored: httptest recorders don't
+	// support deadlines.
 	rc := http.NewResponseController(rw)
-	_ = rc.SetWriteDeadline(time.Time{})
+
+	extendDeadline := func() {
+		_ = rc.SetWriteDeadline(time.Now().Add(streamWriteDeadline))
+	}
+	extendDeadline()
 
 	flush := func() {
 		_ = rc.Flush()
@@ -41,12 +47,16 @@ func (s *statsAPI) logsStream(rw http.ResponseWriter, req *http.Request) {
 	for {
 		select {
 		case data := <-events:
+			extendDeadline()
+
 			if _, err := fmt.Fprintf(rw, "event: log\ndata: %s\n\n", data); err != nil {
 				return
 			}
 
 			flush()
 		case <-ping.C:
+			extendDeadline()
+
 			if _, err := fmt.Fprint(rw, ": ping\n\n"); err != nil {
 				return
 			}

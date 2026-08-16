@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // QueryItem mirrors querylog.QueryItem (the /api/ui/queries + /api/ui/stream
@@ -108,12 +109,17 @@ type ClientInfo struct {
 
 // Client is a thin JSON client for the blocky /api/ui/* endpoints.
 type Client struct {
-	Base string // e.g. http://localhost:80
-	HTTP *http.Client
+	Base string       // e.g. http://localhost:80
+	HTTP *http.Client // polling: bounded timeout so a stalled API can't wedge callers
+	sse  *http.Client // SSE: no timeout, the stream is long-lived
 }
 
 func NewClient(base string) *Client {
-	return &Client{Base: strings.TrimRight(base, "/"), HTTP: &http.Client{}}
+	return &Client{
+		Base: strings.TrimRight(base, "/"),
+		HTTP: &http.Client{Timeout: 5 * time.Second},
+		sse:  &http.Client{},
+	}
 }
 
 func (c *Client) getJSON(path string, out any) error {
@@ -213,7 +219,7 @@ func (c *Client) Clients() ([]ClientInfo, error) {
 // Stream opens the SSE feed and calls onQuery for every "query" event until the
 // connection drops or ctx-cancelled body close. Blocks; run in a goroutine.
 func (c *Client) Stream(onQuery func(QueryItem)) error {
-	resp, err := c.HTTP.Get(c.Base + "/api/ui/stream")
+	resp, err := c.sse.Get(c.Base + "/api/ui/stream")
 	if err != nil {
 		return err
 	}

@@ -390,7 +390,13 @@ func (d *DatabaseWriter) Write(entry *LogEntry) {
 	util.LogOnError(context.Background(), "can't marshal fingerprint detail: ", err)
 
 	e := &logEntry{
-		RequestTS:     entry.Start,
+		// UTC on write: the sqlite driver stores time.Time as TEXT with the value's
+		// own offset and compares lexically, so mixed local/UTC offsets mis-order
+		// every request_ts window filter (readers bind UTC to match).
+		// ponytail: forward-only fix — pre-existing local-offset rows are NOT
+		// migrated (a boot-time rewrite crash-looped this box before); they age out
+		// via retention within a few days and self-heal.
+		RequestTS:     entry.Start.UTC(),
 		ClientIP:      entry.ClientIP,
 		ClientName:    strings.Join(entry.ClientNames, "; "),
 		DurationMs:    entry.DurationMs,
@@ -470,6 +476,11 @@ func (d *DatabaseWriter) CleanUp() {
 	}
 }
 
+// maxRetainedEntries caps the flush retry buffer (pendingEntries kept across
+// failed flushes): newest wins, oldest dropped. ~10k rows is a few MB — hours of
+// household traffic — well within the Pi's RAM while a fault persists.
+const maxRetainedEntries = 10_000
+
 func (d *DatabaseWriter) doDBWrite() error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
@@ -525,18 +536,25 @@ func (d *DatabaseWriter) doDBWrite() error {
 
 		// Retain only the failed batches (silent query-log loss otherwise: the old
 		// unconditional nil dropped the entire buffer on any SQLITE_BUSY under
-		// write-lock contention).
-		// ponytail: unbounded if every flush fails; the resolver's logChan already
-		// drops intake under backpressure (query_logging_resolver.go), so the buffer
-		// is bounded in practice — add an explicit cap only if a stuck writer is seen.
+		// write-lock contention), capped to the newest maxRetainedEntries: while
+		// flushes fail persistently (read-only FS, SQLITE_FULL, corruption) an
+		// unbounded retry buffer grows tens of MB/day until the OOM killer takes
+		// household DNS down with it — drop the oldest instead.
+		droppedOldest := 0
+		if len(failed) > maxRetainedEntries {
+			droppedOldest = len(failed) - maxRetainedEntries
+			failed = failed[droppedOldest:]
+		}
+
 		d.pendingEntries = failed
 
 		if multiErr := err.ErrorOrNil(); multiErr != nil {
 			// WARN: some batches rolled back and are retained for retry. The audit
 			// fixed the silent drop here — surface the loss-risk so it's visible.
 			log.PrefixedLog("database_writer").
-				WithField("written", pending-len(failed)).
+				WithField("written", pending-len(failed)-droppedOldest).
 				WithField("retained_for_retry", len(failed)).
+				WithField("dropped_oldest", droppedOldest).
 				WithError(multiErr).
 				Warn("query-log flush partially failed")
 

@@ -126,6 +126,15 @@ func (u *uiAPI) importConfig(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// prove it IS a config database before any Open() touches it: Open
+	// migrates+seeds any SQLite file, so without this a wrong upload (e.g. a
+	// querylog.db) would "validate" and wipe the live config on restore.
+	if err := configstore.VerifyConfigDB(upload); err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
+
+		return
+	}
+
 	// validate in isolation: any error means the live store is never swapped.
 	if err := validateConfigDB(tmp); err != nil {
 		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})

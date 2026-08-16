@@ -10,8 +10,6 @@ import (
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/log"
 	"github.com/0xERR0R/blocky/querylog"
-
-	"github.com/go-chi/chi/v5"
 )
 
 // errShared rejects a per-device action (naming) on a NAT/shared client (R3).
@@ -132,13 +130,49 @@ func (s *statsAPI) putClientClass(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := s.classifier.SetClientClassOverride(chi.URLParam(req, "client"), body.Class); err != nil {
+	if err := s.classifier.SetClientClassOverride(pathParam(req, "client"), body.Class); err != nil {
 		badRequest(rw, err)
 
 		return
 	}
 
 	rw.WriteHeader(http.StatusNoContent)
+}
+
+// allowPerDevice enforces the shared/NAT rejection gate (R3/P1) for a
+// per-device write and reports whether the handler may proceed. It fails
+// CLOSED: a garbage from/to falls back to the default 24h window instead of
+// skipping the gate, and a ClientIsShared DB error rejects — this is the only
+// enforcement point keeping a NAT aggregate from being named/mapped to a
+// household member. The reader stays optional (no sqlite query log = no
+// shared-client concept), so a missing reader still skips the gate.
+func (s *statsAPI) allowPerDevice(rw http.ResponseWriter, req *http.Request, client string) bool {
+	reader, err := s.getReader()
+	if err != nil || reader == nil {
+		return true
+	}
+
+	from, to, err := parseTimeRange(req)
+	if err != nil {
+		// bad range: gate on the default 24h window instead of skipping the gate
+		to = time.Now()
+		from = to.Add(-24 * time.Hour)
+	}
+
+	shared, err := reader.ClientIsShared(client, from, to)
+	if err != nil {
+		internalError(rw, err)
+
+		return false
+	}
+
+	if shared {
+		badRequest(rw, errShared)
+
+		return false
+	}
+
+	return true
 }
 
 // putClientName sets (or clears, with a blank name) a client's manual display-name
@@ -161,19 +195,12 @@ func (s *statsAPI) putClientName(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	client := chi.URLParam(req, "client")
+	client := pathParam(req, "client")
 
 	// R3: a shared/NAT identity must not carry a per-device name. Check via the
 	// same enrich the list uses; the reader is optional so skip the gate if absent.
-	if reader, err := s.getReader(); err == nil && reader != nil {
-		from, to, terr := parseTimeRange(req)
-		if terr == nil {
-			if shared, serr := reader.ClientIsShared(client, from, to); serr == nil && shared {
-				badRequest(rw, errShared)
-
-				return
-			}
-		}
+	if !s.allowPerDevice(rw, req, client) {
+		return
 	}
 
 	if err := s.classifier.SetClientName(client, body.Name); err != nil {
@@ -227,19 +254,12 @@ func (s *statsAPI) putClientPerson(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	client := chi.URLParam(req, "client")
+	client := pathParam(req, "client")
 
 	// P1: a shared/NAT identity must not carry a per-person mapping. Same enrich
 	// gate as naming; the reader is optional so skip the gate if absent.
-	if reader, err := s.getReader(); err == nil && reader != nil {
-		from, to, terr := parseTimeRange(req)
-		if terr == nil {
-			if shared, serr := reader.ClientIsShared(client, from, to); serr == nil && shared {
-				badRequest(rw, errShared)
-
-				return
-			}
-		}
+	if !s.allowPerDevice(rw, req, client) {
+		return
 	}
 
 	if err := s.classifier.SetClientPerson(client, body.Person); err != nil {
@@ -449,7 +469,7 @@ func (s *statsAPI) clientDetail(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	detail, err := reader.ClientDetail(chi.URLParam(req, "name"), from, to)
+	detail, err := reader.ClientDetail(pathParam(req, "name"), from, to)
 	if err != nil {
 		internalError(rw, err)
 

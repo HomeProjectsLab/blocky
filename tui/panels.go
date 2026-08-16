@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -367,8 +368,17 @@ func panelDecoy(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
 		return
 	}
 
+	// Fixed render order: map iteration order would shuffle rows every frame.
+	srcs := make([]string, 0, len(snap.decoy.BySource))
+	for src := range snap.decoy.BySource {
+		srcs = append(srcs, src)
+	}
+
+	slices.Sort(srcs)
+
 	y := inner.Y
-	for src, cnt := range snap.decoy.BySource {
+	for _, src := range srcs {
+		cnt := snap.decoy.BySource[src]
 		if y >= inner.Y+inner.H {
 			break
 		}

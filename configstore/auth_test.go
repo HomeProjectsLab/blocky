@@ -41,12 +41,21 @@ func TestSessionSecretPersists(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 
-	first := store.SessionSecret()
+	first, err := store.SessionSecret()
+	if err != nil {
+		t.Fatalf("session secret: %v", err)
+	}
+
 	if len(first) != sessionSecretLen {
 		t.Fatalf("secret len = %d, want %d", len(first), sessionSecretLen)
 	}
 
-	if !bytes.Equal(first, store.SessionSecret()) {
+	second, err := store.SessionSecret()
+	if err != nil {
+		t.Fatalf("session secret re-read: %v", err)
+	}
+
+	if !bytes.Equal(first, second) {
 		t.Fatal("secret changed between reads on the same store")
 	}
 
@@ -60,7 +69,35 @@ func TestSessionSecretPersists(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	if !bytes.Equal(first, reopened.SessionSecret()) {
+	persisted, err := reopened.SessionSecret()
+	if err != nil {
+		t.Fatalf("session secret after reopen: %v", err)
+	}
+
+	if !bytes.Equal(first, persisted) {
 		t.Fatal("secret did not persist across reopen")
+	}
+}
+
+// Regression: a store read error must surface as an error, never as a nil
+// secret — a nil key would make the session gate build an empty-key HMAC that
+// an attacker can forge offline.
+func TestSessionSecretFailsClosed(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	secret, err := store.SessionSecret()
+	if err == nil {
+		t.Fatal("SessionSecret on a closed store should error")
+	}
+
+	if secret != nil {
+		t.Fatal("SessionSecret must not return a key alongside an error")
 	}
 }

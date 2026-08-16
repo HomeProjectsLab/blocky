@@ -179,7 +179,7 @@ var _ = Describe("client enrichment", func() {
 		})
 
 		It("conf-ranks the OS: a high signature beats a med one for the same client", func() {
-			ceInsert("mac", "10.0.0.4", "swscan.apple.com.", "fp-a", false, 0)      // macOS, high
+			ceInsert("mac", "10.0.0.4", "swscan.apple.com.", "fp-a", false, 0)           // macOS, high
 			ceInsert("mac", "10.0.0.4", "gs-loc.apple.com.", "fp-b", false, time.Minute) // iOS, med
 			out, err := reader.enrichClients(ceFrom, ceTo)
 			Expect(err).Should(Succeed())

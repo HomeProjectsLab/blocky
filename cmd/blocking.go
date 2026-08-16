@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -97,8 +98,8 @@ func statusBlocking(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("response NOK, Status: %s", resp.Status())
 	}
 
-	if err != nil {
-		return fmt.Errorf("can't parse response %w", err)
+	if resp.JSON200 == nil {
+		return errors.New("unexpected empty blocking status response")
 	}
 
 	if resp.JSON200.Enabled {

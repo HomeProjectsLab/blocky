@@ -60,7 +60,7 @@ var sigRules = []sigRule{
 	{"archlinux.org", "os", "Linux", confMed},
 
 	// ── S-VENDOR / S-MODEL (multi-valued, conf>=med surfaces) ──
-	{"apple.com", "vendor", "Apple", confLow},   // dropped from chips — too broad
+	{"apple.com", "vendor", "Apple", confLow}, // dropped from chips — too broad
 	{"googleapis.com", "vendor", "Google", confLow},
 	{"microsoft.com", "vendor", "Microsoft", confLow},
 	{"samsungcloud.com", "vendor", "Samsung", confMed},
@@ -322,7 +322,7 @@ func (r *Reader) enrichClients(from, to time.Time) (map[string]clientEnrich, err
 			FROM log_entries WHERE request_ts >= ? AND request_ts <= ? AND decoy = 0
 			GROUP BY client_name
 		) a ON a.client_name = d.client_name
-		GROUP BY d.client_name`, from, to, from, to).Scan(&rows).Error
+		GROUP BY d.client_name`, from.UTC(), to.UTC(), from.UTC(), to.UTC()).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +345,7 @@ func (r *Reader) enrichClient(name string, from, to time.Time) (clientEnrich, er
 	err := r.db.Raw(`SELECT client_name AS name, `+enrichSelectCols()+`
 		FROM log_entries INDEXED BY idx_client_name_request_ts
 		WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
-		name, from, to).Scan(&row).Error
+		name, from.UTC(), to.UTC()).Scan(&row).Error
 	if err != nil {
 		return clientEnrich{}, err
 	}
@@ -424,7 +424,7 @@ func (r *Reader) ClientCategories(name string, from, to time.Time) ([]string, er
 	err := r.db.Raw(`SELECT GROUP_CONCAT(DISTINCT `+categoryCaseSQL("question_name", catRulesHost)+`) AS cats
 		FROM log_entries INDEXED BY idx_client_name_request_ts
 		WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0`,
-		name, from, to).Scan(&row).Error
+		name, from.UTC(), to.UTC()).Scan(&row).Error
 	if err != nil {
 		return nil, err
 	}

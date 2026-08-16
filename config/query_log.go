@@ -95,10 +95,20 @@ func (c *QueryLog) censoredTarget() string {
 		return secretObfuscator
 	}
 
-	pass, ok := parsed.User.Password()
-	if !ok {
+	if _, ok := parsed.User.Password(); !ok {
 		return target
 	}
 
-	return strings.ReplaceAll(target, pass, secretObfuscator)
+	// Rebuild from the parsed URL: url.Parse decodes the password, so a
+	// string ReplaceAll on the raw target misses percent-encoded secrets.
+	// Splice the obfuscator in after String() since userinfo encoding
+	// would percent-escape its asterisks.
+	parsed.User = url.User(parsed.User.Username())
+	redacted := strings.Replace(parsed.String(), "@", ":"+secretObfuscator+"@", 1)
+	if !strings.Contains(target, "://") {
+		// Drop the scheme we prepended above to keep the original shape.
+		redacted = strings.TrimPrefix(redacted, c.Type.String()+"://")
+	}
+
+	return redacted
 }

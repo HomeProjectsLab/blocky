@@ -1029,7 +1029,7 @@ func (cfg *Config) validate(logger *logrus.Entry) error {
 
 	// Blocking validation
 	if err := cfg.Blocking.validate(); err != nil {
-		logger.Warn(err)
+		return err
 	}
 
 	// DNS64 validation

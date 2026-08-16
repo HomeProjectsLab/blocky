@@ -349,7 +349,9 @@ func (r *Reader) Search(filter SearchFilter) (total int64, items []QueryItem, er
 		from = to.Add(-24 * time.Hour)
 	}
 
-	q := r.db.Model(&logEntry{}).Where("request_ts >= ? AND request_ts <= ?", from, to)
+	// UTC binds: request_ts is TEXT compared lexically, and rows are stored UTC
+	// (see DatabaseWriter.Write) — a local-offset bind mis-orders the window edges.
+	q := r.db.Model(&logEntry{}).Where("request_ts >= ? AND request_ts <= ?", from.UTC(), to.UTC())
 
 	if !filter.IncludeDecoys {
 		q = q.Where("decoy = ?", false)
@@ -634,7 +636,7 @@ func (r *Reader) ClientDetail(name string, from, to time.Time) (*ClientDetail, e
 		FROM log_entries INDEXED BY idx_client_name_request_ts
 		WHERE client_name = ? AND request_ts >= ? AND request_ts <= ? AND decoy = 0
 		GROUP BY name ORDER BY c DESC LIMIT 10`,
-		name, from, to).Scan(&d.TopDomains).Error
+		name, from.UTC(), to.UTC()).Scan(&d.TopDomains).Error
 	if err != nil {
 		return nil, err
 	}
@@ -677,7 +679,7 @@ func (r *Reader) DecoyOverview(from, to time.Time) (*DecoyOverview, error) {
 	err := r.db.Raw(`SELECT COUNT(*) AS decoys,
 		COUNT(DISTINCT COALESCE(NULLIF(effective_tldp,''), question_name)) AS distinct_domains
 		FROM log_entries WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?`,
-		from, to).Scan(&totals).Error
+		from.UTC(), to.UTC()).Scan(&totals).Error
 	if err != nil {
 		return nil, err
 	}
@@ -702,7 +704,7 @@ func (r *Reader) DecoySourceMix(from, to time.Time) ([]TopItem, error) {
 	items := []TopItem{}
 	err := r.db.Raw(`SELECT decoy_source AS name, COUNT(*) AS c FROM log_entries
 		WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?
-		GROUP BY decoy_source ORDER BY c DESC`, from, to).Scan(&items).Error
+		GROUP BY decoy_source ORDER BY c DESC`, from.UTC(), to.UTC()).Scan(&items).Error
 
 	return items, err
 }
@@ -713,7 +715,7 @@ func (r *Reader) DecoyTopDomains(from, to time.Time, n int) ([]TopItem, error) {
 	items := []TopItem{}
 	err := r.db.Raw(`SELECT COALESCE(NULLIF(effective_tldp,''), question_name) AS name, COUNT(*) AS c
 		FROM log_entries WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?
-		GROUP BY name ORDER BY c DESC LIMIT ?`, from, to, n).Scan(&items).Error
+		GROUP BY name ORDER BY c DESC LIMIT ?`, from.UTC(), to.UTC(), n).Scan(&items).Error
 
 	return items, err
 }
@@ -741,7 +743,7 @@ func (r *Reader) DecoyBuckets(from, to time.Time, step int64) ([]Bucket, error) 
 	err := r.db.Raw(`SELECT (CAST(strftime('%s', request_ts) AS INTEGER) / ?) * ? AS ts,
 		decoy_source, COUNT(*) AS c FROM log_entries
 		WHERE decoy = 1 AND request_ts >= ? AND request_ts <= ?
-		GROUP BY ts, decoy_source`, step, step, from, to).Scan(&rows).Error
+		GROUP BY ts, decoy_source`, step, step, from.UTC(), to.UTC()).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}

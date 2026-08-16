@@ -18,9 +18,10 @@ var _ = Describe("HTTP middleware", func() {
 	})
 
 	Describe("CORS", func() {
-		preflight := func(headers map[string]string) *http.Response {
-			req := httptest.NewRequest(http.MethodOptions, "/api/blocking/disable", nil)
-			req.Header.Set("Origin", "https://grafana.example.com")
+		preflight := func(origin string, headers map[string]string) *http.Response {
+			req := httptest.NewRequest(http.MethodOptions, "http://blocky.lan/api/blocking/disable", nil)
+			req.Host = "blocky.lan"
+			req.Header.Set("Origin", origin)
 			req.Header.Set("Access-Control-Request-Method", http.MethodGet)
 
 			for k, v := range headers {
@@ -33,33 +34,30 @@ var _ = Describe("HTTP middleware", func() {
 			return rec.Result()
 		}
 
-		It("should answer a cross-origin preflight", func() {
-			res := preflight(nil)
+		// Regression: a wildcard origin (plus AllowPrivateNetwork) let any
+		// website's JS drive the API cross-origin as a drive-by.
+		It("should deny a cross-origin preflight", func() {
+			res := preflight("https://evil.example.com", nil)
 
-			Expect(res.Header.Get("Access-Control-Allow-Origin")).Should(Equal("*"))
-			Expect(res.Header.Get("Access-Control-Allow-Methods")).Should(ContainSubstring(http.MethodGet))
+			Expect(res.Header.Get("Access-Control-Allow-Origin")).Should(BeEmpty())
 		})
 
-		It("should allow preflights requesting arbitrary headers", func() {
-			// Web UIs send tool-specific headers, e.g. Grafana action buttons
-			// always add 'X-Grafana-Action'. A disallowed header makes the
-			// middleware answer the preflight without any CORS headers, so the
-			// browser blocks the request.
-			res := preflight(map[string]string{
-				"Access-Control-Request-Headers": "content-type,x-grafana-action",
+		It("should not grant Private Network Access to foreign origins", func() {
+			res := preflight("https://evil.example.com",
+				map[string]string{"Access-Control-Request-Private-Network": "true"})
+
+			Expect(res.Header.Get("Access-Control-Allow-Private-Network")).Should(BeEmpty())
+		})
+
+		It("should answer a same-origin preflight", func() {
+			res := preflight("http://blocky.lan", map[string]string{
+				"Access-Control-Request-Headers": "content-type,x-custom-header",
 			})
 
-			Expect(res.Header.Get("Access-Control-Allow-Origin")).Should(Equal("*"))
-			// rs/cors answers a wildcard allowlist by echoing the requested headers
-			Expect(res.Header.Get("Access-Control-Allow-Headers")).Should(ContainSubstring("x-grafana-action"))
-		})
-
-		It("should allow Private Network Access preflights", func() {
-			// Chromium sends this header when a public site addresses a private IP,
-			// e.g. a hosted Grafana dashboard calling the blocky API on a LAN.
-			res := preflight(map[string]string{"Access-Control-Request-Private-Network": "true"})
-
-			Expect(res.Header.Get("Access-Control-Allow-Private-Network")).Should(Equal("true"))
+			Expect(res.Header.Get("Access-Control-Allow-Origin")).Should(Equal("http://blocky.lan"))
+			Expect(res.Header.Get("Access-Control-Allow-Methods")).Should(ContainSubstring(http.MethodGet))
+			// rs/cors answers a wildcard header allowlist by echoing the requested headers
+			Expect(res.Header.Get("Access-Control-Allow-Headers")).Should(ContainSubstring("x-custom-header"))
 		})
 	})
 })

@@ -65,6 +65,11 @@ type Store struct {
 	mu          sync.Mutex
 	lastApplied time.Time
 
+	// lastMutated is the unix-nano time of the last successful write to an
+	// overlay table (see overlayTables). Atomic, not s.mu: the gorm hook fires
+	// inside writers that already hold s.mu.
+	lastMutated atomic.Int64
+
 	applyCh chan struct{}
 }
 
@@ -101,6 +106,11 @@ func Open(dir string) (*Store, error) {
 		absDir:  absDir,
 		applyCh: make(chan struct{}, 1),
 	}
+
+	if err := s.hookDirtyTracking(db); err != nil {
+		return nil, err
+	}
+
 	s.db.Store(db)
 
 	log.PrefixedLog("configstore").WithField("path", s.DBPath()).Info("config store opened (schema migrated, seed ensured)")
@@ -144,6 +154,41 @@ func migrateSchema(db *gorm.DB) error {
 		&BlockingCategory{}, &BlockingClientSegment{}, &AllowlistEntry{}, &DenylistEntry{}, &AdlistEntry{},
 		&BlockingGroup{}, &BlockingGroupCategory{}, &BlockingGroupMember{}); err != nil {
 		return fmt.Errorf("can't migrate config database schema: %w", err)
+	}
+
+	return nil
+}
+
+// overlayTables are the tables LoadConfig merges over the YAML blob. A write to
+// any of them makes the running config stale without touching config_blob's
+// updated_at, so Status() tracks them via lastMutated.
+var overlayTables = map[string]bool{
+	"upstream_group": true, "upstream_entry": true,
+	"blocking_category": true, "blocking_client_segment": true,
+	"allowlist_entry": true, "denylist_entry": true, "adlist_entry": true,
+	"blocking_group": true, "blocking_group_category": true, "blocking_group_member": true,
+}
+
+// hookDirtyTracking bumps lastMutated after every successful overlay-table
+// write on db, so Status() reports dirty for edits (category toggles,
+// allow/deny/adlist/group changes) the blob's updated_at can't see.
+func (s *Store) hookDirtyTracking(db *gorm.DB) error {
+	touch := func(tx *gorm.DB) {
+		if tx.Error == nil && overlayTables[tx.Statement.Table] {
+			s.lastMutated.Store(time.Now().UnixNano())
+		}
+	}
+
+	if err := db.Callback().Create().After("gorm:create").Register("configstore:dirty", touch); err != nil {
+		return fmt.Errorf("can't register dirty-tracking hook: %w", err)
+	}
+
+	if err := db.Callback().Update().After("gorm:update").Register("configstore:dirty", touch); err != nil {
+		return fmt.Errorf("can't register dirty-tracking hook: %w", err)
+	}
+
+	if err := db.Callback().Delete().After("gorm:delete").Register("configstore:dirty", touch); err != nil {
+		return fmt.Errorf("can't register dirty-tracking hook: %w", err)
 	}
 
 	return nil
@@ -363,9 +408,10 @@ func (s *Store) MarkApplied() {
 	s.lastApplied = time.Now()
 }
 
-// Status reports whether the stored blob has changed since the last apply.
-// dirty is true when the blob's updated_at is after lastApplied, or when
-// nothing has been applied yet (lastApplied zero).
+// Status reports whether the stored config has changed since the last apply.
+// dirty is true when the blob's updated_at OR the last overlay-table write
+// (lastMutated) is after lastApplied, or when nothing has been applied yet
+// (lastApplied zero).
 func (s *Store) Status() (dirty bool, lastApplied, updatedAt time.Time, err error) {
 	b, err := s.blob()
 	if err != nil {
@@ -376,9 +422,14 @@ func (s *Store) Status() (dirty bool, lastApplied, updatedAt time.Time, err erro
 	lastApplied = s.lastApplied
 	s.mu.Unlock()
 
-	dirty = lastApplied.IsZero() || b.UpdatedAt.After(lastApplied)
+	updatedAt = b.UpdatedAt
+	if m := time.Unix(0, s.lastMutated.Load()); m.After(updatedAt) {
+		updatedAt = m
+	}
 
-	return dirty, lastApplied, b.UpdatedAt, nil
+	dirty = lastApplied.IsZero() || updatedAt.After(lastApplied)
+
+	return dirty, lastApplied, updatedAt, nil
 }
 
 // SnapshotTo writes a consistent, standalone copy of config.db to path.
@@ -473,7 +524,43 @@ func (s *Store) reopen() error {
 		return err
 	}
 
+	if err := s.hookDirtyTracking(db); err != nil {
+		return err
+	}
+
 	s.db.Store(db)
+
+	return nil
+}
+
+// VerifyConfigDB opens the SQLite file at path strictly read-only — no
+// AutoMigrate, no seeding — and checks it actually is a config database
+// (exactly one config_blob row). Guard rail before validateConfigDB/RestoreDB:
+// Open() happily migrates+seeds ANY SQLite file (e.g. a querylog.db) into
+// something that "validates", and the restore would then wipe the live config.
+func VerifyConfigDB(path string) error {
+	encodedPath := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(%d)", encodedPath, busyTimeoutMs)
+
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		return fmt.Errorf("can't open uploaded database: %w", err)
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("can't access uploaded database: %w", err)
+	}
+	defer sqlDB.Close()
+
+	var count int64
+	if err := db.Table("config_blob").Count(&count).Error; err != nil {
+		return fmt.Errorf("not a config database: %w", err)
+	}
+
+	if count != 1 {
+		return fmt.Errorf("not a config database: config_blob has %d rows, want 1", count)
+	}
 
 	return nil
 }

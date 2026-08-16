@@ -79,6 +79,14 @@ var _ = Describe("ParseIPFromArpaAddr", func() {
 			Expect(err).Should(HaveOccurred())
 		})
 
+		It("rejects multi-digit labels (single nibble only)", func() {
+			_, err := ParseIPFromArpaAddr("ff.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.0.0.0.0.0.f.7.2.0.0.2.ip6.arpa.")
+			Expect(err).Should(HaveOccurred())
+
+			_, err = ParseIPFromArpaAddr("1.ff.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.0.0.0.0.0.f.7.2.0.0.2.ip6.arpa.")
+			Expect(err).Should(HaveOccurred())
+		})
+
 		It("requires all parts to be present", func() {
 			_, err := ParseIPFromArpaAddr("1.0.0.0.0.0.0.0.0.0.0.0.0.g.0.0.0.0.1.0.0.0.0.0.f.7.2.0.0.2.ip6.arpa.")
 			Expect(err).Should(HaveOccurred())

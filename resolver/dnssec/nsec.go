@@ -36,17 +36,61 @@ func (v *Validator) validateNSECNXDOMAIN(nsecRecords []*dns.NSEC, qname string) 
 
 	// NXDOMAIN: Need to prove the name doesn't exist
 	// Find NSEC that covers the query name
+	var covering *dns.NSEC
+
 	for _, nsec := range nsecRecords {
 		if v.nsecCoversName(nsec, qname) {
 			v.logger.Debugf("NSEC covers NXDOMAIN for %s: %s -> %s", qname, nsec.Header().Name, nsec.NextDomain)
+
+			covering = nsec
+
+			break
+		}
+	}
+
+	if covering == nil {
+		v.logger.Warnf("No NSEC record covers NXDOMAIN for %s", qname)
+
+		return ValidationResultBogus
+	}
+
+	// RFC 4035 §3.1.3.2/§5.4: NXDOMAIN also requires proof that no wildcard could have
+	// synthesized an answer: an authenticated NSEC covering `*.<closest encloser>`
+	// (mirrors the NSEC3 NXDOMAIN wildcard check).
+	wildcardName := dns.Fqdn("*." + strings.TrimSuffix(nsecClosestEncloser(covering, qname), "."))
+
+	for _, nsec := range nsecRecords {
+		if v.nsecCoversName(nsec, wildcardName) {
+			v.logger.Debugf("NSEC covers wildcard %s for NXDOMAIN %s", wildcardName, qname)
 
 			return ValidationResultSecure
 		}
 	}
 
-	v.logger.Warnf("No NSEC record covers NXDOMAIN for %s", qname)
+	v.logger.Warnf("No NSEC record covers wildcard %s for NXDOMAIN %s", wildcardName, qname)
 
 	return ValidationResultBogus
+}
+
+// nsecClosestEncloser derives the closest encloser of qname from the NSEC record
+// covering it: the owner and next domain both exist in the zone and bracket qname,
+// so the closest (longest) existing ancestor of qname is its longest common suffix,
+// in whole labels, with either of them. Returns a FQDN ("." for the root).
+func nsecClosestEncloser(nsec *dns.NSEC, qname string) string {
+	qname = dns.CanonicalName(qname)
+
+	common := dns.CompareDomainName(qname, dns.CanonicalName(nsec.Header().Name))
+	if n := dns.CompareDomainName(qname, dns.CanonicalName(nsec.NextDomain)); n > common {
+		common = n
+	}
+
+	if common == 0 {
+		return "."
+	}
+
+	labelIndexes := dns.Split(qname)
+
+	return qname[labelIndexes[len(labelIndexes)-common]:]
 }
 
 // validateNSECNODATA validates NSEC proof for NODATA

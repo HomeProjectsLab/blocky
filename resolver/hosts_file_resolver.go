@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/lists"
@@ -30,7 +31,9 @@ type HostsFileResolver struct {
 	NextResolver
 	typed
 
-	hosts      splitHostsFileData
+	// hosts is swapped wholesale by the periodic refresh while Resolve reads it,
+	// so it must be accessed atomically.
+	hosts      atomic.Pointer[splitHostsFileData]
 	downloader lists.FileDownloader
 }
 
@@ -44,6 +47,8 @@ func NewHostsFileResolver(ctx context.Context,
 
 		downloader: lists.NewDownloader(cfg.Loading.Downloads, bootstrap.NewHTTPTransport()),
 	}
+
+	r.hosts.Store(new(splitHostsFileData))
 
 	err := cfg.Loading.StartPeriodicRefresh(ctx, r.loadSources, func(err error) {
 		_, logger := r.log(ctx)
@@ -60,7 +65,7 @@ func NewHostsFileResolver(ctx context.Context,
 func (r *HostsFileResolver) LogConfig(logger *logrus.Entry) {
 	r.cfg.LogConfig(logger)
 
-	logger.Infof("cache entries = %d", r.hosts.len())
+	logger.Infof("cache entries = %d", r.hosts.Load().len())
 }
 
 func (r *HostsFileResolver) handleReverseDNS(request *model.Request) *model.Response {
@@ -103,9 +108,11 @@ func (r *HostsFileResolver) lookupHostNames(ip net.IP) []string {
 	}
 
 	// search only in the hosts with an IP version that matches the question
-	hostsData := r.hosts.v4
+	hosts := r.hosts.Load()
+
+	hostsData := hosts.v4
 	if ip.To4() == nil {
-		hostsData = r.hosts.v6
+		hostsData = hosts.v6
 	}
 
 	for host, hostData := range hostsData.hosts {
@@ -158,7 +165,7 @@ func (r *HostsFileResolver) Resolve(ctx context.Context, request *model.Request)
 }
 
 func (r *HostsFileResolver) resolve(question dns.Question, domain string) []dns.RR {
-	ip := r.hosts.getIP(dns.Type(question.Qtype), domain)
+	ip := r.hosts.Load().getIP(dns.Type(question.Qtype), domain)
 	if ip == nil {
 		return nil
 	}
@@ -205,7 +212,7 @@ func (r *HostsFileResolver) loadSources(ctx context.Context) error {
 		})
 	}
 
-	newHosts := newSplitHostsDataWithSameCapacity(r.hosts)
+	newHosts := newSplitHostsDataWithSameCapacity(*r.hosts.Load())
 
 	producers.GoConsume(func(ctx context.Context, ch <-chan *HostsFileEntry) error {
 		for entry := range ch {
@@ -220,7 +227,7 @@ func (r *HostsFileResolver) loadSources(ctx context.Context) error {
 		return fmt.Errorf("failed to load hosts file sources: %w", err)
 	}
 
-	r.hosts = newHosts
+	r.hosts.Store(&newHosts)
 
 	return nil
 }

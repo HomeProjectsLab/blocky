@@ -100,9 +100,14 @@ var _ = Describe("NSEC validation", func() {
 				Hdr:        dns.RR_Header{Name: "a.example.com.", Rrtype: dns.TypeNSEC},
 				NextDomain: "z.example.com.",
 			}
+			// NSEC covering the wildcard *.example.com
+			wildcardNSEC := &dns.NSEC{
+				Hdr:        dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeNSEC},
+				NextDomain: "a.example.com.",
+			}
 
 			response := &dns.Msg{
-				Ns: []dns.RR{nsec},
+				Ns: []dns.RR{nsec, wildcardNSEC},
 			}
 			response.Rcode = dns.RcodeNameError
 
@@ -141,14 +146,32 @@ var _ = Describe("NSEC validation", func() {
 	})
 
 	Describe("validateNSECNXDOMAIN", func() {
-		It("should return Secure when NSEC covers the query name", func() {
+		// NSEC covering *.example.com (example.com < *.example.com < a.example.com)
+		wildcardNSEC := &dns.NSEC{
+			Hdr:        dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeNSEC},
+			NextDomain: "a.example.com.",
+		}
+
+		It("should return Secure when NSEC covers the query name and the wildcard", func() {
+			nsec := &dns.NSEC{
+				Hdr:        dns.RR_Header{Name: "a.example.com.", Rrtype: dns.TypeNSEC},
+				NextDomain: "z.example.com.",
+			}
+
+			result := sut.validateNSECNXDOMAIN([]*dns.NSEC{nsec, wildcardNSEC}, "m.example.com.")
+			Expect(result).Should(Equal(ValidationResultSecure))
+		})
+
+		It("should return Bogus when the wildcard non-existence proof is missing", func() {
+			// Covers m.example.com but NOT *.example.com: a stripped wildcard NSEC
+			// must not allow a Secure NXDOMAIN (auth-denial downgrade).
 			nsec := &dns.NSEC{
 				Hdr:        dns.RR_Header{Name: "a.example.com.", Rrtype: dns.TypeNSEC},
 				NextDomain: "z.example.com.",
 			}
 
 			result := sut.validateNSECNXDOMAIN([]*dns.NSEC{nsec}, "m.example.com.")
-			Expect(result).Should(Equal(ValidationResultSecure))
+			Expect(result).Should(Equal(ValidationResultBogus))
 		})
 
 		It("should return Bogus when no NSEC covers the query name", func() {
@@ -168,7 +191,7 @@ var _ = Describe("NSEC validation", func() {
 			}
 
 			// Test without trailing dot
-			result := sut.validateNSECNXDOMAIN([]*dns.NSEC{nsec}, "m.example.com")
+			result := sut.validateNSECNXDOMAIN([]*dns.NSEC{nsec, wildcardNSEC}, "m.example.com")
 			Expect(result).Should(Equal(ValidationResultSecure))
 		})
 
@@ -187,7 +210,7 @@ var _ = Describe("NSEC validation", func() {
 			}
 
 			// Query falls in second range (canonically between m and n)
-			result := sut.validateNSECNXDOMAIN([]*dns.NSEC{nsec1, nsec2, nsec3}, "ma.example.com.")
+			result := sut.validateNSECNXDOMAIN([]*dns.NSEC{nsec1, nsec2, nsec3, wildcardNSEC}, "ma.example.com.")
 			Expect(result).Should(Equal(ValidationResultSecure))
 		})
 

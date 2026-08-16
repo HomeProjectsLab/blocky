@@ -141,16 +141,33 @@ func isPublic(path, dohPath string) bool {
 	return false
 }
 
-// newSessionGate protects the web UI (the SPA page routes and /api/ui/*). The
-// legacy OpenAPI /api/* control routes are left ungated on purpose: Grafana and
-// friends call them cross-origin and cookieless (see newCORSMiddleware). store
-// nil makes the gate a no-op (tests / YAML-import mode).
+// legacyMutatingAPI lists the legacy OpenAPI control routes that change server
+// state. They require a session (a drive-by cross-origin GET must not disable
+// blocking); the read-only legacy routes stay open for cookieless integrations.
+func legacyMutatingAPI(path string) bool {
+	switch path {
+	case "/api/blocking/enable", "/api/blocking/disable",
+		"/api/cache/flush", "/api/lists/refresh":
+		return true
+	}
+
+	return false
+}
+
+// newSessionGate protects the web UI (the SPA page routes and /api/ui/*) and
+// the legacy mutating /api control routes. The read-only legacy routes are left
+// ungated on purpose: Grafana and friends call them cross-origin and cookieless
+// (see newCORSMiddleware). store nil makes the gate a no-op (tests /
+// YAML-import mode).
 func newSessionGate(store *configstore.Store, dohPath string) httpMiddleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// The tty dashboard client polls the API from localhost with no
-			// cookie — exempt loopback or that HDMI panel goes dark.
-			if isLoopback(r.RemoteAddr) {
+			// cookie — exempt loopback or that HDMI panel goes dark. NEVER for
+			// a PROXY-protocol connection: there RemoteAddr is sender-claimed,
+			// and a forged `PROXY TCP4 127.0.0.1 …` line from any LAN host
+			// would otherwise grant full admin without a password.
+			if isLoopback(r.RemoteAddr) && !viaProxyProtocol(r) {
 				next.ServeHTTP(w, r)
 
 				return
@@ -164,9 +181,10 @@ func newSessionGate(store *configstore.Store, dohPath string) httpMiddleware {
 				return
 			}
 
-			// Only the web UI is gated: page routes and /api/ui/*. Anything else
-			// under /api/ is a legacy control route — never gated (rule 5).
-			if strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/ui/") {
+			// Only the web UI and the legacy mutating control routes are gated:
+			// any other /api/ route is a read-only legacy route — never gated.
+			if strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/ui/") &&
+				!legacyMutatingAPI(path) {
 				next.ServeHTTP(w, r)
 
 				return
@@ -178,7 +196,16 @@ func newSessionGate(store *configstore.Store, dohPath string) httpMiddleware {
 				return
 			}
 
-			secret := store.SessionSecret()
+			// Fail closed: without a usable 32-byte secret every cookie check
+			// would run against a nil/short HMAC key, which an attacker can
+			// forge offline. Reject before verifySession ever runs.
+			secret, err := store.SessionSecret()
+			if err != nil || len(secret) != sha256.Size {
+				authLog().WithError(err).Error("session secret unavailable, rejecting request")
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication unavailable"})
+
+				return
+			}
 
 			if c, err := r.Cookie(sessionCookie); err == nil {
 				if ok, exp := verifySession(secret, c.Value); ok {
@@ -237,9 +264,21 @@ func (l *loginLimiter) recordFail(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	now := time.Now()
+
+	// Prune every lapsed-window entry: rotating (IPv6 privacy) addresses would
+	// otherwise grow the map without bound, and a lapsed entry keeping its old
+	// count would re-lock after a single mistype post-lockout. Deleting it means
+	// this failure starts a fresh window at count 1.
+	for k, e := range l.fails {
+		if now.After(e.until) {
+			delete(l.fails, k)
+		}
+	}
+
 	e := l.fails[ip]
 	e.count++
-	e.until = time.Now().Add(lockoutWindow)
+	e.until = now.Add(lockoutWindow)
 	l.fails[ip] = e
 
 	if e.count == maxLoginFails {
@@ -326,7 +365,14 @@ func (a *authAPI) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setSessionCookie(w, r, a.store.SessionSecret())
+	secret, err := a.store.SessionSecret()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "can't create session"})
+
+		return
+	}
+
+	setSessionCookie(w, r, secret)
 	authLog().WithField("client_ip", util.Obfuscate(requestIP(r))).
 		Info("first-run setup completed: admin password set")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -358,8 +404,16 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	secret, err := a.store.SessionSecret()
+	if err != nil {
+		authLog().WithError(err).Error("session secret unavailable, can't issue session")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "can't create session"})
+
+		return
+	}
+
 	a.limiter.reset(ip)
-	setSessionCookie(w, r, a.store.SessionSecret())
+	setSessionCookie(w, r, secret)
 	authLog().WithField("client_ip", obfIP).Info("login succeeded")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -376,7 +430,10 @@ func (a *authAPI) status(w http.ResponseWriter, r *http.Request) {
 	authenticated := false
 	if configured {
 		if c, err := r.Cookie(sessionCookie); err == nil {
-			authenticated, _ = verifySession(a.store.SessionSecret(), c.Value)
+			// fail closed: on a secret read error the caller stays unauthenticated
+			if secret, serr := a.store.SessionSecret(); serr == nil {
+				authenticated, _ = verifySession(secret, c.Value)
+			}
 		}
 	}
 

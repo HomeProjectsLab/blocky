@@ -223,9 +223,44 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 		return nil, fmt.Errorf("server creation failed: %w", err)
 	}
 
+	// Everything bound/opened so far is closed again when a later step fails
+	// (mirrors buildResolverBundle's fail()): a leaked :53/:80/:443 socket makes
+	// the supervisor's same-port rollback rebind hit EADDRINUSE and fatal-exit —
+	// the household then has NO DNS at all.
+	var bound []io.Closer
+
+	defer func() {
+		if err != nil {
+			closeAll(bound)
+		}
+	}()
+
+	for _, d := range dnsServers {
+		// pre-created listeners/packet conns (freeBind / PROXY protocol)
+		if d.Listener != nil {
+			bound = append(bound, d.Listener)
+		}
+
+		if d.PacketConn != nil {
+			bound = append(bound, d.PacketConn)
+		}
+	}
+
 	httpListeners, httpsListeners, http3PacketConns, err := createHTTPListeners(ctx, cfg, tlsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP/HTTPS listeners: %w", err)
+	}
+
+	for _, l := range httpListeners {
+		bound = append(bound, l)
+	}
+
+	for _, l := range httpsListeners {
+		bound = append(bound, l)
+	}
+
+	for _, pc := range http3PacketConns {
+		bound = append(bound, pc)
 	}
 
 	// registered once for the process, not per apply, to avoid duplicate-registration surprises
@@ -247,6 +282,10 @@ func NewServer(ctx context.Context, cfg *config.Config, store *configstore.Store
 	server.decoySource, err = openDecoySource(cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if server.decoySource != nil {
+		bound = append(bound, server.decoySource)
 	}
 
 	// live query stream: only the sqlite query log target feeds the UI, so the
@@ -582,6 +621,18 @@ func createServers(ctx context.Context, cfg *config.Config, tlsCfg *tls.Config) 
 		}, cfg.Ports.TLS))
 
 	if multiErr := err.ErrorOrNil(); multiErr != nil {
+		// close any pre-bound listener (freeBind / PROXY protocol) of the servers
+		// created before the failing one — NewServer's cleanup never sees them
+		for _, d := range dnsServers {
+			if d.Listener != nil {
+				_ = d.Listener.Close()
+			}
+
+			if d.PacketConn != nil {
+				_ = d.PacketConn.Close()
+			}
+		}
+
 		return nil, fmt.Errorf("failed to create DNS servers: %w", multiErr)
 	}
 
@@ -672,6 +723,11 @@ func newProxyProtocolListener(listener net.Listener, enabled bool) net.Listener 
 		return listener
 	}
 
+	// ponytail: REQUIRE trusts the PROXY header from ANY peer, so RemoteAddr is
+	// sender-claimed on these listeners — the HTTP session gate therefore never
+	// grants its loopback auth exemption to them (see newSessionGate). Upgrade
+	// path: a trusted-proxy CIDR allowlist here (REQUIRE from proxies, REJECT
+	// otherwise) if untrusted hosts ever share a proxied listener.
 	return &proxyproto.Listener{
 		Listener: listener,
 		ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
@@ -1107,7 +1163,7 @@ func (s *Server) Start(ctx context.Context, errCh chan<- error) {
 		go func() {
 			logger().Infof("%s server is up and running on addr/port %s", srv, listener.Addr())
 
-			err := srv.Serve(ctx, listener)
+			err := srv.Serve(listener)
 			if err != nil {
 				errCh <- fmt.Errorf("%s on %s: %w", srv, listener.Addr(), err)
 			}
@@ -1155,6 +1211,20 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Close the HTTP servers synchronously (not via a ctx-watch goroutine):
+	// their listener sockets must be provably released before Stop returns, or
+	// a full rebuild rebinding the same ports races the old listener and dies
+	// with EADDRINUSE. inner.Close also unblocks the Serve goroutines.
+	for listener, srv := range s.servers {
+		if err := srv.inner.Close(); err != nil {
+			logger().Warn("failed to close http server: ", err)
+		}
+
+		// belt: a listener whose Serve goroutine never got scheduled is not
+		// tracked by inner.Close yet; double-close errors are irrelevant here
+		_ = listener.Close()
+	}
+
 	// per-apply io resources of the live bundle (redis bridge/conn)
 	if b := s.live.Load(); b != nil {
 		for _, c := range b.closers {
@@ -1177,9 +1247,15 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Collect DNS shutdown errors instead of returning early: a lingering DoT
+	// conn can push ShutdownContext into DeadlineExceeded, and bailing here
+	// would skip the flush/close/drain below — dropping every buffered
+	// query-log row on an otherwise ordinary SIGTERM.
+	var stopErr *multierror.Error
+
 	for _, server := range s.dnsServers {
 		if err := server.ShutdownContext(ctx); err != nil {
-			return fmt.Errorf("stop %s listener failed: %w", server.Net, err)
+			stopErr = multierror.Append(stopErr, fmt.Errorf("stop %s listener failed: %w", server.Net, err))
 		}
 	}
 
@@ -1213,7 +1289,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.retireBundle(b)
 	}
 
-	return nil
+	return stopErr.ErrorOrNil()
 }
 
 func extractClientIDFromHost(hostName string) string {

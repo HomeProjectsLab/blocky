@@ -288,7 +288,9 @@ func (c *RedisExpiringCache[T]) loadKeysViaPipeline(ctx context.Context, keys []
 		getCmds[i] = pipe.Get(ctx, rk)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil && ctx.Err() == nil {
+	// Exec returns redis.Nil when any key expired between SCAN and GET; the
+	// per-command results below are still valid, so only real errors abort.
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, goredis.Nil) && ctx.Err() == nil {
 		return fmt.Errorf("pipeline exec: %w", err)
 	}
 

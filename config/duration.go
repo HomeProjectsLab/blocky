@@ -34,6 +34,10 @@ func (c Duration) Seconds() float64 {
 
 // SecondsU32 returns duration in seconds as uint32
 func (c Duration) SecondsU32() uint32 {
+	if s := c.Seconds(); s <= 0 {
+		return 0
+	}
+
 	return uint32(c.Seconds())
 }
 

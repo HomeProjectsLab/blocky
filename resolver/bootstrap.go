@@ -265,7 +265,16 @@ func (b *Bootstrap) resolve(ctx context.Context, hostname string, qTypes []dns.T
 	}
 
 	if err != nil {
-		return ips, fmt.Errorf("failed to resolve %s: %w", hostname, err)
+		if len(ips) > 0 {
+			// partial failure (e.g. one IP family errored): use the addresses we got
+			_, logger := b.log(ctx)
+			logger.WithError(err).Warnf("partial bootstrap resolve failure for %s, using %d resolved address(es)",
+				hostname, len(ips))
+
+			return ips, nil
+		}
+
+		return nil, fmt.Errorf("failed to resolve %s: %w", hostname, err)
 	}
 
 	return ips, nil

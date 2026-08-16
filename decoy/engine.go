@@ -438,6 +438,17 @@ func (e *Engine) Run(ctx context.Context) {
 					Info("decoy effective rate")
 			}
 
+			// Zero rate (persona cover fully met by real traffic, or a zero
+			// off-hours floor): emit nothing, but re-evaluate on a short fuse.
+			// The Exp draw at nextInterval's 0.01-QPM floor has a ~100min mean,
+			// so one over-target interval blinded the engine for the rest of the
+			// evening — exposing exactly the activity drop cover exists to hide.
+			if e.effectiveQPM() == 0 {
+				timer.Reset(coverReevalMin + time.Duration(e.rnd.Int63n(int64(coverReevalSpread))))
+
+				continue
+			}
+
 			// T10: never gate fully to zero — emit every tick. Outside active
 			// hours effectiveQPM (via nextInterval) collapses to the low
 			// always-on floor rather than stopping, so an observer can't read the
@@ -465,6 +476,14 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 	}
 }
+
+// coverReevalMin/Spread clamp the re-check interval while the effective rate is
+// 0 (cover met): 10-15s keeps the engine re-arming promptly when real traffic
+// drops, instead of the ~100min Exp draw at the 0.01-QPM floor.
+const (
+	coverReevalMin    = 10 * time.Second
+	coverReevalSpread = 5 * time.Second
+)
 
 // nextInterval draws an exponential inter-arrival time (Poisson process) for the
 // current effective rate.
@@ -1479,7 +1498,10 @@ func (e *Engine) classPersona() (querylog.ClientPersona, string, bool) {
 		return persona, "", false
 	}
 
-	class, err := e.source.ClientClass(persona.IP)
+	// client_class is keyed by client NAME (RefreshClientClasses groups on
+	// client_name) — looking up by IP matched zero rows wherever names resolve,
+	// silently disabling device-class shaping.
+	class, err := e.source.ClientClass(persona.Name)
 	if err != nil {
 		e.logger.WithError(err).Debug("client class lookup failed")
 

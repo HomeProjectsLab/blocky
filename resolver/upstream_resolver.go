@@ -53,6 +53,10 @@ const (
 	// ednsPaddingBlockSize is the block boundary outgoing queries are padded up to on encrypted
 	// transports (RFC 8467 recommends 128 bytes for client queries).
 	ednsPaddingBlockSize = 128
+
+	// dohMaxResponseSize bounds how much of a DoH response body is read; a DNS message
+	// is at most 64KiB, anything larger is a misbehaving upstream, not a valid answer.
+	dohMaxResponseSize = 64 * 1024
 )
 
 // UpstreamServerError wraps a response with RCode ServFail so no other resolver tries to use it.
@@ -279,9 +283,9 @@ func (r *httpUpstreamClient) callExternal(
 	}
 
 	defer func() {
-		// Drain body before closing to allow connection reuse
+		// Drain (bounded) body before closing to allow connection reuse
 		// See: https://pkg.go.dev/net/http#Response.Body
-		_, _ = io.Copy(io.Discard, httpResponse.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(httpResponse.Body, dohMaxResponseSize))
 		util.LogOnError(ctx, "can't close response body ", httpResponse.Body.Close())
 	}()
 
@@ -295,9 +299,13 @@ func (r *httpUpstreamClient) callExternal(
 			dnsContentType, contentType)
 	}
 
-	body, err := io.ReadAll(httpResponse.Body)
+	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, dohMaxResponseSize+1))
 	if err != nil {
 		return nil, 0, fmt.Errorf("can't read response body:  %w", err)
+	}
+
+	if len(body) > dohMaxResponseSize {
+		return nil, 0, fmt.Errorf("response body exceeds %d bytes", dohMaxResponseSize)
 	}
 
 	response := dns.Msg{}

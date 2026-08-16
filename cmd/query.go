@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -49,6 +50,10 @@ func query(cmd *cobra.Command, args []string) error {
 
 	if resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("response NOK, %s %s", resp.Status(), string(resp.Body))
+	}
+
+	if resp.JSON200 == nil {
+		return errors.New("unexpected empty query response")
 	}
 
 	log.Log().Infof("Query result for '%s' (%s):", req.Query, req.Type)

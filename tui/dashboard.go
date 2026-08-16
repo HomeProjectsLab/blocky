@@ -145,8 +145,24 @@ func (d *Dashboard) refreshLoop() {
 }
 
 func (d *Dashboard) refreshFast() {
+	// Fetch everything before taking the lock: holding d.mu across HTTP calls
+	// freezes draw/SSE/input whenever the API stalls.
 	sys, err := d.api.System()
 	v := ReadVitals()
+
+	var (
+		o          Overview
+		l          Latency
+		dirty      bool
+		oErr, lErr error
+		dirtyErr   error
+	)
+
+	if err == nil {
+		o, oErr = d.api.Overview()
+		l, lErr = d.api.LatencyPct()
+		dirty, dirtyErr = d.api.ConfigDirty()
+	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -169,15 +185,15 @@ func (d *Dashboard) refreshFast() {
 	d.connected = true
 	d.system = sys
 
-	if o, e := d.api.Overview(); e == nil {
+	if oErr == nil {
 		d.overview = o
 	}
 
-	if l, e := d.api.LatencyPct(); e == nil {
+	if lErr == nil {
 		d.latency = l
 	}
 
-	if dirty, e := d.api.ConfigDirty(); e == nil {
+	if dirtyErr == nil {
 		d.configDirty = dirty
 	}
 }

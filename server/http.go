@@ -2,13 +2,17 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
 	"github.com/go-chi/chi/v5"
+	"github.com/pires/go-proxyproto"
 	"github.com/rs/cors"
 )
 
@@ -31,28 +35,50 @@ func newHTTPServer(name string, handler http.Handler, cfg *config.Config) *httpS
 			ReadHeaderTimeout: time.Duration(readHeaderTimeout),
 			WriteTimeout:      time.Duration(writeTimeout),
 			Handler:           withCommonMiddleware(handler),
+			ConnContext:       connContext,
 		},
 
 		name: name,
 	}
 }
 
+// viaProxyProtoKey marks connections accepted through a PROXY-protocol
+// listener. Their RemoteAddr is whatever the sender wrote into the PROXY
+// header, so it must never satisfy an address-based trust decision (see the
+// loopback exemption in newSessionGate).
+type viaProxyProtoKey struct{}
+
+func connContext(ctx context.Context, c net.Conn) context.Context {
+	if tc, ok := c.(*tls.Conn); ok {
+		c = tc.NetConn()
+	}
+
+	if _, ok := c.(*proxyproto.Conn); ok {
+		return context.WithValue(ctx, viaProxyProtoKey{}, true)
+	}
+
+	return ctx
+}
+
+// viaProxyProtocol reports whether the request arrived over a PROXY-protocol
+// wrapped connection, i.e. whether its RemoteAddr is sender-claimed.
+func viaProxyProtocol(r *http.Request) bool {
+	via, _ := r.Context().Value(viaProxyProtoKey{}).(bool)
+
+	return via
+}
+
 func (s *httpServer) String() string {
 	return s.name
 }
 
-func (s *httpServer) Serve(ctx context.Context, l net.Listener) error {
-	// ctx is the server-lifetime context (Server.Start is called once with
-	// serverCtx), so the http.Server is closed only on real shutdown — a config
-	// apply swaps the resolver bundle without ever cancelling this ctx, keeping
-	// :80/:443 hot across the apply.
-	go func() {
-		<-ctx.Done()
-
-		s.inner.Close()
-	}()
-
-	if err := s.inner.Serve(l); err != nil {
+func (s *httpServer) Serve(l net.Listener) error {
+	// The server is closed synchronously by Server.Stop (inner.Close), which
+	// guarantees the listener socket is released before Stop returns — a full
+	// rebuild can then rebind the same ports without racing an async shutdown
+	// (EADDRINUSE → supervisor fatal-exit). A config apply swaps the resolver
+	// bundle without ever touching this server, keeping :80/:443 hot.
+	if err := s.inner.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("HTTP server '%s' failed to serve: %w", s.name, err)
 	}
 
@@ -97,21 +123,25 @@ func newCORSMiddleware() httpMiddleware {
 
 	options := cors.Options{
 		AllowCredentials: true,
-		// Allow all request headers: web UIs send tool-specific headers
-		// (e.g. Grafana action buttons always add 'X-Grafana-Action') and a
+		// Allow all request headers: web UIs send tool-specific headers and a
 		// disallowed header makes the preflight fail. The API attaches no
 		// security semantics to request headers, and rs/cors answers a
 		// wildcard by echoing the requested headers, which is spec-compliant
 		// also for 'Authorization'.
 		AllowedHeaders: []string{"*"},
 		AllowedMethods: []string{"GET", "POST"},
-		AllowedOrigins: []string{"*"},
-		// Allow Chromium's Private Network Access preflights, sent when a
-		// public site addresses a private IP (e.g. a hosted Grafana
-		// dashboard calling the blocky API on a LAN)
-		AllowPrivateNetwork: true,
-		ExposedHeaders:      []string{"Link"},
-		MaxAge:              int(corsMaxAge.Seconds()),
+		// Same-origin only. The previous wildcard origin (plus
+		// AllowPrivateNetwork) let any website's JS drive the API cross-origin
+		// as a drive-by (PNA preflight waived). Browsers are the only CORS
+		// enforcers, so non-browser integrations (Grafana backend datasources,
+		// curl, scripts) are unaffected by this policy.
+		AllowOriginVaryRequestFunc: func(r *http.Request, origin string) (bool, []string) {
+			u, err := url.Parse(origin)
+
+			return err == nil && u.Host == r.Host, nil
+		},
+		ExposedHeaders: []string{"Link"},
+		MaxAge:         int(corsMaxAge.Seconds()),
 	}
 
 	return cors.New(options).Handler

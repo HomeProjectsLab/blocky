@@ -117,27 +117,25 @@ func (s *Store) VerifyPassword(pw string) bool {
 }
 
 // SessionSecret returns the HMAC key for signed session cookies, generating and
-// persisting a fresh 32-byte secret on first read.
-func (s *Store) SessionSecret() []byte {
+// persisting a fresh 32-byte secret on first read. It fails closed: any read or
+// generation error returns a non-nil error and NO key — a nil/short key must
+// never reach an HMAC (an empty-key MAC is offline-forgeable).
+func (s *Store) SessionSecret() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	a, err := s.authRow()
 	if err != nil {
-		log.Log().Error("auth: ", err)
-
-		return nil
+		return nil, err
 	}
 
 	if len(a.SessionSecret) == sessionSecretLen {
-		return a.SessionSecret
+		return a.SessionSecret, nil
 	}
 
 	secret := make([]byte, sessionSecretLen)
 	if _, err := rand.Read(secret); err != nil {
-		log.Log().Error("auth: can't generate session secret: ", err)
-
-		return nil
+		return nil, fmt.Errorf("can't generate session secret: %w", err)
 	}
 
 	a.SessionSecret = secret
@@ -146,7 +144,7 @@ func (s *Store) SessionSecret() []byte {
 		log.Log().Error("auth: ", err)
 	}
 
-	return secret
+	return secret, nil
 }
 
 // RotateSessionSecret replaces the session secret, invalidating every live cookie.
