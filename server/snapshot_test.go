@@ -1,8 +1,12 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/0xERR0R/blocky/querylog"
 )
 
 // TestIsDefaultWindow checks the tolerant match that decides whether a request
@@ -32,20 +36,49 @@ func TestIsDefaultWindow(t *testing.T) {
 	}
 }
 
-// Regression: a persistently-failing refresh must not serve the last good pass
-// forever — past snapshotMaxAge the getters report not-ok so handlers fall
-// through to the live reader (which surfaces the real error).
-func TestSnapshotStalenessCap(t *testing.T) {
+// Regression (the web-UI-blocking fix): once populated, the default window is
+// ALWAYS served from the snapshot — even arbitrarily stale — so a slow/failing
+// refresh never strands a tab on an unbounded live read. Only a never-populated
+// snapshot (genuine cold boot) or a non-default window falls through.
+func TestSnapshotServesStale(t *testing.T) {
 	now := time.Now()
-	snap := &statsSnapshot{ready: true, computedAt: now}
+	from, to := now.Add(-defaultWindow), now
 
-	if _, ok := snap.getOverview(now.Add(-defaultWindow), now); !ok {
-		t.Fatal("fresh snapshot must be served")
+	// Cold boot: never populated -> not served (handler falls through to a
+	// BOUNDED live read).
+	if _, ok := (&statsSnapshot{}).getOverview(from, to); ok {
+		t.Fatal("never-populated snapshot must not be served")
 	}
 
-	snap.computedAt = now.Add(-snapshotMaxAge - time.Second)
+	// Populated, no freshness timestamp at all: still served for the default
+	// window — a stale number beats a hung tab.
+	snap := &statsSnapshot{populated: true, overview: &querylog.Overview{Queries: 7}}
 
-	if _, ok := snap.getOverview(now.Add(-defaultWindow), now); ok {
-		t.Fatal("stale snapshot must not be served")
+	ov, ok := snap.getOverview(from, to)
+	if !ok || ov == nil || ov.Queries != 7 {
+		t.Fatalf("populated snapshot must serve stale: ok=%v ov=%v", ok, ov)
+	}
+
+	// A non-default (custom) window never comes from the snapshot, populated or not.
+	if _, ok := snap.getOverview(now.Add(-7*24*time.Hour), now); ok {
+		t.Fatal("non-default window must fall through, not serve the snapshot")
+	}
+}
+
+// Regression: a request-path fall-through read is deadline-bounded — a read that
+// outlasts the timeout returns context.DeadlineExceeded fast (handler answers
+// 503) instead of hanging; a fast read returns its value.
+func TestBoundedReadDeadline(t *testing.T) {
+	if v, err := boundedRead(time.Second, func() (int, error) { return 42, nil }); err != nil || v != 42 {
+		t.Fatalf("fast read: v=%d err=%v", v, err)
+	}
+
+	_, err := boundedRead(10*time.Millisecond, func() (int, error) {
+		time.Sleep(time.Second)
+
+		return 1, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("slow read: want DeadlineExceeded, got %v", err)
 	}
 }

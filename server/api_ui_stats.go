@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -204,6 +205,57 @@ func parseTimeRange(req *http.Request) (from, to time.Time, err error) {
 	return from, to, nil
 }
 
+// uiReadTimeout fails a request-path fall-through reader call fast instead of
+// letting a heavy live aggregation hang the tab. Mirrors querylog.uiReadTimeout.
+const uiReadTimeout = 5 * time.Second
+
+// boundedRead runs a request-path fall-through reader call under a fail-fast
+// deadline. On timeout it returns context.DeadlineExceeded; the handler answers
+// 503 (writeReadErr) and the frontend retries — by then the snapshot has usually
+// warmed. The snapshot serve-stale path makes this fall-through rare (genuine
+// cold boot before preheat lands, or a non-default/custom window), so the read
+// is no longer the per-navigation pileup it was.
+//
+// ponytail: the timed-out query keeps running to completion in the background —
+// no context is threaded through the Reader query methods and their ~40 call
+// sites + tests. The CLIENT unblocks regardless, which is the fix. Upgrade path
+// if a custom-window hammer ever surfaces the lingering query as a pileup: add a
+// ctx param to the Reader methods and use r.db.WithContext(ctx) for true
+// sqlite3_interrupt cancellation (the ro pool already does this in decoy_source).
+func boundedRead[T any](timeout time.Duration, fn func() (T, error)) (T, error) {
+	type result struct {
+		v   T
+		err error
+	}
+
+	ch := make(chan result, 1)
+	go func() {
+		v, err := fn()
+		ch <- result{v, err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.v, r.err
+	case <-time.After(timeout):
+		var zero T
+
+		return zero, context.DeadlineExceeded
+	}
+}
+
+// writeReadErr answers a fall-through reader error: 503 on a fail-fast timeout
+// (the frontend retries into the warmed snapshot), 500 otherwise.
+func writeReadErr(rw http.ResponseWriter, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "stats read timed out, retry"})
+
+		return
+	}
+
+	internalError(rw, err)
+}
+
 func badRequest(rw http.ResponseWriter, err error) {
 	writeJSON(rw, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
@@ -262,9 +314,9 @@ func (s *statsAPI) overview(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	overview, err := reader.Overview(from, to)
+	overview, err := boundedRead(uiReadTimeout, func() (*querylog.Overview, error) { return reader.Overview(from, to) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -300,9 +352,9 @@ func (s *statsAPI) buckets(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	buckets, err := reader.Buckets(from, to, step)
+	buckets, err := boundedRead(uiReadTimeout, func() ([]querylog.Bucket, error) { return reader.Buckets(from, to, step) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -390,9 +442,9 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 		out := make(map[string][]querylog.TopItem, len(cols))
 
 		for _, col := range cols {
-			items, err := reader.Top(from, to, col, n)
+			items, err := boundedRead(uiReadTimeout, func() ([]querylog.TopItem, error) { return reader.Top(from, to, col, n) })
 			if err != nil {
-				badRequest(rw, err)
+				writeTopReadErr(rw, err)
 
 				return
 			}
@@ -405,14 +457,26 @@ func (s *statsAPI) top(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	items, err := reader.Top(from, to, cols[0], n)
+	items, err := boundedRead(uiReadTimeout, func() ([]querylog.TopItem, error) { return reader.Top(from, to, cols[0], n) })
 	if err != nil {
-		badRequest(rw, err)
+		writeTopReadErr(rw, err)
 
 		return
 	}
 
 	writeJSON(rw, http.StatusOK, map[string]any{"items": items})
+}
+
+// writeTopReadErr mirrors writeReadErr but maps a non-timeout error to 400: the
+// only non-timeout error Top returns is an unknown column, a client mistake.
+func writeTopReadErr(rw http.ResponseWriter, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeReadErr(rw, err)
+
+		return
+	}
+
+	badRequest(rw, err)
 }
 
 // categories is the global activity-category timeline: per-category query
@@ -451,9 +515,9 @@ func (s *statsAPI) categories(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	items, err := reader.CategoryTotals(from, to)
+	items, err := boundedRead(uiReadTimeout, func() ([]querylog.TopItem, error) { return reader.CategoryTotals(from, to) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -480,9 +544,9 @@ func (s *statsAPI) latency(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	percentiles, err := reader.LatencyPercentiles(from, to)
+	percentiles, err := boundedRead(uiReadTimeout, func() (*querylog.Percentiles, error) { return reader.LatencyPercentiles(from, to) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}

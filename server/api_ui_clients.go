@@ -392,9 +392,9 @@ func (s *statsAPI) people(rw http.ResponseWriter, req *http.Request) {
 	// read-only, so no copy is needed. The person/name overlays stay live (fresh).
 	list, ok := s.snap.getClientList(from, to)
 	if !ok {
-		list, err = reader.ClientList(from, to)
+		list, err = boundedRead(uiReadTimeout, func() ([]querylog.ClientRow, error) { return reader.ClientList(from, to) })
 		if err != nil {
-			internalError(rw, err)
+			writeReadErr(rw, err)
 
 			return
 		}
@@ -575,17 +575,17 @@ func (s *statsAPI) personas(rw http.ResponseWriter, req *http.Request) {
 	// happens to match; otherwise scan it (read-only, no copy — Build reads rows).
 	list, ok := s.snap.getClientList(from, to)
 	if !ok {
-		list, err = reader.ClientList(from, to)
+		list, err = boundedRead(uiReadTimeout, func() ([]querylog.ClientRow, error) { return reader.ClientList(from, to) })
 		if err != nil {
-			internalError(rw, err)
+			writeReadErr(rw, err)
 
 			return
 		}
 	}
 
-	cats, err := reader.CategoryTotals(from, to)
+	cats, err := boundedRead(uiReadTimeout, func() ([]querylog.TopItem, error) { return reader.CategoryTotals(from, to) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -639,9 +639,9 @@ func (s *statsAPI) clients(rw http.ResponseWriter, req *http.Request) {
 		// Snapshot slice is shared read-only; copy before overlaying DisplayName.
 		list = append([]querylog.ClientRow(nil), list...)
 	} else {
-		list, err = reader.ClientList(from, to)
+		list, err = boundedRead(uiReadTimeout, func() ([]querylog.ClientRow, error) { return reader.ClientList(from, to) })
 		if err != nil {
-			internalError(rw, err)
+			writeReadErr(rw, err)
 
 			return
 		}
@@ -675,9 +675,13 @@ func (s *statsAPI) clientDetail(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	detail, err := reader.ClientDetail(pathParam(req, "name"), from, to)
+	// Always a live read (no snapshot covers per-client drill-down): bound it so a
+	// heavy GROUP-BY + per-cluster raw scan can't hang the drill-down tab.
+	detail, err := boundedRead(uiReadTimeout, func() (*querylog.ClientDetail, error) {
+		return reader.ClientDetail(pathParam(req, "name"), from, to)
+	})
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}

@@ -3,6 +3,8 @@ package server
 import (
 	"net/http"
 	"strconv"
+
+	"github.com/0xERR0R/blocky/querylog"
 )
 
 // Noise (decoy) dashboard endpoints. They mirror /api/ui/stats but read the
@@ -28,9 +30,9 @@ func (s *statsAPI) noiseOverview(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	overview, err := reader.DecoyOverview(from, to)
+	overview, err := boundedRead(uiReadTimeout, func() (*querylog.DecoyOverview, error) { return reader.DecoyOverview(from, to) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -67,9 +69,9 @@ func (s *statsAPI) noiseBuckets(rw http.ResponseWriter, req *http.Request) {
 		step = 3600
 	}
 
-	buckets, err := reader.DecoyBuckets(from, to, step)
+	buckets, err := boundedRead(uiReadTimeout, func() ([]querylog.Bucket, error) { return reader.DecoyBuckets(from, to, step) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -90,9 +92,9 @@ func (s *statsAPI) noiseTop(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	items, err := reader.DecoyTopDomains(from, to, topN(req))
+	items, err := boundedRead(uiReadTimeout, func() ([]querylog.TopItem, error) { return reader.DecoyTopDomains(from, to, topN(req)) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}
@@ -113,9 +115,9 @@ func (s *statsAPI) noiseSourceMix(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	items, err := reader.DecoySourceMix(from, to)
+	items, err := boundedRead(uiReadTimeout, func() ([]querylog.TopItem, error) { return reader.DecoySourceMix(from, to) })
 	if err != nil {
-		internalError(rw, err)
+		writeReadErr(rw, err)
 
 		return
 	}

@@ -49,13 +49,6 @@ const (
 	// in its single /stats/top call (at defaultTopN). Only this batch is
 	// preheated; any other column/n computes live.
 	defaultTopCols = "domain,blocked,client,transport"
-
-	// snapshotMaxAge caps how stale a published snapshot may be served. A
-	// persistently-failing reader used to keep ready=true forever, silently
-	// freezing every default-window /stats endpoint on the last good pass;
-	// past this age handlers fall through to the live reader, surfacing the
-	// real error. ~3 missed passes of headroom.
-	snapshotMaxAge = 3 * snapshotRefresh
 )
 
 // isDefaultWindow reports whether [from,to] is the preheated default window.
@@ -71,11 +64,21 @@ func isDefaultWindow(from, to time.Time) bool {
 }
 
 type statsSnapshot struct {
-	mu           sync.RWMutex
-	ready        bool
-	computedAt   time.Time // when the published snapshot was computed (staleness cap)
-	catReady     bool      // categories were computed this pass (profiling on)
-	personaReady bool      // persona rollup was computed this pass (profiling on)
+	mu sync.RWMutex
+	// populated flips true after the first successful publish and NEVER back.
+	// The default window is then always served from the last-published value —
+	// STALE is fine (up to a refresh interval old), a hung tab is not. A slow or
+	// persistently-failing refresh no longer strands the box on unbounded live
+	// reads: it just serves the last good pass while the refresher keeps retrying.
+	// Only a genuine cold boot (never populated) or a non-default window falls
+	// through to the bounded live reader (see boundedRead in api_ui_stats.go).
+	populated bool
+	// catPopulated / personaPopulated are the profiling-gated equivalents: set
+	// once their profiling-on read has published at least once, kept across a
+	// later profiling-off pass (the handler gates those endpoints on profiling,
+	// so a stale value is never served while profiling is off).
+	catPopulated     bool
+	personaPopulated bool
 
 	overview   *querylog.Overview
 	buckets    []querylog.Bucket
@@ -91,16 +94,13 @@ type statsSnapshot struct {
 	stopOnce sync.Once
 }
 
-// invalidate drops the published snapshot (so stale data — e.g. a just-purged
-// query log — is never served) and kicks an immediate refresh instead of
-// waiting out the ticker. Handlers fall through to the live reader meanwhile.
+// invalidate kicks an immediate refresh instead of waiting out the ticker (used
+// after a purge, so the emptied log is republished within seconds). It does NOT
+// drop the populated flag: the last-published value keeps being served meanwhile
+// rather than forcing every tab onto an unbounded live read. The tradeoff is that
+// just-purged numbers may show for the ~second the kicked refresh takes — a stale
+// count is cheap; a hung dashboard is not.
 func (snap *statsSnapshot) invalidate() {
-	snap.mu.Lock()
-	snap.ready = false
-	snap.catReady = false
-	snap.personaReady = false
-	snap.mu.Unlock()
-
 	select {
 	case snap.kick <- struct{}{}:
 	default: // refresh already pending
@@ -239,19 +239,22 @@ func (snap *statsSnapshot) refresh(s *statsAPI) {
 	snap.latency = latency
 	snap.clientList = clientList
 	snap.noise = noise
-	snap.categories = cats
-	snap.catReady = catReady
-	snap.personas = personas
-	snap.personaReady = personaReady
-	snap.ready = true
-	snap.computedAt = time.Now()
-	snap.mu.Unlock()
-}
+	snap.populated = true
+	// Publish the profiling-gated reads only when they were recomputed this pass
+	// (profiling on + the read succeeded). A profiling-off pass leaves the last
+	// good cats/personas in place — harmless, since their endpoints return
+	// {enabled:false} while profiling is off — so profiling-on tabs keep serving
+	// stale instead of falling through to a live rebuild.
+	if catReady {
+		snap.categories = cats
+		snap.catPopulated = true
+	}
 
-// fresh reports whether the published snapshot is recent enough to serve.
-// Caller must hold snap.mu.
-func (snap *statsSnapshot) fresh() bool {
-	return snap.ready && time.Since(snap.computedAt) <= snapshotMaxAge
+	if personaReady {
+		snap.personas = personas
+		snap.personaPopulated = true
+	}
+	snap.mu.Unlock()
 }
 
 func (snap *statsSnapshot) getOverview(from, to time.Time) (*querylog.Overview, bool) {
@@ -262,7 +265,7 @@ func (snap *statsSnapshot) getOverview(from, to time.Time) (*querylog.Overview, 
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.overview, snap.fresh()
+	return snap.overview, snap.populated
 }
 
 func (snap *statsSnapshot) getBuckets(from, to time.Time, step int64) ([]querylog.Bucket, bool) {
@@ -273,7 +276,7 @@ func (snap *statsSnapshot) getBuckets(from, to time.Time, step int64) ([]querylo
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.buckets, snap.fresh()
+	return snap.buckets, snap.populated
 }
 
 func (snap *statsSnapshot) getTop(from, to time.Time, colParam string, n int) (map[string][]querylog.TopItem, bool) {
@@ -284,7 +287,7 @@ func (snap *statsSnapshot) getTop(from, to time.Time, colParam string, n int) (m
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.top, snap.fresh()
+	return snap.top, snap.populated
 }
 
 func (snap *statsSnapshot) getCategories(from, to time.Time) ([]querylog.TopItem, bool) {
@@ -295,7 +298,7 @@ func (snap *statsSnapshot) getCategories(from, to time.Time) ([]querylog.TopItem
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.categories, snap.catReady && snap.fresh()
+	return snap.categories, snap.catPopulated
 }
 
 func (snap *statsSnapshot) getPersonas(from, to time.Time) (*querylog.PersonaRollup, bool) {
@@ -306,7 +309,7 @@ func (snap *statsSnapshot) getPersonas(from, to time.Time) (*querylog.PersonaRol
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.personas, snap.personaReady && snap.fresh()
+	return snap.personas, snap.personaPopulated
 }
 
 func (snap *statsSnapshot) getLatency(from, to time.Time) (*querylog.Percentiles, bool) {
@@ -317,7 +320,7 @@ func (snap *statsSnapshot) getLatency(from, to time.Time) (*querylog.Percentiles
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.latency, snap.fresh()
+	return snap.latency, snap.populated
 }
 
 // getClientList returns the shared default-window client list. It backs both
@@ -331,7 +334,7 @@ func (snap *statsSnapshot) getClientList(from, to time.Time) ([]querylog.ClientR
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.clientList, snap.fresh()
+	return snap.clientList, snap.populated
 }
 
 func (snap *statsSnapshot) getNoise(from, to time.Time) (*querylog.DecoyOverview, bool) {
@@ -342,5 +345,5 @@ func (snap *statsSnapshot) getNoise(from, to time.Time) (*querylog.DecoyOverview
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.noise, snap.fresh()
+	return snap.noise, snap.populated
 }
