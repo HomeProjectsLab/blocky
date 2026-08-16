@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
@@ -29,6 +30,11 @@ type clientClassifier interface {
 	ClientName(client string) (string, error)
 	ClientNames() (map[string]string, error)
 	SetClientName(client, name string) error
+	// Person mapping (Phase 5, opt-in-within-opt-in — most sensitive). Mirrors
+	// the name-override methods; gated behind the profiling toggle by the handler.
+	ClientPerson(client string) (string, error)
+	ClientPersons() (map[string]string, error)
+	SetClientPerson(client, person string) error
 	// Presence profiling (opt-in). RefreshClientProfiles is the heavy off-request
 	// recompute; ClientProfile is a cheap PK read; PurgeProfiles wipes it all.
 	RefreshClientProfiles() error
@@ -177,6 +183,201 @@ func (s *statsAPI) putClientName(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	rw.WriteHeader(http.StatusNoContent)
+}
+
+// profilingOn reports whether the opt-in profiling toggle is enabled. Person
+// mapping is the most-sensitive sub-feature and rides the same opt-in gate: OFF
+// by default, so nothing here profiles a household member until the operator
+// explicitly turns profiling on. (A dedicated Profiling.Person sub-toggle would
+// live in config/privacy.go + privacy.js — Phase 3 files, out of this phase.)
+func (s *statsAPI) profilingOn() bool {
+	if s.store == nil {
+		return false
+	}
+
+	cfg, err := s.store.GetPrivacy()
+
+	return err == nil && cfg.Profiling.Enable
+}
+
+// putClientPerson maps a client to a named household member (or clears it with a
+// blank person). This is the most sensitive layer: gated behind the profiling
+// opt-in (503 when off), and — like naming — rejected for a NAT/shared aggregate,
+// where the mapped unit would be a shared IP, not a person (blueprint P1/R3).
+func (s *statsAPI) putClientPerson(rw http.ResponseWriter, req *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "device identity not available"})
+
+		return
+	}
+
+	if !s.profilingOn() {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "profiling is off — enable it in Privacy first"})
+
+		return
+	}
+
+	var body struct {
+		Person string `json:"person"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	client := chi.URLParam(req, "client")
+
+	// P1: a shared/NAT identity must not carry a per-person mapping. Same enrich
+	// gate as naming; the reader is optional so skip the gate if absent.
+	if reader, err := s.getReader(); err == nil && reader != nil {
+		from, to, terr := parseTimeRange(req)
+		if terr == nil {
+			if shared, serr := reader.ClientIsShared(client, from, to); serr == nil && shared {
+				badRequest(rw, errShared)
+
+				return
+			}
+		}
+	}
+
+	if err := s.classifier.SetClientPerson(client, body.Person); err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+// personClient is one device attributed to a person: its windowed activity, plus
+// a Shared flag when it is a NAT aggregate (P1 — the operator should un-map it,
+// so it is still listed, just flagged).
+type personClient struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Queries     int64  `json:"queries"`
+	Blocked     int64  `json:"blocked"`
+	Shared      bool   `json:"shared,omitempty"`
+}
+
+// personFootprint is one household member's rolled-up activity: the sum over
+// every device mapped to them, plus those devices.
+type personFootprint struct {
+	Person  string         `json:"person"`
+	Queries int64          `json:"queries"`
+	Blocked int64          `json:"blocked"`
+	Clients []personClient `json:"clients"`
+}
+
+// people rolls up per-client activity (summed from agg_hourly by ClientList) into
+// per-person footprints — Phase 5, the most-sensitive layer. It profiles NAMED
+// household members who did not consent, so it is gated behind the profiling
+// opt-in and returns a bare {enabled:false} until profiling is turned on. The
+// arithmetic is a plain Go rollup; the reliability caveats (NAT, rename) are
+// carried as flags/UI copy, not silently absorbed.
+func (s *statsAPI) people(rw http.ResponseWriter, req *http.Request) {
+	if s.classifier == nil {
+		writeJSON(rw, http.StatusServiceUnavailable, map[string]string{"error": "device identity not available"})
+
+		return
+	}
+
+	if !s.profilingOn() {
+		writeJSON(rw, http.StatusOK, map[string]any{"enabled": false})
+
+		return
+	}
+
+	reader := s.readerOr503(rw)
+	if reader == nil {
+		return
+	}
+
+	from, to, err := parseTimeRange(req)
+	if err != nil {
+		badRequest(rw, err)
+
+		return
+	}
+
+	list, err := reader.ClientList(from, to)
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	persons, err := s.classifier.ClientPersons() // client_name -> person
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	names, _ := s.classifier.ClientNames() // best-effort display-name overlay
+
+	byPerson := map[string]*personFootprint{}
+	seen := map[string]bool{}
+
+	var unassigned []personClient
+
+	getFP := func(person string) *personFootprint {
+		fp := byPerson[person]
+		if fp == nil {
+			fp = &personFootprint{Person: person}
+			byPerson[person] = fp
+		}
+
+		return fp
+	}
+
+	for _, c := range list {
+		seen[c.Name] = true
+		pc := personClient{
+			Name: c.Name, DisplayName: names[c.Name],
+			Queries: c.Queries, Blocked: c.Blocked,
+			Shared: c.Shared || c.NatAggregate,
+		}
+
+		person := persons[c.Name]
+		if person == "" {
+			unassigned = append(unassigned, pc)
+
+			continue
+		}
+
+		fp := getFP(person)
+		fp.Queries += c.Queries
+		fp.Blocked += c.Blocked
+		fp.Clients = append(fp.Clients, pc)
+	}
+
+	// Mapped-but-idle devices (no traffic in the window) still appear under their
+	// person with zero counts, so every mapping stays visible and un-mappable —
+	// this is the purgeable, most-sensitive layer.
+	for client, person := range persons {
+		if seen[client] {
+			continue
+		}
+
+		fp := getFP(person)
+		fp.Clients = append(fp.Clients, personClient{Name: client, DisplayName: names[client]})
+	}
+
+	out := make([]*personFootprint, 0, len(byPerson))
+	for _, fp := range byPerson {
+		out = append(out, fp)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Queries > out[j].Queries })
+
+	writeJSON(rw, http.StatusOK, map[string]any{
+		"enabled":    true,
+		"people":     out,
+		"unassigned": unassigned,
+	})
 }
 
 // Clients + privacy UI endpoints. Registered alongside the other stats

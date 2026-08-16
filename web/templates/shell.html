@@ -33,6 +33,7 @@
             <a href="/queries" {{if eq .Page "queries"}}aria-current="page"{{end}}>Queries</a>
             <a href="/noise" {{if eq .Page "noise"}}aria-current="page"{{end}}>Noise</a>
             <a href="/clients" {{if eq .Page "clients"}}aria-current="page"{{end}}>Clients</a>
+            <a href="/people" {{if eq .Page "people"}}aria-current="page"{{end}}>People</a>
             <a href="/upstreams" {{if eq .Page "upstreams"}}aria-current="page"{{end}}>Upstreams</a>
             <a href="/blocking" {{if eq .Page "blocking"}}aria-current="page"{{end}}>Blocking</a>
             <a href="/groups" {{if eq .Page "groups"}}aria-current="page"{{end}}>Groups</a>
@@ -308,6 +309,27 @@
         <div class="drawer-head"><h2 id="cl-drawer-title">Client</h2><button id="cl-drawer-close" aria-label="Close detail">✕</button></div>
         <div id="cl-detail"></div>
     </aside>
+{{else if eq .Page "people"}}
+    <div class="page-head"><h1>People</h1></div>
+    <section class="panel">
+        <p class="empty"><strong>This is the most sensitive layer.</strong> Mapping a device to a person profiles a <strong>named household member who did not consent</strong> — their activity is rolled up under their name. It is local-only, never exported, and fully purgeable: clear a mapping by assigning a blank name, or turn profiling off in Privacy to hide this page entirely. A shared / NAT address can't be mapped — the traffic there belongs to many devices, not one person. Renaming a device <em>detaches</em> its history from the mapping (the map is keyed on the device name), so old activity stays under the previous name.</p>
+        <p class="empty" id="pp-status" hidden></p>
+    </section>
+    <section class="panel">
+        <h2>Footprints</h2>
+        <div id="pp-people"><p class="empty">Loading…</p></div>
+    </section>
+    <section class="panel">
+        <h2>Unmapped devices</h2>
+        <p class="empty">Assign a device to a household member, or leave it unmapped. Figures are for the last 24h.</p>
+        <div class="wire-scroll">
+            <table class="wire" id="pp-table">
+                <thead><tr><th>device</th><th class="num">queries</th><th class="num">blocked</th><th></th></tr></thead>
+                <tbody id="pp-body"></tbody>
+            </table>
+        </div>
+        <p class="empty" id="pp-empty" hidden>No devices to map in the last 24h.</p>
+    </section>
 {{else if eq .Page "localdns"}}
     <div class="page-head">
         <h1>Local DNS</h1>

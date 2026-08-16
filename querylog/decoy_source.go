@@ -1479,6 +1479,53 @@ func (s *DecoySource) SetClientName(client, name string) error {
 	}).Create(&clientIdentity{Client: client, Name: name, UpdatedAt: now}).Error
 }
 
+// ClientPerson returns the household-member mapping for client, or "" when none
+// is set. One primary-key lookup. Mirrors ClientName. Phase 5 — the most
+// sensitive layer; callers gate on the profiling opt-in before exposing it.
+func (s *DecoySource) ClientPerson(client string) (string, error) {
+	var person string
+
+	err := s.db.Raw("SELECT person FROM client_person WHERE client = ? LIMIT 1", client).Scan(&person).Error
+
+	return person, err
+}
+
+// ClientPersons returns every set device→person mapping as client_name→person,
+// so the people page can roll up per-person footprints in one query. Mirrors
+// ClientNames.
+func (s *DecoySource) ClientPersons() (map[string]string, error) {
+	var rows []clientPerson
+	if err := s.db.Raw("SELECT client, person FROM client_person WHERE person <> ''").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		out[r.Client] = r.Person
+	}
+
+	return out, nil
+}
+
+// SetClientPerson sets (or clears, with a blank person) the household-member
+// mapping for client. The person label is sanitized (rendered in the UI) and
+// capped like a display name. Mirrors SetClientName: upsert, creates the row if
+// the client has no mapping yet. A client_name rename detaches the mapping from
+// the device's old-name history (blueprint R6/C3) — the UI warns before a rename.
+func (s *DecoySource) SetClientPerson(client, person string) error {
+	if client == "" {
+		return errors.New("client must not be empty")
+	}
+
+	person = sanitizeDisplayName(person)
+	now := time.Now()
+
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "client"}},
+		DoUpdates: clause.Assignments(map[string]any{"person": person, "updated_at": now}),
+	}).Create(&clientPerson{Client: client, Person: person, UpdatedAt: now}).Error
+}
+
 // qtypeFromString maps a stored question_type string ("A", "AAAA", "HTTPS", …)
 // to its DNS type code, defaulting to A on an unknown/empty token. (querylog
 // can't import decoy's identical helper — that would be an import cycle.)

@@ -314,6 +314,7 @@ var uiPages = []struct {
 	{"/queries", "queries", "Queries"},
 	{"/noise", "noise", "Noise"},
 	{"/clients", "clients", "Clients"},
+	{"/people", "people", "People"},
 	{"/upstreams", "upstreams", "Upstreams"},
 	{"/blocking", "blocking", "Blocking"},
 	{"/groups", "groups", "Groups"},
