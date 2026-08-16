@@ -250,6 +250,13 @@
           "type": "boolean",
           "description": "If true, queries for types not defined for a domain return empty; if false, they are forwarded upstream.",
           "default": true
+        },
+        "nxdomain": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Domains answered with NXDOMAIN (name error) instead of a record. Exact match\nonly. Use for signals that require a real NXDOMAIN rather than a 0.0.0.0 block\n— e.g. Firefox's use-application-dns.net canary, which disables DoH only on\nNXDOMAIN. Matched before the zone/mapping."
         }
       },
       "additionalProperties": false,
@@ -1832,6 +1839,16 @@
               "description": "re-emit corpus/replay domains on their learned revisit interval (jittered) instead of flat random",
               "default": true
             },
+            "cohortJitterMs": {
+              "type": "integer",
+              "description": "Cohort-replay perturbation: keep the recorded texture but break the exact\n1:1 echo — jitter each sub-resource offset (the re-sort turns overlapping\njitter into small run-to-run reordering) and splice in a small % companion.",
+              "default": 120
+            },
+            "cohortCompanionPct": {
+              "type": "integer",
+              "description": "% of cohort replays that splice in one unrelated companion at a random point in the load",
+              "default": 15
+            },
             "personaCover": {
               "type": "boolean",
               "description": "Compensating persona cover (#8): TOTAL egress tracks a household diurnal\ntarget curve, so decoy_rate(t) = max(0, targetCurve(t) − recentRealQPM).\nThis hides the activity LEVEL (not just which queries are real) without\ndelaying real queries — the box always looks like a generic household on\nthe wire. When off, the engine falls back to the reactive/diurnal path.\n\nResidual: real usage ABOVE the peak ceiling still spikes total egress — the\ncurve hides level only up to targetQpmPeak, by design (a truly constant\nmax-rate cover would cost fixed bandwidth we don't pay on a home box).",
@@ -1972,6 +1989,21 @@
           "type": "boolean",
           "description": "QueryCaseRandomization applies DNS 0x20 case randomization (draft-vixie-dnsext-dns0x20)\nto outgoing forwarded queries: each ASCII letter of the question name is independently\nupper/lower-cased on the wire, the upstream must echo the exact case (spoofing defense),\nand the answer is normalized back to the client's case. Forwarding path only; the\nrecursive (zdns) path ignores it until the documented zdns fork lands.",
           "default": false
+        },
+        "profiling": {
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "default": false
+            },
+            "tz": {
+              "type": "string",
+              "description": "IANA name (e.g. \"Europe/Zurich\"); empty = UTC"
+            }
+          },
+          "additionalProperties": false,
+          "type": "object",
+          "description": "Profiling is the opt-in, default-OFF presence/sleep/work analysis. Local-only,\nnever exported. See ProfilingConfig."
         },
         "shadowBlockedQueries": {
           "type": "boolean",

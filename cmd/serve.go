@@ -258,20 +258,27 @@ func stopServerGracefully(srv *server.Server) {
 	util.LogOnError(stopCtx, "can't stop server: ", srv.Stop(stopCtx))
 }
 
+// banner is the JungleBlock startup wordmark (ANSI Shadow, "JUNGLE" over
+// "BLOCK"). Box-drawing + block glyphs only — no backticks/backslashes — so it
+// lives happily in a raw string literal.
+const banner = `
+     ██╗██╗   ██╗███╗   ██╗ ██████╗ ██╗     ███████╗
+     ██║██║   ██║████╗  ██║██╔════╝ ██║     ██╔════╝
+     ██║██║   ██║██╔██╗ ██║██║  ███╗██║     █████╗
+██   ██║██║   ██║██║╚██╗██║██║   ██║██║     ██╔══╝
+╚█████╔╝╚██████╔╝██║ ╚████║╚██████╔╝███████╗███████╗
+ ╚════╝  ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚══════╝
+██████╗ ██╗      ██████╗  ██████╗██╗  ██╗
+██╔══██╗██║     ██╔═══██╗██╔════╝██║ ██╔╝
+██████╔╝██║     ██║   ██║██║     █████╔╝
+██╔══██╗██║     ██║   ██║██║     ██╔═██╗
+██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗
+╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝`
+
 func printBanner() {
-	log.Log().Info("_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/")
-	log.Log().Info("_/                                                              _/")
-	log.Log().Info("_/                                                              _/")
-	log.Log().Info("_/       _/        _/                      _/                   _/")
-	log.Log().Info("_/      _/_/_/    _/    _/_/      _/_/_/  _/  _/    _/    _/    _/")
-	log.Log().Info("_/     _/    _/  _/  _/    _/  _/        _/_/      _/    _/     _/")
-	log.Log().Info("_/    _/    _/  _/  _/    _/  _/        _/  _/    _/    _/      _/")
-	log.Log().Info("_/   _/_/_/    _/    _/_/      _/_/_/  _/    _/    _/_/_/       _/")
-	log.Log().Info("_/                                                    _/        _/")
-	log.Log().Info("_/                                               _/_/           _/")
-	log.Log().Info("_/                                                              _/")
-	log.Log().Info("_/                                                              _/")
-	log.Log().Infof("_/  Version: %-18s Build time: %-18s  _/", util.Version, util.BuildTime)
-	log.Log().Info("_/                                                              _/")
-	log.Log().Info("_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/")
+	for _, line := range strings.Split(strings.Trim(banner, "\n"), "\n") {
+		log.Log().Info(line)
+	}
+	log.Log().Info("  🌴 JungleBlock — a wilder DNS  🦍")
+	log.Log().Infof("     Version: %s   Build time: %s", util.Version, util.BuildTime)
 }
