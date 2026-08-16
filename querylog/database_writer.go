@@ -193,6 +193,28 @@ func (d *DatabaseWriter) buildDeferredIndexes(ctx context.Context) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
+	// SIZE GUARD: a full VACUUM (whole-file rewrite) or a big CREATE INDEX on a large
+	// query log can exceed a low-RAM box's memory/IO budget and never commit before
+	// the container is OOM-killed — which rolls the work back and re-runs it from
+	// scratch on every boot (a crash loop that pins the disk at write ceiling and
+	// leaves the box unresponsive under an exclusive lock). Above a size ceiling we
+	// skip this one-time maintenance entirely: the box stays responsive, just without
+	// the incremental-vacuum reclaim and the etldp sampler index (a slower decoy
+	// sampler, not a correctness loss). Trim the log below the ceiling to re-enable.
+	var pageCount, pageSize int64
+
+	d.db.Raw("PRAGMA page_count").Scan(&pageCount)
+	d.db.Raw("PRAGMA page_size").Scan(&pageSize)
+
+	const heavyMaintenanceCeilingBytes = 256 << 20 // 256 MiB
+
+	if dbBytes := pageCount * pageSize; dbBytes > heavyMaintenanceCeilingBytes {
+		logger.Warnf("query log is %d MiB (over the %d MiB ceiling) — skipping deferred VACUUM + index build to avoid a low-RAM stall/crash-loop; trim the log to re-enable",
+			dbBytes>>20, heavyMaintenanceCeilingBytes>>20)
+
+		return
+	}
+
 	// One-time: apply INCREMENTAL auto_vacuum (the disk guardian's incremental_vacuum
 	// needs it). VACUUM rewrites the whole file; gated so every later boot is a cheap
 	// PRAGMA read once mode==2.
