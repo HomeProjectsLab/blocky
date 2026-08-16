@@ -12,7 +12,7 @@
 {{if eq .Page "login"}}
 <main class="auth-main">
     <div class="auth-card">
-        <a class="wordmark" href="/">JungleBlock<span class="wordmark-star">*</span></a>
+        <a class="wordmark" href="/"><span class="wordmark-name">JungleBlock<span class="wordmark-star">*</span></span><small class="wordmark-sub">a wilder DNS</small></a>
         <h1 id="auth-title">Sign in</h1>
         <form id="auth-form" autocomplete="on">
             <input type="password" id="auth-pw" autocomplete="current-password" placeholder="Password" required>
@@ -26,7 +26,7 @@
 {{else}}
 <header class="shell-header">
     <div class="shell-bar">
-        <a class="wordmark" href="/">JungleBlock<span class="wordmark-star">*</span></a>
+        <a class="wordmark" href="/"><span class="wordmark-name">JungleBlock<span class="wordmark-star">*</span></span><small class="wordmark-sub">a wilder DNS</small></a>
         <nav class="shell-nav" aria-label="Main">
             {{range .Nav}}
             <div class="nav-group" role="group" aria-label="{{.Category}}">

@@ -130,10 +130,16 @@ func panelTitle(s tcell.Screen, r Rect, snap *snapshot) {
 		setCell(s, x, r.Y, ' ', styBar)
 	}
 
-	left := fmt.Sprintf(" JungleBlock %s  up %s  %s", snap.system.Version, fmtUptime(snap.system.UptimeSeconds), snap.base)
+	brand := fmt.Sprintf(" JungleBlock %s", snap.system.Version)
+	tag := "  a wilder DNS"
+	info := fmt.Sprintf("  up %s  %s", fmtUptime(snap.system.UptimeSeconds), snap.base)
 	right := timeNow().Format("2006-01-02 15:04:05 ")
 
-	drawText(s, r.X, r.Y, styBar, trunc(left, r.W))
+	// dim tagline keeps the bar background so it blends into the header band
+	styBarSub := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue).Dim(true)
+	drawText(s, r.X, r.Y, styBar, trunc(brand, r.W))
+	drawText(s, r.X+len(brand), r.Y, styBarSub, trunc(tag, r.W-len(brand)))
+	drawText(s, r.X+len(brand)+len(tag), r.Y, styBar, trunc(info, r.W-len(brand)-len(tag)))
 	if r.W > len(right) {
 		drawText(s, r.X+r.W-len(right), r.Y, styBar, right)
 	}

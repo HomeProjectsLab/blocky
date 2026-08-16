@@ -81,8 +81,13 @@ a { color: var(--accent); }
     font-family: var(--font-display);
     font-size: 1.25rem; font-weight: 700; letter-spacing: 0.04em;
     color: var(--ink); text-decoration: none;
+    display: inline-flex; flex-direction: column; line-height: 1.05;
 }
 .wordmark-star { color: var(--c-blocked); }
+.wordmark-sub {
+    font-size: 0.62rem; font-weight: 400; letter-spacing: 0.08em;
+    color: var(--muted); text-transform: none;
+}
 .shell-nav { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 .shell-nav a {
     color: var(--ink2); text-decoration: none;
