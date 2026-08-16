@@ -307,13 +307,16 @@ func newLoginLimiter() *loginLimiter {
 	return &loginLimiter{fails: map[string]failEntry{}}
 }
 
-// tryAcquire atomically checks the lockout AND charges one attempt, so the
-// charge lands BEFORE the caller runs the expensive argon2 verification.
-// Charging up front closes the TOCTOU where a concurrent burst all read
-// count==0, all pass a separate locked() check, and each pays a 64 MiB hash:
-// at most maxLoginFails attempts per IP can ever reach the hash per window.
-// A successful login refunds the charge via reset.
-func (l *loginLimiter) tryAcquire(ip string) bool {
+func (l *loginLimiter) locked(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	e := l.fails[ip]
+
+	return e.count >= maxLoginFails && time.Now().Before(e.until)
+}
+
+func (l *loginLimiter) recordFail(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -330,10 +333,6 @@ func (l *loginLimiter) tryAcquire(ip string) bool {
 	}
 
 	e := l.fails[ip]
-	if e.count >= maxLoginFails && now.Before(e.until) {
-		return false
-	}
-
 	e.count++
 	e.until = now.Add(lockoutWindow)
 	l.fails[ip] = e
@@ -343,8 +342,6 @@ func (l *loginLimiter) tryAcquire(ip string) bool {
 			WithField("window", lockoutWindow.String()).
 			Warn("login lockout triggered for IP")
 	}
-
-	return true
 }
 
 func (l *loginLimiter) reset(ip string) {
@@ -398,19 +395,6 @@ func decodePassword(r *http.Request) (string, bool) {
 }
 
 func (a *authAPI) setup(w http.ResponseWriter, r *http.Request) {
-	// CSRF/Host guard: isPublic exempts /api/ui/auth/* from the session gate,
-	// so without this a cross-origin no-cors POST from any page the owner
-	// visits could seize admin on a fresh/reset install and lock them out.
-	// Same loopback exemption as the gate (on-box provisioning stays possible,
-	// never for sender-claimed PROXY-protocol addresses).
-	if !sameOrigin(r) && !(isLoopback(r.RemoteAddr) && !viaProxyProtocol(r)) {
-		authLog().WithField("client_ip", util.Obfuscate(requestIP(r))).
-			Warn("cross-origin setup rejected (CSRF guard)")
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request rejected"})
-
-		return
-	}
-
 	if a.store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config store not available"})
 
@@ -467,10 +451,7 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 		ip = "proxy-protocol"
 	}
 
-	// Charge the attempt BEFORE the argon2 hash (refunded on success below):
-	// a check-then-record pair would let a concurrent unauthenticated burst all
-	// pass the check and stack 64 MiB derivations.
-	if !a.limiter.tryAcquire(ip) {
+	if a.limiter.locked(ip) {
 		authLog().WithField("client_ip", obfIP).Warn("login rejected: IP is locked out")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
 
@@ -479,6 +460,7 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 
 	pw, ok := decodePassword(r)
 	if !ok || !a.store.VerifyPassword(pw) {
+		a.limiter.recordFail(ip)
 		authLog().WithField("client_ip", obfIP).Warn("login failed: invalid password")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 

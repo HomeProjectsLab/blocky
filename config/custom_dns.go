@@ -47,10 +47,7 @@ func (z *ZoneFileDNS) UnmarshalYAML(unmarshal func(any) error) error {
 	result := make(CustomDNSMapping)
 
 	zoneParser := dns.NewZoneParser(strings.NewReader(input), "", z.configPath)
-	// $INCLUDE reads arbitrary local files. Only the disk-load path (which sets
-	// configPath) may use it; the web/validate pipeline (empty configPath) must
-	// not become a local-file probe.
-	zoneParser.SetIncludeAllowed(z.configPath != "")
+	zoneParser.SetIncludeAllowed(true)
 
 	for {
 		zoneRR, ok := zoneParser.Next()

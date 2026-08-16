@@ -84,66 +84,31 @@ var defaultOnCategories = map[string]bool{
 	"scam": true, "ransomware": true, "fraud": true,
 }
 
-// seedBlockingCategories reconciles blocking_category rows with the embedded
-// blocklist categories on Open: missing ones are inserted (the default set
-// pre-enabled), rows for categories no longer embedded are removed together
-// with their segment/group references — so upgraded installs pick up new
-// categories and stop emitting dangling "blocklist:<cat>" sources. The table
-// is a few dozen rows; this is a cheap boot-time pass.
+// seedBlockingCategories inserts one row per embedded blocklist category when
+// the table is empty, pre-enabling the default set.
 func seedBlockingCategories(db *gorm.DB) error {
-	cats, err := lists.EmbeddedCategories()
-	if err != nil || len(cats) == 0 {
-		// no embedded lists in this build: nothing to reconcile, blocking stays YAML-driven
-		return nil //nolint:nilerr
-	}
-
-	var existing []BlockingCategory
-	if err := db.Find(&existing).Error; err != nil {
+	var count int64
+	if err := db.Model(&BlockingCategory{}).Count(&count).Error; err != nil {
 		return fmt.Errorf("can't read blocking categories: %w", err)
 	}
 
-	have := make(map[string]bool, len(existing))
-	for _, c := range existing {
-		have[c.Name] = true
+	if count > 0 {
+		return nil
 	}
 
-	embedded := make(map[string]bool, len(cats))
+	cats, err := lists.EmbeddedCategories()
+	if err != nil || len(cats) == 0 {
+		// no embedded lists in this build: nothing to seed, blocking stays YAML-driven
+		return nil //nolint:nilerr
+	}
+
 	rows := make([]BlockingCategory, 0, len(cats))
-
 	for _, c := range cats {
-		embedded[c] = true
-
-		if !have[c] {
-			rows = append(rows, BlockingCategory{Name: c, Enabled: defaultOnCategories[c], IsDefault: defaultOnCategories[c]})
-		}
+		rows = append(rows, BlockingCategory{Name: c, Enabled: defaultOnCategories[c], IsDefault: defaultOnCategories[c]})
 	}
 
-	if len(rows) > 0 {
-		if err := db.Create(&rows).Error; err != nil {
-			return fmt.Errorf("can't seed blocking categories: %w", err)
-		}
-	}
-
-	var removed []string
-
-	for _, c := range existing {
-		if !embedded[c.Name] {
-			removed = append(removed, c.Name)
-		}
-	}
-
-	if len(removed) > 0 {
-		if err := db.Where("name IN ?", removed).Delete(&BlockingCategory{}).Error; err != nil {
-			return fmt.Errorf("can't remove stale blocking categories: %w", err)
-		}
-
-		if err := db.Where("category IN ?", removed).Delete(&BlockingClientSegment{}).Error; err != nil {
-			return fmt.Errorf("can't remove stale blocking segments: %w", err)
-		}
-
-		if err := db.Where("category IN ?", removed).Delete(&BlockingGroupCategory{}).Error; err != nil {
-			return fmt.Errorf("can't remove stale group categories: %w", err)
-		}
+	if err := db.Create(&rows).Error; err != nil {
+		return fmt.Errorf("can't seed blocking categories: %w", err)
 	}
 
 	return nil
@@ -294,18 +259,11 @@ func overlayBlocking(cfg *config.Config, b *blockingRows) {
 			continue
 		}
 
-		// a memberless group is referenced by no client: emitting its category
-		// sources would still load every list into NewListCache — hundreds of MB
-		// of dead tries on the 1GB Pi.
-		members := membersByGroup[grp.Name]
-		if len(members) == 0 {
-			continue
-		}
-
 		for _, cat := range groupCats[grp.Name] {
 			deny[grp.Name] = append(deny[grp.Name], blocklistSource(cat)...)
 		}
 
+		members := membersByGroup[grp.Name]
 		for _, client := range members {
 			cgb[client] = append(cgb[client], grp.Name)
 		}
@@ -314,7 +272,7 @@ func overlayBlocking(cfg *config.Config, b *blockingRows) {
 		// group-scoped allow/deny) leaves deny[g] AND allow[g] nil while cgb
 		// references it → cfg.Validate rejects it. Emit an empty deny source
 		// (mirrors the allow-only guard above).
-		if deny[grp.Name] == nil && allow[grp.Name] == nil {
+		if len(members) > 0 && deny[grp.Name] == nil && allow[grp.Name] == nil {
 			deny[grp.Name] = []config.BytesSource{config.TextBytesSource()}
 		}
 	}
@@ -464,12 +422,6 @@ func (s *Store) SetClientSegment(client string, categories []string) error {
 		return errors.New("client identifier is required")
 	}
 
-	// overlayBlocking assigns the global enabled categories to the "default"
-	// pseudo-client; a segment under that name would be silently overwritten.
-	if client == "default" {
-		return errors.New("client name 'default' is reserved (global default categories)")
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -550,13 +502,6 @@ func (s *Store) AddAllowEntry(group, domain, comment string) (uint, error) {
 		group = "manual"
 	}
 
-	// "adlists" is the URL deny group (see AdlistEntry): a text entry there
-	// would couple every manual edit to a full re-download of all blocklist
-	// URLs and double-list the domain.
-	if group == "adlists" {
-		return 0, errors.New("group name 'adlists' is reserved for blocklist URLs")
-	}
-
 	// s.mu: every manual mutator must serialize against SnapshotTo/RestoreDB
 	// (see store.go SnapshotTo) and the validate-then-persist writers.
 	s.mu.Lock()
@@ -579,11 +524,6 @@ func (s *Store) AddDenyEntry(group, domain, comment string) (uint, error) {
 
 	if group == "" {
 		group = "manual"
-	}
-
-	// same reserved-group guard as AddAllowEntry
-	if group == "adlists" {
-		return 0, errors.New("group name 'adlists' is reserved for blocklist URLs")
 	}
 
 	s.mu.Lock()

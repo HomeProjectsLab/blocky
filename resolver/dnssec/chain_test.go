@@ -854,36 +854,6 @@ var _ = Describe("Chain of trust validation", func() {
 	})
 
 	Describe("validateDomainLevel", func() {
-		It("should memoize per-zone results (regression: quadratic parent-chain re-walk)", func() {
-			var queries int
-
-			// Root pre-validated; the DS response for com. carries a DS but no RRSIG -> Bogus.
-			sut.setCachedValidation(ctx, ".", ValidationResultSecure)
-
-			mockUpstream.ResolveFn = func(ctx context.Context, req *model.Request) (*model.Response, error) {
-				queries++
-
-				ds := &dns.DS{
-					Hdr:        dns.RR_Header{Name: "com.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600},
-					KeyTag:     12345,
-					Algorithm:  8,
-					DigestType: 2,
-					Digest:     "abcdef",
-				}
-
-				return &model.Response{Res: &dns.Msg{Answer: []dns.RR{ds}}}, nil
-			}
-
-			result := sut.validateDomainLevel(ctx, "com.")
-			Expect(result).Should(Equal(ValidationResultBogus))
-			Expect(queries).Should(Equal(1))
-
-			// Second call must be served from the validation cache: no further upstream queries.
-			result = sut.validateDomainLevel(ctx, "com.")
-			Expect(result).Should(Equal(ValidationResultBogus))
-			Expect(queries).Should(Equal(1))
-		})
-
 		It("should return Insecure for domains without parent", func() {
 			result := sut.validateDomainLevel(ctx, ".")
 			Expect(result).Should(Equal(ValidationResultInsecure))

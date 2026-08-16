@@ -39,6 +39,7 @@ function matchesFilter(item) {
 }
 
 function addRow(item) {
+    emptyMsg.hidden = true;
     const tr = document.createElement("tr");
     tr.dataset.band = band(item);
     tr._item = item;
@@ -58,24 +59,8 @@ function addRow(item) {
         tds[5].append(" ", tag); // outcome cell
     }
     if (!matchesFilter(item)) tr.hidden = true;
-    else emptyMsg.hidden = true;
     body.prepend(tr);
-    let trimmedVisible = false;
-    while (body.children.length > MAX_ROWS) {
-        if (!body.lastElementChild.hidden) trimmedVisible = true;
-        body.lastElementChild.remove();
-    }
-    if (trimmedVisible) updateEmpty();
-}
-
-// Show the empty message when no row is visible: "no matches" if rows exist
-// but the filters hide them all, the initial waiting text otherwise.
-function updateEmpty() {
-    const anyVisible = [...body.children].some((tr) => !tr.hidden);
-    emptyMsg.textContent = body.children.length
-        ? "No queries match the current filters."
-        : "Waiting for the first query…";
-    emptyMsg.hidden = anyVisible;
+    while (body.children.length > MAX_ROWS) body.lastElementChild.remove();
 }
 
 function flush() {
@@ -120,7 +105,6 @@ scrollBox.addEventListener("scroll", () => {
 // Client-side filters re-evaluate existing rows.
 function refilter() {
     for (const tr of body.children) tr.hidden = !matchesFilter(tr._item);
-    updateEmpty();
 }
 fClient.addEventListener("input", refilter);
 fDomain.addEventListener("input", refilter);

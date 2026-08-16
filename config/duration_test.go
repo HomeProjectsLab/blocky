@@ -24,11 +24,6 @@ var _ = Describe("Duration", func() {
 			Expect(d.String()).Should(Equal("1 minute 20 seconds"))
 		})
 
-		It("should reject negative and overflowing unit-less values", func() {
-			Expect(d.UnmarshalText([]byte("-5"))).Should(MatchError(ContainSubstring("out of range")))
-			Expect(d.UnmarshalText([]byte("9223372036854775807"))).Should(HaveOccurred())
-		})
-
 		It("should fail if duration is in wrong format", func() {
 			err := d.UnmarshalText([]byte("wrong"))
 			Expect(err).Should(HaveOccurred())

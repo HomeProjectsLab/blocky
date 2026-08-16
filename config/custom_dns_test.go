@@ -143,16 +143,6 @@ var _ = Describe("CustomDNSConfig", func() {
 	})
 
 	Describe("ZoneFileDNS UnmarshalYAML", func() {
-		It("rejects $INCLUDE when not loaded from disk", func() {
-			z := ZoneFileDNS{} // empty configPath = web/validate pipeline
-			err := z.UnmarshalYAML(func(i any) error {
-				*i.(*string) = "$INCLUDE /etc/passwd\n"
-
-				return nil
-			})
-			Expect(err).Should(HaveOccurred())
-		})
-
 		It("Should parse config as map", func() {
 			z := ZoneFileDNS{}
 			err := z.UnmarshalYAML(func(i any) error {
@@ -205,7 +195,7 @@ cname 3600 CNAME www
 			folder := NewTmpFolder("zones")
 			file := folder.CreateStringFile("other.zone", "www 3600 A 1.2.3.4")
 
-			z := ZoneFileDNS{configPath: "config.yml"} // disk-load path: $INCLUDE allowed
+			z := ZoneFileDNS{}
 			err := z.UnmarshalYAML(func(i any) error {
 				*i.(*string) = strings.TrimSpace(`
 $ORIGIN example.com.

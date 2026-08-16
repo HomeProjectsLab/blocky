@@ -106,23 +106,13 @@ func (s *Store) DeleteUpstreamGroup(name string) error {
 		return errors.New("the default upstream group can't be deleted")
 	}
 
-	// s.mu: every mutator must serialize against SnapshotTo/RestoreDB
-	// (see store.go SnapshotTo) like the other writers.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	return s.conn().Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("group_name = ?", name).Delete(&UpstreamEntry{}).Error; err != nil {
 			return fmt.Errorf("can't delete upstream entries: %w", err)
 		}
 
-		res := tx.Delete(&UpstreamGroup{Name: name})
-		if res.Error != nil {
-			return fmt.Errorf("can't delete upstream group: %w", res.Error)
-		}
-
-		if res.RowsAffected == 0 {
-			return fmt.Errorf("unknown upstream group '%s'", name)
+		if err := tx.Delete(&UpstreamGroup{Name: name}).Error; err != nil {
+			return fmt.Errorf("can't delete upstream group: %w", err)
 		}
 
 		return nil

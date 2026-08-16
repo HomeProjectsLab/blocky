@@ -49,13 +49,6 @@ const (
 	// in its single /stats/top call (at defaultTopN). Only this batch is
 	// preheated; any other column/n computes live.
 	defaultTopCols = "domain,blocked,client,transport"
-
-	// snapshotMaxAge caps how stale a published snapshot may be served. A
-	// persistently-failing reader used to keep ready=true forever, silently
-	// freezing every default-window /stats endpoint on the last good pass;
-	// past this age handlers fall through to the live reader, surfacing the
-	// real error. ~3 missed passes of headroom.
-	snapshotMaxAge = 3 * snapshotRefresh
 )
 
 // isDefaultWindow reports whether [from,to] is the preheated default window.
@@ -73,9 +66,8 @@ func isDefaultWindow(from, to time.Time) bool {
 type statsSnapshot struct {
 	mu           sync.RWMutex
 	ready        bool
-	computedAt   time.Time // when the published snapshot was computed (staleness cap)
-	catReady     bool      // categories were computed this pass (profiling on)
-	personaReady bool      // persona rollup was computed this pass (profiling on)
+	catReady     bool // categories were computed this pass (profiling on)
+	personaReady bool // persona rollup was computed this pass (profiling on)
 
 	overview   *querylog.Overview
 	buckets    []querylog.Bucket
@@ -244,14 +236,7 @@ func (snap *statsSnapshot) refresh(s *statsAPI) {
 	snap.personas = personas
 	snap.personaReady = personaReady
 	snap.ready = true
-	snap.computedAt = time.Now()
 	snap.mu.Unlock()
-}
-
-// fresh reports whether the published snapshot is recent enough to serve.
-// Caller must hold snap.mu.
-func (snap *statsSnapshot) fresh() bool {
-	return snap.ready && time.Since(snap.computedAt) <= snapshotMaxAge
 }
 
 func (snap *statsSnapshot) getOverview(from, to time.Time) (*querylog.Overview, bool) {
@@ -262,7 +247,7 @@ func (snap *statsSnapshot) getOverview(from, to time.Time) (*querylog.Overview, 
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.overview, snap.fresh()
+	return snap.overview, snap.ready
 }
 
 func (snap *statsSnapshot) getBuckets(from, to time.Time, step int64) ([]querylog.Bucket, bool) {
@@ -273,7 +258,7 @@ func (snap *statsSnapshot) getBuckets(from, to time.Time, step int64) ([]querylo
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.buckets, snap.fresh()
+	return snap.buckets, snap.ready
 }
 
 func (snap *statsSnapshot) getTop(from, to time.Time, colParam string, n int) (map[string][]querylog.TopItem, bool) {
@@ -284,7 +269,7 @@ func (snap *statsSnapshot) getTop(from, to time.Time, colParam string, n int) (m
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.top, snap.fresh()
+	return snap.top, snap.ready
 }
 
 func (snap *statsSnapshot) getCategories(from, to time.Time) ([]querylog.TopItem, bool) {
@@ -295,7 +280,7 @@ func (snap *statsSnapshot) getCategories(from, to time.Time) ([]querylog.TopItem
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.categories, snap.catReady && snap.fresh()
+	return snap.categories, snap.catReady
 }
 
 func (snap *statsSnapshot) getPersonas(from, to time.Time) (*querylog.PersonaRollup, bool) {
@@ -306,7 +291,7 @@ func (snap *statsSnapshot) getPersonas(from, to time.Time) (*querylog.PersonaRol
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.personas, snap.personaReady && snap.fresh()
+	return snap.personas, snap.personaReady
 }
 
 func (snap *statsSnapshot) getLatency(from, to time.Time) (*querylog.Percentiles, bool) {
@@ -317,7 +302,7 @@ func (snap *statsSnapshot) getLatency(from, to time.Time) (*querylog.Percentiles
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.latency, snap.fresh()
+	return snap.latency, snap.ready
 }
 
 // getClientList returns the shared default-window client list. It backs both
@@ -331,7 +316,7 @@ func (snap *statsSnapshot) getClientList(from, to time.Time) ([]querylog.ClientR
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.clientList, snap.fresh()
+	return snap.clientList, snap.ready
 }
 
 func (snap *statsSnapshot) getNoise(from, to time.Time) (*querylog.DecoyOverview, bool) {
@@ -342,5 +327,5 @@ func (snap *statsSnapshot) getNoise(from, to time.Time) (*querylog.DecoyOverview
 	snap.mu.RLock()
 	defer snap.mu.RUnlock()
 
-	return snap.noise, snap.fresh()
+	return snap.noise, snap.ready
 }

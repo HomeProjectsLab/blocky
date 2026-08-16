@@ -66,9 +66,8 @@ func (s *BytesSource) UnmarshalText(data []byte) error {
 	case strings.ContainsAny(source, "\n"):
 		*s = BytesSource{Type: BytesSourceTypeText, From: source}
 
-	// HTTP(S) — require the scheme separator so a local path like
-	// "httpdocs/ads.txt" isn't treated as a URL (which would fail-open the list)
-	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
+	// HTTP(S)
+	case strings.HasPrefix(source, "http"):
 		*s = BytesSource{Type: BytesSourceTypeHttp, From: source}
 
 	// Probably path to a local file

@@ -161,7 +161,7 @@ function presenceStrip(hist, { micro, ramp, showNow } = {}) {
     const hb = S.filters.hour;
     for (let h = 0; h < 24; h++) {
         const cell = el("div", "cell");
-        cell.style.background = hist[h] ? `color-mix(in srgb, ${col} ${Math.round((hist[h] / max) * 100)}%, transparent)` : "var(--bg2)";
+        cell.style.background = `color-mix(in srgb, ${col} ${Math.round((hist[h] / max) * 100)}%, transparent)`;
         if (showNow && h === NOW_HOUR) cell.classList.add("now");
         if (hb) { const [a, b] = hb; if (a <= b ? h >= a && h <= b : h >= a || h <= b) cell.classList.add("hb"); }
         tipify(cell, `<b>${String(h).padStart(2, "0")}:00</b> · ${hist[h]} queries`);
@@ -266,7 +266,7 @@ function renderHeatmap(mount) {
         const strip = el("div", "pstrip"); strip.style.height = "18px";
         for (let h = 0; h < 24; h++) {
             const cell = el("div", "cell");
-            cell.style.background = g.h[h] ? `color-mix(in srgb, ${groupColor(g.k)} ${Math.round((g.h[h] / gmax) * 100)}%, transparent)` : "var(--bg2)";
+            cell.style.background = `color-mix(in srgb, ${groupColor(g.k)} ${Math.round((g.h[h] / gmax) * 100)}%, transparent)`;
             if (h === NOW_HOUR) cell.classList.add("now");
             if (S.filters.hour) { const [a, b] = S.filters.hour; if (a <= b ? h >= a && h <= b : h >= a || h <= b) cell.classList.add("hb"); }
             tipify(cell, `<b>${esc(g.k)}</b> · ${String(h).padStart(2, "0")}:00 · ${g.h[h]}`);

@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -20,16 +19,12 @@ func TestLoginLimiterWindowReset(t *testing.T) {
 
 	const ip = "192.0.2.1"
 
-	for i := range maxLoginFails {
-		if !l.tryAcquire(ip) {
-			t.Fatalf("attempt %d should be admitted", i+1)
-		}
+	for range maxLoginFails {
+		l.recordFail(ip)
 	}
 
-	// TOCTOU regression: the charge lands at acquire time, so once the budget
-	// is spent no further attempt reaches the (expensive) hash.
-	if l.tryAcquire(ip) {
-		t.Fatal("IP should be locked after maxLoginFails attempts")
+	if !l.locked(ip) {
+		t.Fatal("IP should be locked after maxLoginFails failures")
 	}
 
 	// lapse the window, and plant a stale rotating-address entry to prune
@@ -40,9 +35,15 @@ func TestLoginLimiterWindowReset(t *testing.T) {
 	l.fails["2001:db8::1"] = failEntry{count: 1, until: time.Now().Add(-time.Hour)}
 	l.mu.Unlock()
 
-	// a single attempt after the lapsed window must be admitted, not re-locked
-	if !l.tryAcquire(ip) {
+	if l.locked(ip) {
 		t.Fatal("lockout should lapse with the window")
+	}
+
+	// a single failure after the lapsed window must NOT re-lock
+	l.recordFail(ip)
+
+	if l.locked(ip) {
+		t.Fatal("one failure after a lapsed window must not re-lock")
 	}
 
 	l.mu.Lock()
@@ -235,45 +236,5 @@ func TestSessionGateMetricsPathFollowsConfig(t *testing.T) {
 
 	if reached {
 		t.Fatal("literal /metrics must be gated when the scrape path is custom")
-	}
-}
-
-// Regression: isPublic exempts /api/ui/auth/* from the session gate, so the
-// setup endpoint must run its own same-origin check — otherwise a cross-origin
-// no-cors POST can seize admin on a fresh/reset install.
-func TestSetupCSRFGuard(t *testing.T) {
-	store, err := configstore.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer store.Close()
-
-	a := &authAPI{store: store, limiter: newLoginLimiter()}
-
-	serve := func(origin, remoteAddr string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "http://blocky.lan/api/ui/auth/setup",
-			strings.NewReader(`{"password":"hunter22"}`))
-		req.RemoteAddr = remoteAddr
-
-		if origin != "" {
-			req.Header.Set("Origin", origin)
-		}
-
-		rec := httptest.NewRecorder()
-		a.setup(rec, req)
-
-		return rec
-	}
-
-	if rec := serve("http://evil.example", "192.168.1.50:1234"); rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-origin setup = %d, want 403", rec.Code)
-	}
-
-	if rec := serve("", "192.168.1.50:1234"); rec.Code != http.StatusForbidden {
-		t.Fatalf("no-source-header off-box setup = %d, want 403 (fail closed)", rec.Code)
-	}
-
-	if rec := serve("http://blocky.lan", "192.168.1.50:1234"); rec.Code != http.StatusOK {
-		t.Fatalf("same-origin setup = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 }

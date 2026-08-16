@@ -1887,7 +1887,7 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "VendorFamilies names which telemetry families to draw beacon domains from\n(e.g. \"hue\", \"nest\", \"ring\", \"sonos\", \"tesla\", \"tuya\"; see knownVendorFamilies\nfor the full set). Empty = the engine's built-in default family set."
+                  "description": "VendorFamilies names which telemetry families to draw beacon domains from\n(e.g. \"apple\", \"google\", \"amazon\", \"microsoft\", \"samsung\", \"tuya\", \"sonos\").\nEmpty = the engine's built-in default family set."
                 },
                 "phantomDevicesPct": {
                   "type": "integer",

@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"time"
 
@@ -53,10 +52,6 @@ func (c *Duration) UnmarshalText(data []byte) error {
 
 	if minutes, err := strconv.Atoi(input); err == nil {
 		// number without unit: use minutes to ensure back compatibility
-		if minutes < 0 || int64(minutes) > math.MaxInt64/int64(time.Minute) {
-			return fmt.Errorf("invalid duration '%s': out of range", input)
-		}
-
 		*c = Duration(time.Duration(minutes) * time.Minute)
 
 		log.Log().Warnf("Setting a duration without a unit is deprecated. Please use '%s min' instead.", input)

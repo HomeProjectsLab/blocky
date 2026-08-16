@@ -535,12 +535,6 @@ func (s *Store) RestoreDB(newPath string) error {
 
 	_ = os.Remove(bakPath)
 
-	// A whole-file swap bypasses the overlay-table dirty hooks and may carry an
-	// OLDER updated_at than lastApplied: mark dirty explicitly so Status()
-	// reports the restored config as not applied yet.
-	s.lastMutated.Store(time.Now().UnixNano())
-	s.lastApplied = time.Time{}
-
 	rlog.Info("config database restored")
 
 	return nil

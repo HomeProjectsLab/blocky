@@ -105,17 +105,11 @@ type BlockingResolver struct {
 	// shadowSuppressWindow (a page fires A+AAAA and repeats for one tracker).
 	shadowSeen map[string]time.Time
 	shadowMu   sync.Mutex
-
-	// shadowSem bounds concurrent shadow goroutines; when full, shadows are
-	// dropped (never queued) so a blocked-query flood can't pile up goroutines.
-	shadowSem chan struct{}
 }
 
 const (
 	shadowSuppressWindow = 60 * time.Second
 	shadowTimeout        = 5 * time.Second
-	// ponytail: fixed cap, per-client cap if legit shadow load grows
-	shadowMaxInFlight = 32
 )
 
 // scheduledGroup pairs a list group name with optional schedules.
@@ -274,7 +268,6 @@ func NewBlockingResolver(ctx context.Context,
 			enableTimer: time.NewTimer(0),
 		},
 		clientGroups: newClientGroupsIndex(cfg),
-		shadowSem:    make(chan struct{}, shadowMaxInFlight),
 	}
 
 	res.fqdnIPCache = expirationcache.NewCacheWithOnExpired[[]net.IP](ctx, expirationcache.Options{
@@ -520,19 +513,7 @@ func (r *BlockingResolver) shadowBlockedQuery(ctx context.Context,
 		Decoy:           true,
 	}
 
-	// Bounded semaphore: drop (never queue) when shadowMaxInFlight goroutines
-	// are already egressing, so a blocked-query flood can't pile up goroutines.
-	select {
-	case r.shadowSem <- struct{}{}:
-	default:
-		logger.Debug("shadow query dropped: too many in flight")
-
-		return
-	}
-
 	go func() {
-		defer func() { <-r.shadowSem }()
-
 		// Detach from the per-request ctx (cancelled once the block response is
 		// written to the client) but keep a bounded timeout so the shadow still
 		// egresses and never leaks. r.next is below blocking, so it won't re-block.
