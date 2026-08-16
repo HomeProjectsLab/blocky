@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 )
 
 // snapshot is an immutable copy of the dashboard state taken under the mutex so
@@ -52,6 +53,57 @@ func (s *snapshot) cacheFrac() float64 {
 
 func setCell(s tcell.Screen, x, y int, r rune, style tcell.Style) {
 	s.SetContent(x, y, r, nil, style)
+}
+
+// ---- centering discipline (one rule for every hero) ----
+
+func centerX(r Rect, w int) int {
+	if w >= r.W {
+		return r.X
+	}
+
+	return r.X + (r.W-w)/2
+}
+
+func centerY(r Rect, h int) int {
+	if h >= r.H {
+		return r.Y
+	}
+
+	return r.Y + (r.H-h)/2
+}
+
+// drawCentered draws one horizontally-centered line in r (the small-panel /
+// fallback path).
+func drawCentered(s tcell.Screen, r Rect, style tcell.Style, text string) {
+	t := trunc(text, r.W)
+	drawText(s, centerX(r, runewidth.StringWidth(t)), r.Y, style, t)
+}
+
+// heroDraw draws the 5-row hero number h+v centered in r, painting only non-space
+// cells (transparent over the panel/graph). Degrades to one centered line when r
+// is too small for the block font.
+func heroDraw(s tcell.Screen, r Rect, style tcell.Style, text string) {
+	lines := heroLines(text)
+	w := runewidth.StringWidth(lines[0])
+
+	if r.H < 5 || r.W < w {
+		drawCentered(s, Rect{r.X, centerY(r, 1), r.W, 1}, style, text)
+
+		return
+	}
+
+	ox, oy := centerX(r, w), centerY(r, 5)
+	for i, ln := range lines {
+		x := ox
+		for _, ru := range ln {
+			if ru != ' ' {
+				setCell(s, x, oy+i, ru, style)
+			}
+
+			x++
+		}
+	}
 }
 
 // panelBox draws a box-drawing border with an inline title and returns the inner
@@ -139,7 +191,10 @@ func panelTitle(s tcell.Screen, r Rect, snap *snapshot) {
 	styBarSub := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue).Dim(true)
 	drawText(s, r.X, r.Y, styBar, trunc(brand, r.W))
 	drawText(s, r.X+len(brand), r.Y, styBarSub, trunc(tag, r.W-len(brand)))
-	drawText(s, r.X+len(brand)+len(tag), r.Y, styBar, trunc(info, r.W-len(brand)-len(tag)))
+	// reserve the right-side clock zone (+1 gap) so a long hostname never runs
+	// under the date.
+	infoW := r.W - len(brand) - len(tag) - len(right) - 1
+	drawText(s, r.X+len(brand)+len(tag), r.Y, styBar, trunc(info, infoW))
 	if r.W > len(right) {
 		drawText(s, r.X+r.W-len(right), r.Y, styBar, right)
 	}
@@ -206,79 +261,74 @@ func memGauge(sys System, v Vitals) (float64, string) {
 	return 0, "N/A"
 }
 
-// panelQPS draws the throughput sparkline + a big banner number for the current
-// queries-per-second.
+// panelQPS: big centered throughput number over a full-width area graph.
 func panelQPS(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
-	inner := panelBox(s, r, caps.Glyphs, styHdr, fmt.Sprintf("THROUGHPUT  %.0f q/s", snap.qps))
+	inner := panelBox(s, r, caps.Glyphs, styHdr, "THROUGHPUT q/s")
 	if inner.Empty() {
 		return
 	}
 
-	spark := sparkline(snap.qpsHist, inner.W, caps.Glyphs)
-	drawText(s, inner.X, inner.Y, styBase.Foreground(tcell.ColorAqua), spark)
-
-	if inner.H >= 4 {
-		lines := bannerLines(fmt.Sprintf("%.0f", snap.qps))
-		by := inner.Y + inner.H - 3
-		for i, l := range lines {
-			drawText(s, inner.X, by+i, styBase.Foreground(tcell.ColorAqua).Bold(true), trunc(l, inner.W))
-		}
-	}
+	num, body := inner.Rows(min(6, inner.H))
+	heroDraw(s, num, styBase.Foreground(tcell.ColorAqua).Bold(true), fmt.Sprintf("%.0f", snap.qps))
+	drawGraph(s, body, caps, styBase.Foreground(tcell.ColorAqua), snap.qpsHist)
 }
 
-// panelBlocked draws the hero blocked-percentage banner.
+// panelBlocked: big centered blocked-% over a gauge + count subtitle.
 func panelBlocked(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
 	inner := panelBox(s, r, caps.Glyphs, styHdr, "BLOCKED")
 	if inner.Empty() {
 		return
 	}
 
-	frac := snap.blockFrac()
-	red := styBase.Foreground(tcell.ColorRed).Bold(true)
+	num, body := inner.Rows(min(6, inner.H))
+	heroDraw(s, num, styBase.Foreground(tcell.ColorRed).Bold(true), pct(snap.blockFrac()))
 
-	if inner.H >= 3 {
-		lines := bannerLines(fmt.Sprintf("%.0f%%", frac*100))
-		off := (inner.H - 3) / 2
-		for i, l := range lines {
-			cx := inner.X + (inner.W-len([]rune(l)))/2
-			if cx < inner.X {
-				cx = inner.X
-			}
-			drawText(s, cx, inner.Y+off+i, red, trunc(l, inner.W))
+	if body.H >= 1 {
+		bw := body.W - 8
+		if bw < 4 {
+			bw = 4
 		}
-	} else {
-		drawText(s, inner.X, inner.Y, red, pct(frac))
+
+		drawGauge(s, body.X, body.Y, caps, styBase, "", snap.blockFrac(), bw, pct(snap.blockFrac()))
 	}
 
-	sub := fmt.Sprintf("of %d", snap.overview.Queries)
-	drawText(s, inner.X, inner.Y+inner.H-1, styDim, trunc(sub, inner.W))
+	if body.H >= 2 {
+		sub := fmt.Sprintf("%s of %s", fmtCount(snap.overview.Blocked), fmtCount(snap.overview.Queries))
+		drawCentered(s, Rect{body.X, body.Y + 1, body.W, 1}, styDim, sub)
+	}
 }
 
-// panelCache draws hit/miss gauges plus latency percentiles.
+// panelCache: big centered cache-% over hit/miss gauges + latency percentiles.
 func panelCache(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
-	inner := panelBox(s, r, caps.Glyphs, styHdr, fmt.Sprintf("CACHE  %.0f%%", snap.cacheFrac()*100))
+	inner := panelBox(s, r, caps.Glyphs, styHdr, "CACHE")
 	if inner.Empty() {
 		return
 	}
 
+	num, body := inner.Rows(min(6, inner.H))
+	heroDraw(s, num, styBase.Foreground(tcell.ColorTeal).Bold(true), pct(snap.cacheFrac()))
+
 	hit := snap.cacheFrac()
-	barW := inner.W - 16
+	barW := body.W - 16
 	if barW < 4 {
 		barW = 4
 	}
 
-	drawGauge(s, inner.X, inner.Y, caps, styBase, "HIT ", hit, barW, pct(hit))
-	if inner.H >= 2 {
-		drawGauge(s, inner.X, inner.Y+1, caps, styBase, "MISS", 1-hit, barW, pct(1-hit))
+	if body.H >= 1 {
+		drawGauge(s, body.X, body.Y, caps, styBase, "HIT ", hit, barW, pct(hit))
 	}
 
-	if inner.H >= 3 {
+	if body.H >= 2 {
+		drawGauge(s, body.X, body.Y+1, caps, styBase, "MISS", 1-hit, barW, pct(1-hit))
+	}
+
+	if body.H >= 3 {
 		l := snap.latency
 		if l.P50 == 0 && l.P95 == 0 {
 			l.P50, l.P95 = snap.overview.AvgMs, snap.overview.P95Ms
 		}
-		lat := fmt.Sprintf("p50 %.0fms  p95 %.0fms  p99 %.0fms", l.P50, l.P95, l.P99)
-		drawText(s, inner.X, inner.Y+inner.H-1, styDim, trunc(lat, inner.W))
+		lat := fmt.Sprintf("p50 %.0f · p95 %.0f · p99 %.0fms", l.P50, l.P95, l.P99)
+		drawText(s, body.X, body.Y+2, styDim, trunc(lat, body.W))
 	}
 }
 
@@ -323,15 +373,42 @@ func panelTicker(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
 	newest := len(rows) - 1
 	for i, q := range rows {
 		style, mark := tickerStyle(caps, q)
-		line := fmt.Sprintf("%s %c %-14s %-30s %-5s %s",
-			hhmmss(q.TS), mark, trunc(q.Client, 14), trunc(q.Question, 30), trunc(q.Qtype, 5), resultText(q))
+		line := tickerRow(hhmmss(q.TS), mark, q.Client, q.Question, q.Qtype, resultText(q), inner.W)
 
 		if i == newest {
 			style = style.Bold(true).Reverse(true) // cheap sweep on the freshest row
 		}
 
-		drawText(s, inner.X, inner.Y+i, style, trunc(line, inner.W))
+		drawText(s, inner.X, inner.Y+i, style, line)
 	}
+}
+
+// tickerRow lays out one live-query row to fit exactly w columns, reserving the
+// result/verdict column FIRST (right-aligned) so it is never the truncation
+// victim; the domain gets the remaining width, and client/qtype shrink on narrow
+// tiers. Returns a w-wide string (space-padded), so the highlighted newest row
+// paints a full-width bar.
+func tickerRow(ts string, mark rune, client, question, qtype, res string, w int) string {
+	resW := runewidth.StringWidth(res)
+	if w <= resW+2 {
+		return trunc(res, w) // no room for columns: keep the verdict
+	}
+
+	leftBudget := w - resW - 1 // reserve the result column + a one-cell gap
+
+	clientW := 14
+	if leftBudget < 56 {
+		clientW = 10
+	}
+	if leftBudget < 40 {
+		clientW = 8
+	}
+
+	// question before qtype so a long domain steals qtype's space, not the reverse.
+	left := fmt.Sprintf("%s %c %-*s %s %s", ts, mark, clientW, trunc(client, clientW), question, qtype)
+	left = trunc(left, leftBudget)
+
+	return runewidth.FillRight(left, leftBudget) + " " + res
 }
 
 func tickerStyle(caps Caps, q QueryItem) (tcell.Style, rune) {

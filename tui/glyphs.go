@@ -30,7 +30,7 @@ var unicodeGlyphs = GlyphSet{
 	OK:       '○',
 	Cached:   '▪',
 	Decoy:    '·',
-	TL:       '┌', TR: '┐', BL: '└', BR: '┘', H: '─', V: '│', TeeL: '├', TeeR: '┤',
+	TL:       '╭', TR: '╮', BL: '╰', BR: '╯', H: '─', V: '│', TeeL: '├', TeeR: '┤',
 }
 
 var fbconGlyphs = GlyphSet{
@@ -90,6 +90,49 @@ func bannerLines(text string) [3]string {
 		}
 
 		for j := 0; j < 3; j++ {
+			rows[j] += g[j]
+		}
+	}
+
+	return rows
+}
+
+// heroFont is the FINAL 5-row × 4-col hero number font — chunky seven-segment
+// block digits, the most legible answer to "big numbers hard to read". Only
+// █ ▀ ▄ + space (all CP437-safe, none in the fbcon-banned ranges), so it renders
+// on the Pi framebuffer and passes TestFbconNeverRendersBraille. Glyph pitch is
+// 5 cols (4 + one space gap). No letters: units/labels stay normal-size.
+var heroFont = map[rune][5]string{
+	'0': {"████", "█  █", "█  █", "█  █", "████"},
+	'1': {" ██ ", "  █ ", "  █ ", "  █ ", "████"},
+	'2': {"████", "   █", "████", "█   ", "████"},
+	'3': {"████", "   █", " ███", "   █", "████"},
+	'4': {"█  █", "█  █", "████", "   █", "   █"},
+	'5': {"████", "█   ", "████", "   █", "████"},
+	'6': {"████", "█   ", "████", "█  █", "████"},
+	'7': {"████", "   █", "  █ ", " █  ", " █  "},
+	'8': {"████", "█  █", "████", "█  █", "████"},
+	'9': {"████", "█  █", "████", "   █", "████"},
+	'%': {"█  ▄", "▀ ▄▀", " ▄▀ ", "▄▀ █", "   ▀"},
+	'.': {"    ", "    ", "    ", " ██ ", " ██ "},
+	' ': {"    ", "    ", "    ", "    ", "    "},
+}
+
+// heroLines renders text as 5 rows, one space between glyphs. Unknown runes → space.
+func heroLines(text string) [5]string {
+	var rows [5]string
+
+	for i, r := range text {
+		g, ok := heroFont[r]
+		if !ok {
+			g = heroFont[' ']
+		}
+
+		for j := 0; j < 5; j++ {
+			if i > 0 {
+				rows[j] += " "
+			}
+
 			rows[j] += g[j]
 		}
 	}

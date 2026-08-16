@@ -397,69 +397,67 @@ func (d *Dashboard) drawTiny(s tcell.Screen, root Rect, snap *snapshot) {
 	panelFooter(s, footer, snap)
 }
 
-// drawMedium: title · system band · two-column body · footer.
+// drawMedium: title · system band · heroes · mid (ticker + lists) · bottom · footer.
 func (d *Dashboard) drawMedium(s tcell.Screen, root Rect, snap *snapshot) {
 	caps := snap.caps
 
 	title, rest := root.Rows(1)
 	sys, rest := rest.Rows(2)
-	body, footer := rest.RowsBottom(1)
+	rest, footer := rest.RowsBottom(1)
 
-	cols := body.SplitH(3, 2)
-	left, right := cols[0], cols[1]
-
-	leftMeters, ticker := left.Rows(3)
+	b := rest.SplitV(10, 12, 6) // heroes/mid/bottom
+	heroes, mid, bottom := b[0], b[1], b[2]
 
 	panelTitle(s, title, snap)
 	panelSystem(s, sys, caps, snap)
 
-	// left meter strip
-	x := drawGauge(s, leftMeters.X+1, leftMeters.Y, caps, styBase, "QPS", clamp(snap.qps/50, 1), 10, fmt.Sprintf("%.0f q/s", snap.qps))
-	_ = x
-	drawGauge(s, leftMeters.X+1, leftMeters.Y+1, caps, styBase, "BLOCK", snap.blockFrac(), 12, pct(snap.blockFrac()))
-	drawGauge(s, leftMeters.X+1, leftMeters.Y+2, caps, styBase, "CACHE", snap.cacheFrac(), 12, pct(snap.cacheFrac()))
+	hp := heroes.SplitH(4, 3, 3)
+	panelQPS(s, hp[0], caps, snap)
+	panelBlocked(s, hp[1], caps, snap)
+	panelCache(s, hp[2], caps, snap)
 
-	panelTicker(s, ticker, caps, snap)
+	mp := mid.SplitH(3, 2)
+	panelTicker(s, mp[0], caps, snap)
+	rc := mp[1].SplitV(1, 1)
+	panelTopList(s, rc[0], caps, "TOP DOMAINS", snap.topDom)
+	panelClients(s, rc[1], caps, snap)
 
-	rParts := right.SplitV(2, 2, 1)
-	panelTopList(s, rParts[0], caps, "TOP DOMAINS", snap.topDom)
-	panelClients(s, rParts[1], caps, snap)
-	panelDecoy(s, rParts[2], caps, snap)
+	bp := bottom.SplitH(2, 3)
+	panelDecoy(s, bp[0], caps, snap)
+	panelBlocklist(s, bp[1], caps, snap)
 
 	panelFooter(s, footer, snap)
 }
 
-// drawLarge: full HDMI grid, every cell used.
+// drawLarge: full HDMI grid in four bands — heroes · lists · ticker · bottom.
 func (d *Dashboard) drawLarge(s tcell.Screen, root Rect, snap *snapshot) {
 	caps := snap.caps
 
 	title, rest := root.Rows(1)
-	sys, rest := rest.Rows(3)
+	sys, rest := rest.Rows(2) // panelSystem draws exactly 2 rows; no dead 3rd row
 	rest, footer := rest.RowsBottom(1)
-	rest, lower := rest.RowsBottom(4)
 
-	parts := rest.SplitV(2, 3)
-	upper, ticker := parts[0], parts[1]
-
-	cols := upper.SplitH(6, 3, 5, 6)
-	leftCol := cols[0].SplitV(1, 1)
-	topCol := cols[2].SplitV(1, 1)
+	b := rest.SplitV(13, 14, 11, 6) // heroes/lists/ticker/bottom — reclaimed row → taller heroes
+	heroes, lists, ticker, bottom := b[0], b[1], b[2], b[3]
 
 	panelTitle(s, title, snap)
 	panelSystem(s, sys, caps, snap)
 
-	panelQPS(s, leftCol[0], caps, snap)
-	panelCache(s, leftCol[1], caps, snap)
-	panelBlocked(s, cols[1], caps, snap)
-	panelTopList(s, topCol[0], caps, "TOP DOMAINS", snap.topDom)
-	panelTopList(s, topCol[1], caps, "TOP BLOCKED", snap.topBlocked)
-	panelClients(s, cols[3], caps, snap)
+	hp := heroes.SplitH(4, 3, 3)
+	panelQPS(s, hp[0], caps, snap)
+	panelBlocked(s, hp[1], caps, snap)
+	panelCache(s, hp[2], caps, snap)
+
+	lp := lists.SplitH(3, 3, 4)
+	panelTopList(s, lp[0], caps, "TOP DOMAINS", snap.topDom)
+	panelTopList(s, lp[1], caps, "TOP BLOCKED", snap.topBlocked)
+	panelClients(s, lp[2], caps, snap)
 
 	panelTicker(s, ticker, caps, snap)
 
-	lo := lower.SplitH(1, 2)
-	panelDecoy(s, lo[0], caps, snap)
-	panelBlocklist(s, lo[1], caps, snap)
+	bp := bottom.SplitH(1, 2)
+	panelDecoy(s, bp[0], caps, snap)
+	panelBlocklist(s, bp[1], caps, snap)
 
 	panelFooter(s, footer, snap)
 }
@@ -498,16 +496,21 @@ func drawClients(s tcell.Screen, x, y, maxY int, base tcell.Style, clients []Cli
 		if ip != "" {
 			parts = append(parts, ip)
 		}
-		if c.Shared || c.NatAggregate {
-			parts = append(parts, c.SharedLabel)
-		} else if c.OS != "" || len(c.Vendor) > 0 || len(c.Apps) > 0 {
+		switch {
+		case c.Shared || c.NatAggregate:
+			// R3: shared address never leaks the per-device facet union — only
+			// its shared label, and nothing (not a dangling separator) when empty.
+			if c.SharedLabel != "" {
+				parts = append(parts, c.SharedLabel)
+			}
+		case c.OS != "" || len(c.Vendor) > 0 || len(c.Apps) > 0:
 			if c.OS != "" {
 				parts = append(parts, c.OS)
 			}
 			parts = append(parts, c.Vendor...)
 			parts = append(parts, c.Model...)
 			parts = append(parts, c.Apps...)
-		} else if c.DeviceGuess != "" {
+		case c.DeviceGuess != "":
 			parts = append(parts, c.DeviceGuess)
 		}
 		sub := strings.Join(parts, " · ")
