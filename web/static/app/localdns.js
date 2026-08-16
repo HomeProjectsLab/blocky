@@ -2,11 +2,12 @@
 // The server is authoritative; client-side checks are lenient hints only.
 import { getJSON, send } from "./api.js";
 
-const TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "SRV", "NS", "PTR", "CAA"];
+const TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "SRV", "NS", "PTR", "CAA", "NXDOMAIN"];
 const PLACEHOLDER = {
     A: "10.0.0.5", AAAA: "fd00::5", CNAME: "target.lan", MX: "10 mail.lan",
     TXT: "v=spf1 -all", SRV: "10 5 5060 sip.lan", NS: "ns1.lan", PTR: "host.lan",
     CAA: `0 issue "letsencrypt.org"`,
+    NXDOMAIN: "(no value — answers NXDOMAIN)",
 };
 
 const statusEl = document.getElementById("ld-status");
@@ -56,8 +57,15 @@ function addRow(rec = { name: "", type: "A", ttl: 3600, value: "" }) {
     const err = el("div", { class: "err-line" });
     err.hidden = true;
 
-    const syncPh = () => { value.placeholder = PLACEHOLDER[type.value] || ""; };
+    // NXDOMAIN entries carry no value — disable + clear the value cell for them.
+    const syncPh = () => {
+        value.placeholder = PLACEHOLDER[type.value] || "";
+        const nx = type.value === "NXDOMAIN";
+        value.disabled = nx;
+        if (nx) value.value = "";
+    };
     type.addEventListener("change", syncPh);
+    syncPh();
 
     const del = el("button", { type: "button", class: "btn-icon btn-danger", title: "remove", text: "✕" });
     del.addEventListener("click", () => tr.remove());
@@ -80,6 +88,7 @@ function checkRow(f) {
     const type = f.type.value;
     const val = f.value.value.trim();
     if (!name || /\s/.test(name)) return "name required, no spaces";
+    if (type === "NXDOMAIN") return ""; // name-only: answers NXDOMAIN, no value/ttl
     if (!/^\d+$/.test(f.ttl.value.trim() || "0")) return "ttl must be an integer ≥ 0";
     if (type === "A" && !/^\d+\.\d+\.\d+\.\d+$/.test(val)) return "A wants an IPv4 address";
     if (type === "AAAA" && !val.includes(":")) return "AAAA wants an IPv6 address";

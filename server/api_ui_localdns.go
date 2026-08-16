@@ -59,6 +59,19 @@ func (u *uiAPI) getLocalDNS(rw http.ResponseWriter, _ *http.Request) {
 		})
 	}
 
+	// NXDOMAIN entries aren't real RRs (they live in customDNS.nxdomain, not the
+	// zone), so surface them as valueless Type="NXDOMAIN" rows in the same table.
+	nx, err := u.store.GetLocalDNSNXDomains()
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	for _, d := range nx {
+		rows = append(rows, localDNSRow{Name: d, Type: "NXDOMAIN", Value: ""})
+	}
+
 	// A parse error here means the stored zone is bad; surface the rows we got
 	// plus the raw text so the escape-hatch textarea can still fix it.
 	writeJSON(rw, http.StatusOK, map[string]any{"records": rows, "zone": zone})
@@ -80,11 +93,29 @@ func (u *uiAPI) putLocalDNS(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// NXDOMAIN rows aren't zone RRs — split them out of the structured rows so the
+	// zone carries only real records and the nxdomain list carries the rest.
+	var rrRows []localDNSRow
+
+	var nxDomains []string
+
+	if body.Zone == nil {
+		for _, r := range body.Records {
+			if strings.EqualFold(strings.TrimSpace(r.Type), "NXDOMAIN") {
+				if n := strings.TrimSpace(r.Name); n != "" {
+					nxDomains = append(nxDomains, n)
+				}
+			} else {
+				rrRows = append(rrRows, r)
+			}
+		}
+	}
+
 	var text string
 	if body.Zone != nil {
 		text = *body.Zone // escape hatch: raw text
 	} else {
-		text = assembleZone(body.Records)
+		text = assembleZone(rrRows)
 	}
 
 	if bad, err := validateZone(text); err != nil {
@@ -103,7 +134,7 @@ func (u *uiAPI) putLocalDNS(rw http.ResponseWriter, req *http.Request) {
 	// silently skips (0 records) or splits (>1) — validateZone still passes, so
 	// without this the PUT would 200 yet drop/mangle the submitted record. The raw
 	// escape hatch is exempt: it may legitimately carry comments and blank lines.
-	if body.Zone == nil && countRecords(text) != len(body.Records) {
+	if body.Zone == nil && countRecords(text) != len(rrRows) {
 		writeJSON(rw, http.StatusBadRequest,
 			map[string]string{"error": "a record did not round-trip (check for ';' or empty name/type)"})
 
@@ -114,6 +145,15 @@ func (u *uiAPI) putLocalDNS(rw http.ResponseWriter, req *http.Request) {
 		badRequest(rw, err)
 
 		return
+	}
+
+	// The raw escape hatch edits only the zone; leave nxdomain untouched there.
+	if body.Zone == nil {
+		if err := u.store.SetLocalDNSNXDomains(nxDomains); err != nil {
+			badRequest(rw, err)
+
+			return
+		}
 	}
 
 	u.store.RequestApply()
