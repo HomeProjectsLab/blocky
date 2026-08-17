@@ -97,6 +97,12 @@ document.getElementById("csv-btn").addEventListener("click", () => {
     URL.revokeObjectURL(a.href);
 });
 
+// Download the whole query log DB (server VACUUM-INTO snapshot streamed as a
+// .db attachment). A plain navigation — the browser handles the download.
+document.getElementById("q-download").addEventListener("click", () => {
+    window.location = "/api/ui/queries/export";
+});
+
 // Clear the entire query log (raw rows + hourly aggregates). Config, blocklists
 // and client identity are kept.
 const purgeBtn = document.getElementById("q-purge");

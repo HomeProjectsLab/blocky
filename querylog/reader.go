@@ -100,6 +100,14 @@ func (r *Reader) Close() error {
 	return sqlDB.Close()
 }
 
+// SnapshotTo writes a consistent, standalone copy of the query-log DB to dst
+// (which must not exist). VACUUM INTO is WAL-safe, works on the read-only handle,
+// and reads a committed snapshot while the writer keeps appending. dst must sit on
+// a real disk, not tmpfs — the log can be hundreds of MB. Mirrors Store.SnapshotTo.
+func (r *Reader) SnapshotTo(dst string) error {
+	return r.db.Exec("VACUUM INTO ?", dst).Error
+}
+
 // latHistogram is the fixed latency histogram of aggHourly, summed over a time range.
 type latHistogram [6]uint64
 

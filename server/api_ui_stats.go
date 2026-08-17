@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +55,7 @@ func registerStatsUIEndpoints(
 	})
 
 	router.Get("/api/ui/queries", s.queries)
+	router.Get("/api/ui/queries/export", s.exportQueryLog)
 	router.Delete("/api/ui/queries", s.purgeQueries)
 	router.Get("/api/ui/stream", s.stream)
 	router.Get("/api/ui/logs", s.logsStream)        // live application log SSE
@@ -293,6 +297,56 @@ func (s *statsAPI) purgeQueries(rw http.ResponseWriter, _ *http.Request) {
 	}
 
 	rw.WriteHeader(http.StatusNoContent)
+}
+
+// exportQueryLog streams a fresh, consistent snapshot of the whole sqlite query
+// log as a .db download. The snapshot temp dir lives on the SAME filesystem as
+// the DB (the USB-SSD), NOT the default RAM-backed /tmp: the query log can be
+// hundreds of MB and a tmpfs snapshot would OOM the Pi. 503 unless sqlite.
+func (s *statsAPI) exportQueryLog(rw http.ResponseWriter, _ *http.Request) {
+	reader := s.readerOr503(rw) // handles non-sqlite (errNotSqlite) and not-ready
+	if reader == nil {
+		return
+	}
+
+	src := s.qlCfg.Target.Reveal()
+
+	tmp, err := os.MkdirTemp(filepath.Dir(src), "blocky-qlexport")
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+	defer os.RemoveAll(tmp)
+
+	snap := filepath.Join(tmp, "querylog.db")
+	if err := reader.SnapshotTo(snap); err != nil {
+		internalError(rw, err)
+
+		return
+	}
+
+	f, err := os.Open(snap)
+	if err != nil {
+		internalError(rw, err)
+
+		return
+	}
+	defer f.Close()
+
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "blocky"
+	}
+
+	name := fmt.Sprintf("jungleblock-querylog-%s-%s.db", host, time.Now().Format("2006-01-02"))
+
+	rw.Header().Set(contentTypeHeader, "application/octet-stream")
+	rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, name))
+
+	if _, err := io.Copy(rw, f); err != nil {
+		logger().Error("can't stream query log export: ", err)
+	}
 }
 
 func (s *statsAPI) overview(rw http.ResponseWriter, req *http.Request) {
