@@ -41,6 +41,36 @@ balenaEtcher (both read `.img.xz` directly), or on the command line with
 Then point your LAN's DHCP DNS (or each device) at the Pi's IP. The web UI is at
 `http://<pi-ip>/`.
 
+## Remote dashboard over telnet
+
+`jungleblock-telnet.service` broadcasts the same console dashboard to any TCP
+client on **:2323** — from any LAN machine:
+
+```
+telnet <pi-ip> 2323     # or: nc <pi-ip> 2323
+```
+
+It's **read-only and one-way**: every client's input is discarded, so nothing on
+the network can send a command to the box — it only reads the local API and
+writes rendered frames out. One render feeds all viewers (N clients cost one API
+load). It sends plain ANSI (no telnet IAC negotiation), so `nc` works too.
+
+⚠️ The stream is **plaintext and unauthenticated** and shows query data (domains,
+clients) to anyone who can reach the port. It binds all interfaces by default. To
+limit it to the box, change `:2323` → `127.0.0.1:2323` in the unit and reach it
+over an SSH tunnel. Fixed virtual size (`--cols`/`--rows`, default 100×30).
+
+The service is baked into the image and enabled on boot. On an already-running box
+the unit isn't there yet (only a fresh flash installs it) — copy it in once the
+updated binary has been pulled (the `--telnet` flag ships with the image, so wait
+out one `jungleblock-update.timer` cycle first):
+
+```
+sudo cp jungleblock-telnet.service /etc/systemd/system/   # from deploy/rpi/systemd/
+sudo systemctl daemon-reload
+sudo systemctl enable --now jungleblock-telnet.service
+```
+
 ## Updates are pull-based — no SSH needed
 
 The appliance runs from containers and pull a newer image via a host systemd timer (jungleblock-update.timer) — polling
