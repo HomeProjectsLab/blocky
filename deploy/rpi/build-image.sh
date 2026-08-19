@@ -140,9 +140,12 @@ install -Dm644 "$HERE/systemd/jungleblock-stack.service" "$ROOT_MNT/etc/systemd/
 # The console dashboard runs as a HOST unit bound to tty1, NOT a container: a
 # container with tty:true draws into a dockerd-held PTY that never reaches HDMI.
 install -Dm644 "$HERE/systemd/jungleblock-dashboard.service" "$ROOT_MNT/etc/systemd/system/jungleblock-dashboard.service"
+# Read-only telnet broadcast of the same dashboard (headless, no tty) on :2323.
+install -Dm644 "$HERE/systemd/jungleblock-telnet.service" "$ROOT_MNT/etc/systemd/system/jungleblock-telnet.service"
 install -d "$ROOT_MNT/etc/systemd/system/multi-user.target.wants"
 ln -sf ../jungleblock-stack.service     "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-stack.service"
 ln -sf ../jungleblock-dashboard.service "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-dashboard.service"
+ln -sf ../jungleblock-telnet.service    "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/jungleblock-telnet.service"
 
 # Auto-update (replaces the abandoned Watchtower container): a host systemd
 # timer pulls the latest image and recreates jungleblock if it changed.

@@ -70,14 +70,14 @@ func TestDrawGraphBrailleGating(t *testing.T) {
 	vals := []float64{1, 4, 2, 8, 5, 9, 3}
 
 	uni := mtScreen(t, 20, 4)
-	drawGraph(uni, Rect{0, 0, 20, 4}, Detect(1<<24, "xterm", false), tcell.StyleDefault, vals)
+	drawGraph(uni, Rect{0, 0, 20, 4}, Detect(1<<24, "xterm", false), tcell.StyleDefault, vals, 0)
 	uni.Show()
 	if !strings.ContainsFunc(mtScreenText(uni), func(r rune) bool { return r >= 0x2800 && r <= 0x28FF }) {
 		t.Error("braille caps: drawGraph should emit braille dots")
 	}
 
 	fb := mtScreen(t, 20, 4)
-	drawGraph(fb, Rect{0, 0, 20, 4}, Detect(8, "linux", false), tcell.StyleDefault, vals)
+	drawGraph(fb, Rect{0, 0, 20, 4}, Detect(8, "linux", false), tcell.StyleDefault, vals, 0)
 	fb.Show()
 	for _, r := range mtScreenText(fb) {
 		if r >= 0x2800 && r <= 0x28FF {

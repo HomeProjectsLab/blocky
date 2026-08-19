@@ -37,19 +37,21 @@ func (b *Braille) blit(s tcell.Screen, r Rect, style tcell.Style) {
 	}
 }
 
-// drawGraph fills r with an auto-scaled area graph of values (oldest→newest,
-// newest at right). Braille caps → 2×4 dot canvas filled from baseline up in the
-// style's accent. Else (fbcon) → height-filling block columns using only █ ▄
-// space (CP437/fbcon-safe) — strictly better than the old 1-row spark.
-func drawGraph(s tcell.Screen, r Rect, caps Caps, style tcell.Style, values []float64) {
+// drawGraph fills r with an area graph of values (oldest→newest, newest at
+// right), scaled to maxv. A caller-supplied maxv is a sticky scale that stops the
+// graph rescaling (flapping) every frame; maxv<=0 falls back to the window max.
+// Braille caps → 2×4 dot canvas filled from baseline up in the style's accent.
+// Else (fbcon) → height-filling block columns using only █ ▄ space (CP437-safe).
+func drawGraph(s tcell.Screen, r Rect, caps Caps, style tcell.Style, values []float64, maxv float64) {
 	if r.Empty() {
 		return
 	}
 
-	maxv := 0.0
-	for _, v := range values {
-		if v > maxv {
-			maxv = v
+	if maxv <= 0 {
+		for _, v := range values {
+			if v > maxv {
+				maxv = v
+			}
 		}
 	}
 

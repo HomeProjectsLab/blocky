@@ -29,6 +29,7 @@ type snapshot struct {
 
 	qps         float64
 	qpsHist     []float64
+	graphMax    float64
 	configDirty bool
 	paused      bool
 }
@@ -261,16 +262,34 @@ func memGauge(sys System, v Vitals) (float64, string) {
 	return 0, "N/A"
 }
 
-// panelQPS: big centered throughput number over a full-width area graph.
+// panelQPS: big centered throughput number with a "queries / sec" unit caption
+// (the hero font is digits-only, so units render normal-size beneath it), over a
+// sticky-scaled area graph that no longer rescales/flaps every frame.
 func panelQPS(s tcell.Screen, r Rect, caps Caps, snap *snapshot) {
-	inner := panelBox(s, r, caps.Glyphs, styHdr, "THROUGHPUT q/s")
+	inner := panelBox(s, r, caps.Glyphs, styHdr, "THROUGHPUT")
 	if inner.Empty() {
 		return
 	}
 
-	num, body := inner.Rows(min(6, inner.H))
-	heroDraw(s, num, styBase.Foreground(tcell.ColorAqua).Bold(true), fmt.Sprintf("%.0f", snap.qps))
-	drawGraph(s, body, caps, styBase.Foreground(tcell.ColorAqua), snap.qpsHist)
+	aqua := styBase.Foreground(tcell.ColorAqua).Bold(true)
+
+	// Too short for hero + caption + graph: just the number.
+	if inner.H < 7 {
+		heroDraw(s, inner, aqua, fmtQPS(snap.qps))
+		return
+	}
+
+	heroDraw(s, Rect{inner.X, inner.Y, inner.W, 5}, aqua, fmtQPS(snap.qps))
+
+	caption := "queries / sec"
+	if snap.graphMax >= 1 {
+		caption += fmt.Sprintf("   peak %s/s", fmtCount(int64(snap.graphMax+0.5)))
+	}
+
+	drawCentered(s, Rect{inner.X, inner.Y + 5, inner.W, 1}, styDim, caption)
+
+	body := Rect{inner.X, inner.Y + 6, inner.W, inner.H - 6}
+	drawGraph(s, body, caps, styBase.Foreground(tcell.ColorAqua), snap.qpsHist, snap.graphMax)
 }
 
 // panelBlocked: the big blocked-% as the hero, with a proportion bar and count
@@ -567,6 +586,20 @@ func fmtBytes(b uint64) string {
 	default:
 		return fmt.Sprintf("%dB", b)
 	}
+}
+
+// fmtQPS formats the throughput hero: one decimal below 10 (a quiet home network
+// hovers under 1 q/s — "%.0f" would just read 0), whole numbers above.
+func fmtQPS(v float64) string {
+	if v < 0 {
+		v = 0
+	}
+
+	if v < 10 {
+		return fmt.Sprintf("%.1f", v)
+	}
+
+	return fmt.Sprintf("%.0f", v)
 }
 
 func fmtCount(n int64) string {

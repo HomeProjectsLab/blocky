@@ -1,0 +1,25 @@
+[Unit]
+Description=JungleBlock dashboard over telnet (read-only broadcast)
+# Order after the stack like the console dashboard; readiness is the restart loop.
+After=jungleblock-stack.service
+Wants=jungleblock-stack.service
+
+[Service]
+Type=simple
+# Same baked binary as the container/console, a pure API/SSE consumer reaching the
+# host-networked resolver at localhost:80. Strictly ONE-WAY: every client's input
+# is discarded, so nobody on the network can send a command to the box — it only
+# reads the local API and writes rendered frames out.
+#
+# Binds :2323 on ALL interfaces so `telnet <pi-ip> 2323` (or `nc`) works from any
+# LAN machine. This stream is PLAINTEXT and UNAUTHENTICATED and shows query data
+# (domains, clients) to anyone who can reach the port. To limit it to the box
+# itself, change ":2323" to "127.0.0.1:2323" and reach it over an SSH tunnel.
+ExecStart=/usr/local/bin/jungleblock dashboard --telnet :2323 --api-url http://localhost:80
+# If the API isn't up yet the process exits and systemd restarts it — same
+# readiness wait as the console dashboard.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

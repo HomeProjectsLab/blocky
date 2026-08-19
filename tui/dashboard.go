@@ -26,6 +26,8 @@ type Dashboard struct {
 
 	mu          sync.Mutex
 	connected   bool
+	failStreak  int     // consecutive failed fast polls; splash only after grace, not on one blip
+	graphMax    float64 // sticky vertical scale for the QPS graph (see nextGraphMax)
 	system      System
 	overview    Overview
 	latency     Latency
@@ -163,6 +165,43 @@ func (d *Dashboard) refreshLoop() {
 	}
 }
 
+// disconnectGrace is how many consecutive failed fast polls (one per d.refresh)
+// must occur before the UI drops to the splash. Absorbs transient Pi3 stalls.
+const disconnectGrace = 3
+
+const (
+	qpsSmoothing  = 0.5  // EMA weight on each new per-tick throughput sample
+	graphMaxDecay = 0.05 // per-tick easing of the graph scale toward the window max
+)
+
+// nextGraphMax advances the graph's sticky vertical scale: grow to a new peak
+// immediately, otherwise ease down toward the window max by graphMaxDecay. This
+// keeps the scale steady frame-to-frame so the graph stops flapping.
+func nextGraphMax(cur, windowMax float64) float64 {
+	if windowMax > cur {
+		return windowMax
+	}
+
+	return cur + (windowMax-cur)*graphMaxDecay
+}
+
+// applyPollResult folds one fast-poll outcome into the connect state. A single
+// failure must NOT blank the UI: only disconnectGrace consecutive failures flip
+// connected to false, which stops the dashboard<->splash flapping. Caller holds mu.
+func (d *Dashboard) applyPollResult(ok bool) {
+	if ok {
+		d.failStreak = 0
+		d.connected = true
+
+		return
+	}
+
+	d.failStreak++
+	if d.failStreak >= disconnectGrace {
+		d.connected = false
+	}
+}
+
 func (d *Dashboard) refreshFast() {
 	// Fetch everything before taking the lock: holding d.mu across HTTP calls
 	// freezes draw/SSE/input whenever the API stalls.
@@ -191,13 +230,22 @@ func (d *Dashboard) refreshFast() {
 	// divide by measured elapsed, not d.refresh: stalled API calls above can
 	// stretch a tick to ~20s and a fixed 1s divisor would report ~20x real QPS
 	now := timeNow()
+	firstSample := d.lastSample.IsZero()
 	elapsed := now.Sub(d.lastSample)
 
-	if d.lastSample.IsZero() || elapsed <= 0 {
+	if firstSample || elapsed <= 0 {
 		elapsed = d.refresh
 	}
 
-	d.qps = float64(d.streamCount-d.lastCount) / elapsed.Seconds()
+	// light EMA on the per-tick rate so the throughput number and its graph read
+	// as a calm trend instead of jittering between 0 and a burst every tick.
+	raw := float64(d.streamCount-d.lastCount) / elapsed.Seconds()
+	if firstSample {
+		d.qps = raw
+	} else {
+		d.qps += (raw - d.qps) * qpsSmoothing
+	}
+
 	d.lastCount = d.streamCount
 	d.lastSample = now
 
@@ -206,13 +254,24 @@ func (d *Dashboard) refreshFast() {
 		d.qpsHist = d.qpsHist[len(d.qpsHist)-120:]
 	}
 
-	if err != nil {
-		d.connected = false
+	// sticky vertical scale for the graph: jump up to a new peak at once, ease
+	// back down slowly. Recomputing the window max every frame made the whole
+	// graph rescale (flap) each tick; this holds the scale steady between peaks.
+	wmax := 0.0
+	for _, v := range d.qpsHist {
+		if v > wmax {
+			wmax = v
+		}
+	}
 
+	d.graphMax = nextGraphMax(d.graphMax, wmax)
+
+	d.applyPollResult(err == nil)
+
+	if err != nil {
 		return
 	}
 
-	d.connected = true
 	d.system = sys
 
 	if oErr == nil {
@@ -305,6 +364,7 @@ func (d *Dashboard) buildSnapshot() *snapshot {
 		rows:        append([]QueryItem(nil), d.rows...),
 		qps:         d.qps,
 		qpsHist:     append([]float64(nil), d.qpsHist...),
+		graphMax:    d.graphMax,
 		configDirty: d.configDirty,
 		paused:      d.paused,
 	}
@@ -342,7 +402,10 @@ func (d *Dashboard) draw(s tcell.Screen) {
 
 	if !snap.connected {
 		d.drawSplash(s, w, h)
-		s.Show()
+		// Sync (full repaint) not Show (cell diff): coming off a fully-painted
+		// dashboard frame, the fbcon diff leaves stale glyphs behind the splash.
+		// A full repaint from the cleared buffer guarantees a blank background.
+		s.Sync()
 
 		return
 	}

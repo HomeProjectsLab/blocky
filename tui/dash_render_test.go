@@ -31,6 +31,7 @@ func cannedDash(caps Caps) *Dashboard {
 	}
 	d.qpsHist = []float64{2, 5, 3, 8, 6, 9, 12, 7, 4, 10, 42}
 	d.qps = 42
+	d.graphMax = 50
 	d.rows = []QueryItem{
 		{TS: "2026-08-15T14:22:07Z", Client: "laptop", Question: "analytics.google.com", Qtype: "A", Rtype: "BLOCKED"},
 		{TS: "2026-08-15T14:22:07Z", Client: "phone", Question: "api.weather.com", Qtype: "A", Rtype: "RESOLVED"},
